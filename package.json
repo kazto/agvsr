@@ -1,0 +1,10 @@
+{
+  "name": "agvsr",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "spike:s1": "bun run spikes/s1-live-claude.ts"
+  }
+}
