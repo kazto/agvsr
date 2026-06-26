@@ -23,8 +23,20 @@ const RoleSchema = z.object({
   instances: z.number().int().positive().default(1),
 });
 
+const HooksSchema = z
+  .object({
+    /** Shell command to run when a job completes successfully (D26). */
+    on_job_done: z.string().optional(),
+    /** Shell command to run when a job fails for any reason (D26). */
+    on_job_failed: z.string().optional(),
+    /** Shell command to run when supervisor sends a message to the user (D22c / D26). */
+    on_supervisor_message: z.string().optional(),
+  })
+  .optional();
+
 const TeamSchema = z.object({
   roles: z.record(z.string(), RoleSchema),
+  hooks: HooksSchema,
 });
 
 export type RoleConfig = z.infer<typeof RoleSchema>;

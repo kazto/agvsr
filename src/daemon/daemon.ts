@@ -10,6 +10,7 @@ import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import { composeCharter, driverFor, runTurn, type TurnResult } from "../adapters/index.ts";
+import { fireHook, type HookEvent } from "../hooks.ts";
 import type { Job, Request, Response, RoleSummary } from "../protocol.ts";
 
 function resolveTeam(): TeamConfig | null {
@@ -50,6 +51,8 @@ export interface StartDaemonOptions {
   turnRunner?: TurnRunner;
   /** D17 fail-safe: mark stale running jobs interrupted when a daemon starts. */
   interruptRunningJobsOnStart?: boolean;
+  /** Override hook runner for testing (default: fireHook). */
+  hookRunner?: (cmd: string, event: HookEvent) => void;
 }
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -104,6 +107,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const team = options.team === undefined ? resolveTeam() : options.team;
   const endpoint = options.endpoint ?? ipcEndpoint();
   const runner = team ? (options.turnRunner ?? defaultTurnRunner(team)) : null;
+  const hookRun = options.hookRunner ?? fireHook;
+  const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
+    const cmd = team?.hooks?.[hookName];
+    if (cmd) hookRun(cmd, event);
+  };
   if (options.interruptRunningJobsOnStart !== false) {
     for (const job of store.interruptRunningJobs()) {
       store.createMessage({
@@ -183,26 +191,30 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
     if (result.outcome.exitCode !== 0) {
       if (role === SUPERVISOR || result.outcome.timedOut) {
+        const reason = `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`;
         store.setJobStatus(job.id, "failed");
         store.createMessage({
           job_id: job.id,
           from_role: "daemon",
           to_role: "user",
           kind: "failure",
-          body: `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`,
+          body: reason,
         });
+        hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
       } else {
         const failures = incrementFailure(job.id, role);
         const threshold = maxWorkerFailures();
         if (failures >= threshold) {
+          const reason = `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
           store.setJobStatus(job.id, "failed");
           store.createMessage({
             job_id: job.id,
             from_role: "daemon",
             to_role: "user",
             kind: "failure",
-            body: `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+            body: reason,
           });
+          hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
           const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
           store.createMessage({
@@ -237,18 +249,21 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             kind: "failure",
             body: message,
           });
+          hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: message });
         } else {
           const failures = incrementFailure(job.id, role);
           const threshold = maxWorkerFailures();
           if (failures >= threshold) {
+            const reason = `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
             store.setJobStatus(job.id, "failed");
             store.createMessage({
               job_id: job.id,
               from_role: "daemon",
               to_role: "user",
               kind: "failure",
-              body: `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+              body: reason,
             });
+            hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
           } else {
             const body = `${role} turn crashed: ${message} (crash ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
             store.createMessage({
@@ -340,7 +355,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           body,
           refs,
         });
-        if (to !== "user") enqueueDispatch(job, to, body);
+        if (to !== "user") {
+          enqueueDispatch(job, to, body);
+        } else if (from === SUPERVISOR) {
+          hook("on_supervisor_message", { event: "supervisor_message", job_id, body });
+        }
         return ok(req.id, { queued: true, message: msg });
       }
 
@@ -375,6 +394,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "completion",
           body: req.params.result,
         });
+        hook("on_job_done", { event: "job_done", job_id: job.id, goal: job.goal, result: req.params.result });
         return ok(req.id, { done: true });
       }
 
@@ -389,6 +409,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "failure",
           body: req.params.reason,
         });
+        hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: req.params.reason });
         return ok(req.id, { failed: true });
       }
 
@@ -425,6 +446,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "failure",
           body: "Job stopped by user.",
         });
+        hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: "Job stopped by user." });
         return ok(req.id, { stopped: true });
       }
 

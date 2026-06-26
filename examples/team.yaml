@@ -15,3 +15,11 @@ roles:
   qa:
     adapter: agy
     model: gemini-3-pro
+
+# Optional event hooks (D26). Each value is a shell command run via `sh -c`.
+# The event JSON object is written to the command's stdin.
+# All three keys are optional — omit any you don't need.
+# hooks:
+#   on_job_done: "notify-send 'agvsr' 'Job complete'"
+#   on_job_failed: "notify-send 'agvsr' 'Job failed'"
+#   on_supervisor_message: "osascript -e 'display notification \"Supervisor needs input\" with title \"agvsr\"'"

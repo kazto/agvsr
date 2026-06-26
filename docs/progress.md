@@ -136,6 +136,18 @@ Current validation: **38 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **41 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 11 — Notification Event Hooks ✅
+
+| File                       | What it does                                                                                                                                                                                                                                   |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/hooks.ts`             | `fireHook(cmd, event)` — runs a user shell command with event JSON on stdin. Fire-and-forget; failures are swallowed so hooks never crash the daemon. Uses `sh -c` on POSIX, `cmd /c` on Windows.                                             |
+| `src/config/team.ts`       | Adds optional `hooks` block to `TeamSchema` with `on_job_done`, `on_job_failed`, `on_supervisor_message` string fields.                                                                                                                        |
+| `src/daemon/daemon.ts`     | Fires hooks at every job-done/failed transition (`job.complete`, `job.fail`, `job.stop`, supervisor timeout, Tier2 watchdog, supervisor crash) and when supervisor sends a message to user (`msg.send` from=supervisor to=user). `hookRunner` is injectable for testing. |
+| `examples/team.yaml`       | Adds commented-out `hooks:` section with platform examples.                                                                                                                                                                                    |
+| `test/hooks.test.ts`       | 8 tests: schema parsing (full/partial/absent), `on_job_done`, `on_job_failed` (via fail/stop), `on_supervisor_message`, and no-hooks path.                                                                                                     |
+
+Current validation: **49 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -213,4 +225,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–10 merged, 41 tests pass |
+| `main` | Phase 0–11 merged, 49 tests pass |
