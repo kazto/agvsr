@@ -5,6 +5,7 @@
  * persists in the session). Session id = the `thread.started` event's thread_id.
  * NOTE: `exec resume` does not accept --sandbox (set via -c in Phase 4).
  */
+import { codexMcpConfigArgs } from "./mcp.ts";
 import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
 
 interface CodexEvent {
@@ -59,7 +60,13 @@ export const codexDriver: CliDriver = {
   adapter: "codex",
 
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
-    const common = ["--json", "--skip-git-repo-check", "-m", spec.model];
+    const common = [
+      "--json",
+      "--skip-git-repo-check",
+      ...codexMcpConfigArgs({ cwd: spec.cwd, env: spec.env }),
+      "-m",
+      spec.model,
+    ];
     if (sessionId) {
       return { bin: "codex", args: ["exec", "resume", sessionId, ...common, message] };
     }

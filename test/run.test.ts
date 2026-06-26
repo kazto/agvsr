@@ -36,10 +36,24 @@ function fakeDriver(opts: { sessionId: string | null; resolve?: string }): CliDr
   };
 }
 
+function slowDriver(): CliDriver {
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({
+      bin: "bun",
+      args: ["-e", `setTimeout(() => process.stdout.write("late\\n"), 1000)`],
+    }),
+    createParser: () => textParser(null),
+  };
+}
+
 describe("runTurn", () => {
   it("streams parsed events and synthesizes a result", async () => {
     const { events, outcome } = await runTurn(fakeDriver({ sessionId: "SID" }), spec, null, "go");
-    expect(events.filter((e) => e.kind === "text").map((e) => (e as any).text)).toEqual(["alpha", "beta"]);
+    expect(events.filter((e) => e.kind === "text").map((e) => (e as any).text)).toEqual([
+      "alpha",
+      "beta",
+    ]);
     expect(events.at(-1)).toEqual({ kind: "result", ok: true, text: "alpha\nbeta" });
     expect(outcome.sessionId).toBe("SID");
     expect(outcome.exitCode).toBe(0);
@@ -47,7 +61,19 @@ describe("runTurn", () => {
   });
 
   it("falls back to resolveSessionId when the parser has none", async () => {
-    const { outcome } = await runTurn(fakeDriver({ sessionId: null, resolve: "RESOLVED" }), spec, null, "go");
+    const { outcome } = await runTurn(
+      fakeDriver({ sessionId: null, resolve: "RESOLVED" }),
+      spec,
+      null,
+      "go",
+    );
     expect(outcome.sessionId).toBe("RESOLVED");
+  });
+
+  it("kills a turn that exceeds the timeout", async () => {
+    const { events, outcome } = await runTurn(slowDriver(), spec, null, "go", { timeoutMs: 25 });
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.exitCode).not.toBe(0);
+    expect(events.at(-1)).toEqual({ kind: "result", ok: false, text: "turn timed out after 25ms" });
   });
 });

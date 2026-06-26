@@ -50,6 +50,15 @@ export interface StartDaemonOptions {
   turnRunner?: TurnRunner;
 }
 
+const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
+
+function turnTimeoutMs(): number {
+  const raw = process.env.AGVSR_TURN_TIMEOUT_MS;
+  if (!raw) return DEFAULT_TURN_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_TIMEOUT_MS;
+}
+
 function defaultTurnRunner(team: TeamConfig): TurnRunner {
   return async ({ role, job, message, sessionId, systemPrompt, env }) => {
     const roleConfig = team.roles[role];
@@ -67,6 +76,7 @@ function defaultTurnRunner(team: TeamConfig): TurnRunner {
       },
       sessionId,
       message,
+      { timeoutMs: turnTimeoutMs() },
     );
   };
 }
@@ -196,6 +206,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           model: r.model,
         }));
         return ok(req.id, { roles });
+      }
+
+      case "msg.list": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        return ok(req.id, { messages: store.listMessages(req.params.job_id) });
       }
 
       case "msg.send": {

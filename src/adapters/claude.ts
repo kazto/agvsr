@@ -3,6 +3,7 @@
  * and `--resume <session_id>`; the system prompt goes in via --append-system-prompt.
  * Session id comes from the `system/init` (or `result`) event.
  */
+import { claudeMcpConfig } from "./mcp.ts";
 import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
 
 interface ClaudeEvent {
@@ -69,6 +70,9 @@ export const claudeDriver: CliDriver = {
       spec.model,
       "--append-system-prompt",
       spec.systemPrompt,
+      "--mcp-config",
+      claudeMcpConfig({ cwd: spec.cwd, env: spec.env }),
+      "--strict-mcp-config",
     ];
     if (sessionId) args.push("--resume", sessionId);
     args.push(message);

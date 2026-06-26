@@ -58,35 +58,37 @@ Key finding: all three CLIs fit a unified **resume-invoke** model (D1). No persi
 | `test/ipc.test.ts`                              | Fake-runner daemon tests for job dispatch, allowed routing, forbidden worker-to-worker routing, escalation routing, and session resume.                                                                                                             |
 | `test/store.test.ts`                            | Message audit persistence coverage.                                                                                                                                                                                                                 |
 
-Current validation: **32 passing tests, 0 failing**; `bun run typecheck` passes.
-
-Remaining Phase 3/next hardening:
-
-- Wire CLI-specific MCP server registration flags/config into adapter spawns, not just env (`AGVSR_SOCK`, `AGVSR_ROLE`, `AGVSR_JOB_ID`, `AGVSR_ALLOWED`).
-- Add human-visible result surfacing beyond audit rows for `job.complete` / `job.fail` (stdout/event hook later, D26).
-- Decide whether failed agent turns should immediately fail the job or become supervisor-visible failures once watchdog tiers exist.
+Current validation: **34 passing tests, 0 failing**; `bun run typecheck` passes.
 
 ---
 
-## Next Step: MCP Spawn Wiring and Runtime Hardening
+### Phase 4 — MCP Spawn Wiring and Runtime Hardening ✅
 
-The daemon now dispatches jobs and routes messages with a fake-runner-tested core. The next step is making real spawned CLIs reliably load the MCP shim so `agvsr_send` / `agvsr_complete` can round-trip in an actual agent job.
+| File                                                            | What it does                                                                                                                                                                                                                                |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/adapters/mcp.ts`                                           | Shared agvsr MCP stdio server config generation. Claude gets `--mcp-config` JSON; Codex gets `-c mcp_servers.agvsr.*` overrides; Antigravity can emit an `mcp_config.json` payload because its CLI help exposes no per-invocation MCP flag. |
+| `src/adapters/claude.ts`                                        | Adds `--mcp-config <json>` and `--strict-mcp-config` so spawned claude-code turns load only the agvsr MCP shim supplied by the daemon.                                                                                                      |
+| `src/adapters/codex.ts`                                         | Adds per-invocation Codex config overrides for `[mcp_servers.agvsr]`, including command/args/cwd/env/required.                                                                                                                              |
+| `src/adapters/run.ts`                                           | Adds the first deterministic turn timeout watchdog (`timeoutMs`) and kills the spawned process on timeout.                                                                                                                                  |
+| `src/daemon/daemon.ts`                                          | Default runner passes a 10-minute turn timeout (`AGVSR_TURN_TIMEOUT_MS` override).                                                                                                                                                          |
+| `src/protocol.ts` + `src/daemon/daemon.ts` + `src/cli/agvsr.ts` | Adds `msg.list` and `agvsr logs <job-id>` so humans can read audit messages, including completion/failure rows.                                                                                                                             |
+| `test/{adapters,run,ipc}.test.ts`                               | Covers MCP argv/config generation, timeout kill behavior, and audit log listing.                                                                                                                                                            |
 
-### What to build next
+Current validation: **34 passing tests, 0 failing**; `bun run typecheck` passes.
 
-1. **Adapter-specific MCP registration**
-   - claude-code: add the correct stdio MCP server registration for `bun run src/mcp/shim.ts`.
-   - codex: add the equivalent MCP server config/flag for `codex exec`.
-   - agy: document or generate the `mcp_config.json` path/config needed for Antigravity.
+Remaining next work:
 
-2. **Real job smoke test**
-   - Minimal team with one supervisor role using a controllable/local fake CLI or a deterministic fixture driver.
-   - End-to-end path: `job.create` → supervisor turn → `job.complete` via shim → job status `done`.
+1. **Real CLI smoke tests**
+   - Run a controlled local job through actual claude-code/codex with the shim loaded and verify `agvsr_send` / `agvsr_complete` round-trip.
+   - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
 
-3. **Runtime hardening**
-   - Surface `job.complete` / `job.fail` results to the human-facing CLI/logs path.
-   - Introduce the first watchdog timeout around `runTurn`.
-   - Persist role session IDs in SQLite later (current Phase 3 registry is in-memory by design).
+2. **Watchdog tiering**
+   - Replace immediate failure on failed worker turns with supervisor-visible Tier1 events where appropriate.
+   - Add loop/no-progress detection beyond wall-clock timeout.
+
+3. **Persistence hardening**
+   - Persist role session IDs in SQLite; current registry remains in-memory.
+   - Add message read tracking to CLI logs if follow mode is introduced.
 
 ### Key design constraints to respect
 
@@ -117,7 +119,7 @@ src/
     run.ts             ← runTurn() shared runner
     index.ts           ← driverFor() registry
   mcp/shim.ts          ← stdio MCP server (agvsr_send, escalate, complete, fail)
-  cli/agvsr.ts         ← CLI entrypoint
+  cli/agvsr.ts         ← CLI entrypoint (job/status/team/logs)
 charters/
   scaffold.md          ← Layer 1 protocol (immutable, filled at spawn time)
   defaults/

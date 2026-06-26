@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import type { Job, PingResult, Response, RoleSummary } from "../protocol.ts";
+import type { Job, Message, PingResult, Response, RoleSummary } from "../protocol.ts";
 
 const USAGE = `agvsr ${VERSION}
 
@@ -16,6 +16,7 @@ Usage:
   agvsr ping                   Check the daemon is up
   agvsr job "<goal>" [--cwd D] Submit a job (D is the target repo, default: cwd)
   agvsr status                 List jobs
+  agvsr logs <job-id>          Show audit messages for a job
   agvsr team                   Show configured roles
 `;
 
@@ -97,6 +98,29 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "logs": {
+      const jobId = rest[0];
+      if (!jobId) {
+        console.error("a job id is required, e.g. agvsr logs <job-id>");
+        process.exit(1);
+      }
+      await withClient(async (c) => {
+        const { messages } = unwrap(
+          await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId }),
+        );
+        if (messages.length === 0) {
+          console.log("no messages");
+          return;
+        }
+        for (const m of messages) {
+          const refs = m.refs ? ` refs=${m.refs}` : "";
+          console.log(`[${m.created_at}] ${m.kind} ${m.from_role} -> ${m.to_role}${refs}`);
+          console.log(m.body);
+        }
+      });
+      return;
+    }
 
     case "team":
       await withClient(async (c) => {

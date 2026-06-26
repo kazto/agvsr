@@ -35,6 +35,8 @@ export interface TurnOutcome {
   /** The agent's final assistant text for this turn. */
   finalText: string;
   exitCode: number;
+  /** True when the deterministic runtime watchdog killed the turn (D14). */
+  timedOut?: boolean;
 }
 
 /** Result of driving one turn: collected events + the outcome. */

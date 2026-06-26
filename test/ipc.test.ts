@@ -122,6 +122,10 @@ describe("CLI <-> daemon over local IPC", () => {
     expect(last.message).toBe("please implement");
     expect(last.env.AGVSR_ALLOWED!).toBe("supervisor");
     expect(sent.ok && JSON.parse(sent.result.message.refs!)).toEqual(["docs/design.md"]);
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: job!.id });
+    expect(logs.ok).toBe(true);
+    expect(logs.ok && logs.result.messages.some((m) => m.body === "please implement")).toBe(true);
     c.close();
   });
 

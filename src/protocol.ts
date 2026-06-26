@@ -38,6 +38,7 @@ export type Request =
   | { id: string; type: "request"; method: "job.list"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "job.get"; params: { id: string } }
   | { id: string; type: "request"; method: "team.get"; params?: Record<string, never> }
+  | { id: string; type: "request"; method: "msg.list"; params: { job_id: string } }
   | {
       id: string;
       type: "request";

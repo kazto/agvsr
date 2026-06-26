@@ -20,3 +20,4 @@ export function driverFor(adapter: Adapter): CliDriver {
 export * from "./types.ts";
 export { runTurn } from "./run.ts";
 export { composeCharter } from "./charter.ts";
+export { agyMcpConfig, claudeMcpConfig, codexMcpConfigArgs } from "./mcp.ts";
