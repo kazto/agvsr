@@ -58,6 +58,8 @@ export function codexMcpConfigArgs(runtime: McpRuntime): string[] {
     `mcp_servers.${AGVSR_MCP_SERVER}.enabled=true`,
     "-c",
     `mcp_servers.${AGVSR_MCP_SERVER}.required=true`,
+    "-c",
+    `mcp_servers.${AGVSR_MCP_SERVER}.default_tools_approval_mode="approve"`,
   ];
 }
 

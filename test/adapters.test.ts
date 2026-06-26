@@ -81,6 +81,17 @@ describe("codex driver", () => {
     expect(fresh.args).toEqual(
       expect.arrayContaining(codexMcpConfigArgs({ cwd: "/work/repo", env: spec("codex").env })),
     );
+    expect(fresh.args).toEqual(
+      expect.arrayContaining(["-c", 'mcp_servers.agvsr.default_tools_approval_mode="approve"']),
+    );
+    expect(fresh.args).toEqual(
+      expect.arrayContaining([
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="danger-full-access"',
+      ]),
+    );
     expect(fresh.args.at(-1)).toContain("SYSTEM-PROMPT");
     expect(fresh.args.at(-1)).toContain("do it");
 
@@ -88,6 +99,14 @@ describe("codex driver", () => {
     expect(resumed.args.slice(0, 3)).toEqual(["exec", "resume", "T1"]);
     expect(resumed.args).toEqual(
       expect.arrayContaining(codexMcpConfigArgs({ cwd: "/work/repo", env: spec("codex").env })),
+    );
+    expect(resumed.args).toEqual(
+      expect.arrayContaining([
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="danger-full-access"',
+      ]),
     );
     expect(resumed.args).not.toContain("--sandbox"); // resume rejects it (S2)
   });

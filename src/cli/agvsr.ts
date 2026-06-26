@@ -3,6 +3,8 @@
  * `agvsr` — the thin CLI client (D6/D15). Connects to the daemon over local IPC
  * and issues one request. `agvsr daemon` runs the daemon itself in the foreground.
  */
+import { homedir } from "node:os";
+import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
@@ -15,13 +17,19 @@ Usage:
   agvsr daemon                      Run the agvsrd daemon in the foreground
   agvsr ping                        Check the daemon is up
   agvsr job "<goal>" [--cwd D]      Submit a job (D is the target repo, default: cwd)
-  agvsr status                      List jobs
+  agvsr status [job-id]             List jobs, or show one job with recent audit state
   agvsr logs <job-id> [-f]          Show audit messages for a job
   agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
   agvsr stop <job-id>               Stop a running job (mark failed)
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
 `;
+
+function normalizeCwd(input: string): string {
+  const expanded =
+    input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
+  return resolve(expanded);
+}
 
 function unwrap<T>(res: Response<T>): T {
   if (!res.ok) {
@@ -81,7 +89,7 @@ async function main(argv: string[]): Promise<void> {
         console.error('a goal is required, e.g. agvsr job "add a health endpoint"');
         process.exit(1);
       }
-      const cwd = values.cwd ?? process.cwd();
+      const cwd = normalizeCwd(values.cwd ?? process.cwd());
       await withClient(async (c) => {
         const { job } = unwrap(await c.request<{ job: Job }>("job.create", { goal, cwd }));
         console.log(`job ${job.id} created (${job.status})`);
@@ -91,6 +99,30 @@ async function main(argv: string[]): Promise<void> {
 
     case "status":
       await withClient(async (c) => {
+        const jobId = rest[0];
+        if (jobId) {
+          const { job } = unwrap(await c.request<{ job: Job }>("job.get", { id: jobId }));
+          const { messages } = unwrap(
+            await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId }),
+          );
+          const last = messages.at(-1);
+          console.log(`${job.id}  ${job.status}`);
+          console.log(`goal: ${job.goal}`);
+          console.log(`cwd: ${job.cwd}`);
+          console.log(`branch: ${job.branch ?? "(not set)"}`);
+          console.log(`created_at: ${job.created_at}`);
+          console.log(`updated_at: ${job.updated_at}`);
+          console.log(`messages: ${messages.length}`);
+          if (last) {
+            console.log(`last_message_at: ${last.created_at}`);
+            console.log(`last_message: ${last.kind} ${last.from_role} -> ${last.to_role}`);
+            console.log(last.body);
+          } else {
+            console.log("last_message: (none)");
+          }
+          return;
+        }
+
         const { jobs } = unwrap(await c.request<{ jobs: Job[] }>("job.list"));
         if (jobs.length === 0) {
           console.log("no jobs");

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
@@ -12,6 +12,7 @@ import type { Job, Message, PingResult, PushFrame, RoleSummary } from "../src/pr
 const tmp = join(tmpdir(), `agvsr-test-${randomUUID()}`);
 const sock = `${tmp}.sock`;
 const store = `${tmp}.sqlite`;
+const repo = `${tmp}-repo`;
 const TEAM = parseTeam(`
 roles:
   supervisor: { adapter: claude-code, model: claude-opus-4-8 }
@@ -33,6 +34,7 @@ async function waitForDispatches(n: number): Promise<void> {
 }
 
 beforeAll(async () => {
+  mkdirSync(repo, { recursive: true });
   const { startDaemon } = await import("../src/daemon/daemon.ts");
   daemon = await startDaemon({
     endpoint: sock,
@@ -44,7 +46,7 @@ beforeAll(async () => {
         events: [{ kind: "result", ok: true, text: `ok ${dispatch.role}` }],
         outcome: {
           sessionId: `${dispatch.role}-${++seq}`,
-          finalText: `ok ${dispatch.role}`,
+          finalText: "",
           exitCode: 0,
         },
       };
@@ -54,7 +56,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await daemon.close();
-  for (const f of [sock, store, `${store}-wal`, `${store}-shm`]) {
+  for (const f of [sock, store, `${store}-wal`, `${store}-shm`, repo]) {
     try {
       rmSync(f);
     } catch {}
@@ -75,7 +77,7 @@ describe("CLI <-> daemon over local IPC", () => {
     const before = dispatches.length;
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "do a thing",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(created.ok).toBe(true);
     const id = created.ok ? created.result.job.id : "";
@@ -102,7 +104,7 @@ describe("CLI <-> daemon over local IPC", () => {
   it("routes allowed messages and resumes the target session", async () => {
     const c = await Client.connect(sock);
     const beforeCreate = dispatches.length;
-    const created = await c.request<{ job: Job }>("job.create", { goal: "route me", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", { goal: "route me", cwd: repo });
     expect(created.ok).toBe(true);
     await waitForDispatches(beforeCreate + 1);
     const job = created.ok ? created.result.job : null;
@@ -146,7 +148,7 @@ describe("CLI <-> daemon over local IPC", () => {
     const c = await Client.connect(sock);
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "bad route",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
@@ -166,7 +168,7 @@ describe("CLI <-> daemon over local IPC", () => {
     const beforeCreate = dispatches.length;
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "needs escalation",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(created.ok).toBe(true);
     await waitForDispatches(beforeCreate + 1);
@@ -210,13 +212,13 @@ describe("CLI <-> daemon over local IPC", () => {
         }
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
         };
       },
     });
 
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "tier1", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", { goal: "tier1", cwd: repo });
     expect(created.ok).toBe(true);
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
     const jobId = created.ok ? created.result.job.id : "";
@@ -257,7 +259,7 @@ describe("CLI <-> daemon over local IPC", () => {
     const sockLocal = `${base}.sock`;
     const db = `${base}.sqlite`;
     const setup = new Store(db);
-    const stale = setup.createJob("stale job", "/repo");
+    const stale = setup.createJob("stale job", repo);
     setup.close();
 
     const { startDaemon } = await import("../src/daemon/daemon.ts");
@@ -304,7 +306,7 @@ describe("CLI <-> daemon over local IPC", () => {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
           outcome: {
             sessionId: `${dispatch.role}-persisted-${++localSeq}`,
-            finalText: dispatch.role,
+            finalText: "",
             exitCode: 0,
           },
         };
@@ -313,7 +315,7 @@ describe("CLI <-> daemon over local IPC", () => {
     const firstClient = await Client.connect(sock1);
     const created = await firstClient.request<{ job: Job }>("job.create", {
       goal: "persist sessions",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(created.ok).toBe(true);
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
@@ -330,7 +332,7 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: dispatch.sessionId, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: dispatch.sessionId, finalText: "", exitCode: 0 },
         };
       },
     });
@@ -358,9 +360,87 @@ describe("CLI <-> daemon over local IPC", () => {
     }
   });
 
+  it("normalizes tilde cwd and rejects nonexistent cwd on job.create", async () => {
+    const c = await Client.connect(sock);
+    const homeRelative = await c.request<{ job: Job }>("job.create", {
+      goal: "home cwd",
+      cwd: "~/src/agvsr",
+    });
+    expect(homeRelative.ok).toBe(true);
+    if (!homeRelative.ok) throw new Error("job.create failed");
+    expect(homeRelative.result.job.cwd).toBe(join(homedir(), "src", "agvsr"));
+
+    const missing = await c.request("job.create", {
+      goal: "bad cwd",
+      cwd: "~/definitely-missing-agvsr-cwd",
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.message).toContain("cwd does not exist");
+    c.close();
+  });
+
+  it("fails a supervisor turn that ends with text but no agvsr tool call", async () => {
+    const base = join(tmpdir(), `agvsr-no-tool-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => ({
+        events: [{ kind: "result", ok: true, text: "tool call was cancelled" }],
+        outcome: {
+          sessionId: `${dispatch.role}-session`,
+          finalText: "I tried agvsr_send, but the tool call was cancelled.",
+          exitCode: 0,
+        },
+      }),
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "stalls", cwd: repo });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    for (let i = 0; i < 50; i++) {
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      if (got.ok && got.result.job.status === "failed") break;
+      await Bun.sleep(5);
+    }
+
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("failed");
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(
+      logs.result.messages.some(
+        (m) =>
+          m.from_role === "supervisor" &&
+          m.to_role === "daemon" &&
+          m.body.includes("tool call was cancelled"),
+      ),
+    ).toBe(true);
+    expect(
+      logs.result.messages.some(
+        (m) => m.kind === "failure" && m.body.includes("no agvsr tool call"),
+      ),
+    ).toBe(true);
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("rejects an empty goal", async () => {
     const c = await Client.connect(sock);
-    const res = await c.request("job.create", { goal: "  ", cwd: "/repo" });
+    const res = await c.request("job.create", { goal: "  ", cwd: repo });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("bad_request");
     c.close();
@@ -381,14 +461,14 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
         };
       },
     });
     const c = await Client.connect(sockLocal);
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "tell test",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
@@ -412,7 +492,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 
@@ -428,11 +510,11 @@ describe("CLI <-> daemon over local IPC", () => {
       interruptRunningJobsOnStart: false,
       turnRunner: async (dispatch) => ({
         events: [{ kind: "result", ok: true, text: dispatch.role }],
-        outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+        outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
       }),
     });
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "stop me", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", { goal: "stop me", cwd: repo });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
 
@@ -454,7 +536,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 
@@ -479,13 +563,16 @@ describe("CLI <-> daemon over local IPC", () => {
         }
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
         };
       },
     });
     process.env.AGVSR_MAX_WORKER_FAILURES = "2";
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "tier2 test", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "tier2 test",
+      cwd: repo,
+    });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
@@ -528,7 +615,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 
@@ -547,13 +636,16 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
         };
       },
     });
     process.env.AGVSR_NO_PROGRESS_TURNS = "2";
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "no-progress", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "no-progress",
+      cwd: repo,
+    });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
@@ -561,13 +653,26 @@ describe("CLI <-> daemon over local IPC", () => {
     // Two turns from implementation with no tool_use events → Tier1 on second turn
     for (let turn = 0; turn < 2; turn++) {
       const beforeSend = seen.filter((d) => d.role === "supervisor").length;
-      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `work turn ${turn}` });
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: `work turn ${turn}`,
+      });
       if (turn === 1) {
-        for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSend + 1; i++) {
+        for (
+          let i = 0;
+          i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSend + 1;
+          i++
+        ) {
           await Bun.sleep(5);
         }
       } else {
-        for (let i = 0; i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1; i++) {
+        for (
+          let i = 0;
+          i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1;
+          i++
+        ) {
           await Bun.sleep(5);
         }
       }
@@ -576,13 +681,19 @@ describe("CLI <-> daemon over local IPC", () => {
     const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
     expect(logs.ok).toBe(true);
     if (!logs.ok) throw new Error("msg.list failed");
-    expect(logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("no-progress"))).toBe(true);
+    expect(
+      logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("no-progress")),
+    ).toBe(true);
     expect(seen.at(-1)!.role).toBe("supervisor");
 
     delete process.env.AGVSR_NO_PROGRESS_TURNS;
     c.close();
     await localDaemon.close();
-    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
   });
 
   it("sends Tier1 escalation when a worker repeats identical tool calls", async () => {
@@ -600,27 +711,46 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         const events =
           dispatch.role === "implementation"
-            ? [{ kind: "tool_use" as const, name: "bash", input: { command: "ls" } }, { kind: "result" as const, ok: true }]
+            ? [
+                { kind: "tool_use" as const, name: "bash", input: { command: "ls" } },
+                { kind: "result" as const, ok: true },
+              ]
             : [{ kind: "result" as const, ok: true, text: dispatch.role }];
-        return { events, outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 } };
+        return {
+          events,
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
+        };
       },
     });
     process.env.AGVSR_LOOP_REPEAT_TURNS = "2";
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "loop fp", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", { goal: "loop fp", cwd: repo });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
 
     for (let turn = 0; turn < 2; turn++) {
       const beforeSupervisor = seen.filter((d) => d.role === "supervisor").length;
-      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `repeat ${turn}` });
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: `repeat ${turn}`,
+      });
       if (turn === 1) {
-        for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSupervisor + 1; i++) {
+        for (
+          let i = 0;
+          i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSupervisor + 1;
+          i++
+        ) {
           await Bun.sleep(5);
         }
       } else {
-        for (let i = 0; i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1; i++) {
+        for (
+          let i = 0;
+          i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1;
+          i++
+        ) {
           await Bun.sleep(5);
         }
       }
@@ -629,12 +759,18 @@ describe("CLI <-> daemon over local IPC", () => {
     const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
     expect(logs.ok).toBe(true);
     if (!logs.ok) throw new Error("msg.list failed");
-    expect(logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("loop Tier1"))).toBe(true);
+    expect(
+      logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("loop Tier1")),
+    ).toBe(true);
 
     delete process.env.AGVSR_LOOP_REPEAT_TURNS;
     c.close();
     await localDaemon.close();
-    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
   });
 
   it("Tier2 hard-fails a job after N loop escalations", async () => {
@@ -654,19 +790,30 @@ describe("CLI <-> daemon over local IPC", () => {
           dispatch.role === "implementation"
             ? [{ kind: "result" as const, ok: true, text: "text only" }]
             : [{ kind: "result" as const, ok: true, text: dispatch.role }];
-        return { events, outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 } };
+        return {
+          events,
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
+        };
       },
     });
     process.env.AGVSR_NO_PROGRESS_TURNS = "1";
     process.env.AGVSR_MAX_LOOP_ESCALATIONS = "2";
     const c = await Client.connect(sockLocal);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "loop tier2", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "loop tier2",
+      cwd: repo,
+    });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
 
     for (let turn = 0; turn < 2; turn++) {
-      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `no progress ${turn}` });
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: `no progress ${turn}`,
+      });
       for (let i = 0; i < 100; i++) {
         const r = await c.request<{ job: Job }>("job.get", { id: jobId });
         if (!r.ok) break;
@@ -687,13 +834,19 @@ describe("CLI <-> daemon over local IPC", () => {
     const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
     expect(logs.ok).toBe(true);
     if (!logs.ok) throw new Error("msg.list failed");
-    expect(logs.result.messages.some((m) => m.kind === "failure" && m.body.includes("Tier2"))).toBe(true);
+    expect(logs.result.messages.some((m) => m.kind === "failure" && m.body.includes("Tier2"))).toBe(
+      true,
+    );
 
     delete process.env.AGVSR_NO_PROGRESS_TURNS;
     delete process.env.AGVSR_MAX_LOOP_ESCALATIONS;
     c.close();
     await localDaemon.close();
-    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
   });
 
   it("msg.watch pushes new messages to the subscriber in real time", async () => {
@@ -701,7 +854,10 @@ describe("CLI <-> daemon over local IPC", () => {
     const c2 = await Client.connect(sock);
 
     // Create a job via c1
-    const created = await c1.request<{ job: Job }>("job.create", { goal: "push test", cwd: "/repo" });
+    const created = await c1.request<{ job: Job }>("job.create", {
+      goal: "push test",
+      cwd: repo,
+    });
     expect(created.ok).toBe(true);
     if (!created.ok) throw new Error();
     const jobId = created.result.job.id;
@@ -735,8 +891,8 @@ describe("CLI <-> daemon over local IPC", () => {
   it("msg.watch does not push frames for a different job", async () => {
     const c = await Client.connect(sock);
 
-    const j1 = await c.request<{ job: Job }>("job.create", { goal: "job one", cwd: "/repo" });
-    const j2 = await c.request<{ job: Job }>("job.create", { goal: "job two", cwd: "/repo" });
+    const j1 = await c.request<{ job: Job }>("job.create", { goal: "job one", cwd: repo });
+    const j2 = await c.request<{ job: Job }>("job.create", { goal: "job two", cwd: repo });
     expect(j1.ok && j2.ok).toBe(true);
     if (!j1.ok || !j2.ok) throw new Error();
 
@@ -800,7 +956,7 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
         };
       },
     });
@@ -832,7 +988,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, yamlPath]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 
@@ -868,7 +1026,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 
@@ -892,14 +1052,17 @@ describe("CLI <-> daemon over local IPC", () => {
         seen.push(dispatch);
         return {
           events: [{ kind: "result", ok: true, text: dispatch.role }],
-          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
         };
       },
     });
     const c = await Client.connect(sockLocal);
 
     // Create job BEFORE reload — snapshot should be old team
-    const created = await c.request<{ job: Job }>("job.create", { goal: "snap test", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "snap test",
+      cwd: repo,
+    });
     expect(created.ok).toBe(true);
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
@@ -922,12 +1085,14 @@ describe("CLI <-> daemon over local IPC", () => {
     const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
     expect(logs.ok).toBe(true);
     if (!logs.ok) throw new Error("msg.list failed");
-    expect(logs.result.messages.some((m) => m.to_role === "impl" && m.body === "continue")).toBe(true);
+    expect(logs.result.messages.some((m) => m.to_role === "impl" && m.body === "continue")).toBe(
+      true,
+    );
 
     // New job after reload — routing to impl must be FORBIDDEN (not in new team)
     const newCreated = await c.request<{ job: Job }>("job.create", {
       goal: "new after reload",
-      cwd: "/repo",
+      cwd: repo,
     });
     expect(newCreated.ok).toBe(true);
     const newJobId = newCreated.ok ? newCreated.result.job.id : "";
@@ -947,7 +1112,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, yamlPath]) {
-      try { rmSync(f); } catch {}
+      try {
+        rmSync(f);
+      } catch {}
     }
   });
 });

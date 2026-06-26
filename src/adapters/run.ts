@@ -22,13 +22,20 @@ export async function runTurn(
   const parser = driver.createParser();
   const events: TurnEvent[] = [];
 
-  const proc = Bun.spawn([bin, ...args], {
-    cwd: spec.cwd,
-    env: { ...process.env, ...spec.env, ...env },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn([bin, ...args], {
+      cwd: spec.cwd,
+      env: { ...process.env, ...spec.env, ...env },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (err) {
+    throw new Error(
+      `failed to spawn ${driver.adapter} executable ${JSON.stringify(bin)} in cwd ${JSON.stringify(spec.cwd)}: ${(err as Error).message}`,
+    );
+  }
 
   let timedOut = false;
   const timeout = options.timeoutMs
@@ -48,7 +55,8 @@ export async function runTurn(
   // Drain stderr concurrently to avoid the process blocking on a full stderr pipe.
   const stderrDrain = (async () => {
     // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional drain
-    for await (const _ of proc.stderr as AsyncIterable<Uint8Array>) {}
+    for await (const _ of proc.stderr as AsyncIterable<Uint8Array>) {
+    }
   })();
 
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {

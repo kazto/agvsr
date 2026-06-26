@@ -63,6 +63,10 @@ export const codexDriver: CliDriver = {
     const common = [
       "--json",
       "--skip-git-repo-check",
+      "-c",
+      'approval_policy="never"',
+      "-c",
+      'sandbox_mode="danger-full-access"',
       ...codexMcpConfigArgs({ cwd: spec.cwd, env: spec.env }),
       "-m",
       spec.model,
