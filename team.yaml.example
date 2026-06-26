@@ -1,13 +1,13 @@
 roles:
   supervisor:
-    adapter: claude-code
-    model: claude-sonnet-4-6
+    adapter: codex
+    model: gpt-5.5
   implementation:
-    adapter: claude-code
-    model: claude-sonnet-4-6
+    adapter: codex
+    model: gpt-5.4-mini
   qa:
-    adapter: claude-code
-    model: claude-sonnet-4-6
+    adapter: codex
+    model: gpt-5.4-mini
 
 # hooks:
 #   on_job_done: "notify-send 'agvsr' 'Job complete'"
