@@ -4,14 +4,14 @@
  */
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { serve } from "../ipc/transport.ts";
+import { serve, type PushFn } from "../ipc/transport.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import { composeCharter, driverFor, runTurn, type TurnEvent, type TurnResult } from "../adapters/index.ts";
 import { fireHook, type HookEvent } from "../hooks.ts";
-import type { Job, Request, Response, RoleSummary } from "../protocol.ts";
+import type { Job, Message, PushFrame, Request, Response, RoleSummary } from "../protocol.ts";
 
 function resolveTeam(): TeamConfig | null {
   const candidate = process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
@@ -162,6 +162,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const loopEscalationCounts = new Map<string, number>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
+  // Per-job push subscribers registered via msg.watch.
+  const msgWatchers = new Map<string, Set<(frame: PushFrame) => boolean>>();
+
+  const notifyWatchers = (msg: Message): void => {
+    const set = msgWatchers.get(msg.job_id);
+    if (!set || set.size === 0) return;
+    const frame: PushFrame = { type: "push", event: "msg.new", data: msg };
+    for (const watcher of [...set]) {
+      if (!watcher(frame)) set.delete(watcher); // prune dead connections
+    }
+  };
+
+  // Wrapper so every message write also pushes to live watchers.
+  const createMsg = (input: Parameters<Store["createMessage"]>[0]): Message => {
+    const m = store.createMessage(input);
+    notifyWatchers(m);
+    return m;
+  };
 
   const sessionFor = (jobId: string, role: string): string | null => {
     const cached = sessions.get(jobId)?.get(role);
@@ -278,7 +296,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       if (role === SUPERVISOR || result.outcome.timedOut) {
         const reason = `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`;
         store.setJobStatus(job.id, "failed");
-        store.createMessage({
+        createMsg({
           job_id: job.id,
           from_role: "daemon",
           to_role: "user",
@@ -292,7 +310,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (failures >= threshold) {
           const reason = `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
           store.setJobStatus(job.id, "failed");
-          store.createMessage({
+          createMsg({
             job_id: job.id,
             from_role: "daemon",
             to_role: "user",
@@ -302,7 +320,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
           const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
-          store.createMessage({
+          createMsg({
             job_id: job.id,
             from_role: "daemon",
             to_role: SUPERVISOR,
@@ -322,10 +340,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (escalations >= maxLoop) {
           const reason = `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`;
           store.setJobStatus(job.id, "failed");
-          store.createMessage({ job_id: job.id, from_role: "daemon", to_role: "user", kind: "failure", body: reason });
+          createMsg({ job_id: job.id, from_role: "daemon", to_role: "user", kind: "failure", body: reason });
           hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
-          store.createMessage({ job_id: job.id, from_role: "daemon", to_role: SUPERVISOR, kind: "escalation", body: loopMsg });
+          createMsg({ job_id: job.id, from_role: "daemon", to_role: SUPERVISOR, kind: "escalation", body: loopMsg });
           enqueueDispatch(job, SUPERVISOR, loopMsg);
         }
       } else {
@@ -344,7 +362,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const message = (e as Error).message;
         if (role === SUPERVISOR) {
           store.setJobStatus(job.id, "failed");
-          store.createMessage({
+          createMsg({
             job_id: job.id,
             from_role: "daemon",
             to_role: "user",
@@ -358,7 +376,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           if (failures >= threshold) {
             const reason = `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
             store.setJobStatus(job.id, "failed");
-            store.createMessage({
+            createMsg({
               job_id: job.id,
               from_role: "daemon",
               to_role: "user",
@@ -368,7 +386,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
           } else {
             const body = `${role} turn crashed: ${message} (crash ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
-            store.createMessage({
+            createMsg({
               job_id: job.id,
               from_role: "daemon",
               to_role: SUPERVISOR,
@@ -390,7 +408,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const requireTeam = (id: string): Response | null =>
     team ? null : err(id, "no_team", "no team.yaml configured");
 
-  const handle = (req: Request): Response => {
+  const handle = (req: Request, push: PushFn): Response => {
     switch (req.method) {
       case "ping":
         return ok(req.id, { pong: true, version: VERSION });
@@ -402,7 +420,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
         const job = store.createJob(goal.trim(), cwd);
         if (team) jobTeamSnapshots.set(job.id, team);
-        store.createMessage({
+        createMsg({
           job_id: job.id,
           from_role: "user",
           to_role: SUPERVISOR,
@@ -451,7 +469,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const routingTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!isAllowed(routingTeam, from, to))
           return err(req.id, "forbidden", `${from} may not send to ${to}`);
-        const msg = store.createMessage({
+        const msg = createMsg({
           job_id,
           from_role: from,
           to_role: to,
@@ -477,7 +495,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           return err(req.id, "bad_request", "escalation reason must not be empty");
         const escalationTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!escalationTeam.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
-        const msg = store.createMessage({
+        const msg = createMsg({
           job_id,
           from_role: from,
           to_role: SUPERVISOR,
@@ -488,11 +506,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         return ok(req.id, { queued: true, message: msg });
       }
 
+      case "msg.watch": {
+        const { job_id, mark_read } = req.params;
+        const job = store.getJob(job_id);
+        if (!job) return err(req.id, "not_found", `no job ${job_id}`);
+        if (!msgWatchers.has(job_id)) msgWatchers.set(job_id, new Set());
+        const watcher = (frame: PushFrame): boolean => {
+          if (mark_read && frame.event === "msg.new") store.markMessageRead(frame.data.id);
+          return push(frame);
+        };
+        msgWatchers.get(job_id)!.add(watcher);
+        return ok(req.id, { watching: true });
+      }
+
       case "job.complete": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         store.setJobStatus(req.params.job_id, "done");
-        store.createMessage({
+        createMsg({
           job_id: req.params.job_id,
           from_role: SUPERVISOR,
           to_role: "user",
@@ -507,7 +538,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         store.setJobStatus(req.params.job_id, "failed");
-        store.createMessage({
+        createMsg({
           job_id: req.params.job_id,
           from_role: SUPERVISOR,
           to_role: "user",
@@ -527,7 +558,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (job.status !== "running")
           return err(req.id, "bad_request", `job ${job_id} is not running (status: ${job.status})`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
-        const msg = store.createMessage({
+        const msg = createMsg({
           job_id,
           from_role: "user",
           to_role: SUPERVISOR,
@@ -544,7 +575,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (job.status !== "running")
           return err(req.id, "bad_request", `job ${req.params.job_id} is not running (status: ${job.status})`);
         store.setJobStatus(req.params.job_id, "failed");
-        store.createMessage({
+        createMsg({
           job_id: req.params.job_id,
           from_role: "user",
           to_role: "user",

@@ -7,7 +7,7 @@ import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
 import { Store } from "../src/daemon/store.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
-import type { Job, Message, PingResult, RoleSummary } from "../src/protocol.ts";
+import type { Job, Message, PingResult, PushFrame, RoleSummary } from "../src/protocol.ts";
 
 const tmp = join(tmpdir(), `agvsr-test-${randomUUID()}`);
 const sock = `${tmp}.sock`;
@@ -694,6 +694,76 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+  });
+
+  it("msg.watch pushes new messages to the subscriber in real time", async () => {
+    const c1 = await Client.connect(sock);
+    const c2 = await Client.connect(sock);
+
+    // Create a job via c1
+    const created = await c1.request<{ job: Job }>("job.create", { goal: "push test", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error();
+    const jobId = created.result.job.id;
+
+    // Subscribe c2 to push frames for that job
+    const pushed: PushFrame[] = [];
+    c2.onPush = (f) => pushed.push(f);
+    const watchRes = await c2.request("msg.watch", { job_id: jobId });
+    expect(watchRes.ok).toBe(true);
+
+    // Send a message via c1 → should push to c2
+    const sent = await c1.request<{ message: Message }>("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "design",
+      body: "pushed hello",
+    });
+    expect(sent.ok).toBe(true);
+
+    // Wait for push frame
+    for (let i = 0; i < 50 && pushed.length === 0; i++) await Bun.sleep(5);
+    expect(pushed.length).toBeGreaterThan(0);
+    expect(pushed[0]!.event).toBe("msg.new");
+    expect(pushed[0]!.data.body).toBe("pushed hello");
+    expect(pushed[0]!.data.job_id).toBe(jobId);
+
+    c1.close();
+    c2.close();
+  });
+
+  it("msg.watch does not push frames for a different job", async () => {
+    const c = await Client.connect(sock);
+
+    const j1 = await c.request<{ job: Job }>("job.create", { goal: "job one", cwd: "/repo" });
+    const j2 = await c.request<{ job: Job }>("job.create", { goal: "job two", cwd: "/repo" });
+    expect(j1.ok && j2.ok).toBe(true);
+    if (!j1.ok || !j2.ok) throw new Error();
+
+    // Watch job1 only
+    const pushed: PushFrame[] = [];
+    c.onPush = (f) => pushed.push(f);
+    await c.request("msg.watch", { job_id: j1.result.job.id });
+
+    // Send message on job2
+    await c.request("msg.send", {
+      from: "supervisor",
+      job_id: j2.result.job.id,
+      to: "design",
+      body: "should not arrive",
+    });
+    await Bun.sleep(30);
+    expect(pushed.length).toBe(0);
+
+    c.close();
+  });
+
+  it("msg.watch returns not_found for unknown job", async () => {
+    const c = await Client.connect(sock);
+    const res = await c.request("msg.watch", { job_id: randomUUID() });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("not_found");
+    c.close();
   });
 
   it("returns the configured team roles", async () => {

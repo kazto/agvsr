@@ -5,7 +5,7 @@
  */
 import net from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
-import type { Frame, Request, Response } from "../protocol.ts";
+import type { Frame, PushFrame, Request, Response } from "../protocol.ts";
 
 /** Split a byte stream into newline-delimited JSON objects. */
 function frameReader(onFrame: (obj: unknown) => void): (chunk: Buffer) => void {
@@ -28,7 +28,9 @@ function frameReader(onFrame: (obj: unknown) => void): (chunk: Buffer) => void {
 
 const encode = (frame: Frame): string => JSON.stringify(frame) + "\n";
 
-export type RequestHandler = (req: Request) => Promise<Response> | Response;
+/** Push a server-initiated frame to one client connection. Returns false if the connection is gone. */
+export type PushFn = (frame: PushFrame) => boolean;
+export type RequestHandler = (req: Request, push: PushFn) => Promise<Response> | Response;
 
 export interface IpcServer {
   readonly endpoint: string;
@@ -52,11 +54,22 @@ export function serve(endpoint: string, handler: RequestHandler): Promise<IpcSer
   const server = net.createServer((sock) => {
     sockets.add(sock);
     sock.on("close", () => sockets.delete(sock));
+
+    const push: PushFn = (frame) => {
+      if (!sock.writable) return false;
+      try {
+        sock.write(encode(frame));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
     const read = frameReader(async (obj) => {
       const req = obj as Request;
       if (req?.type !== "request") return;
       try {
-        const res = await handler(req);
+        const res = await handler(req, push);
         sock.write(encode(res));
       } catch (err) {
         sock.write(
@@ -99,8 +112,9 @@ export class DaemonNotRunningError extends Error {
   }
 }
 
-/** A client connection that can issue many request/response pairs. */
+/** A client connection that can issue many request/response pairs and receive push frames. */
 export class Client {
+  onPush?: (frame: PushFrame) => void;
   private seq = 0;
   private pending = new Map<string, (res: Response) => void>();
 
@@ -108,7 +122,12 @@ export class Client {
     sock.on(
       "data",
       frameReader((obj) => {
-        const res = obj as Response;
+        const frame = obj as Frame;
+        if (frame?.type === "push") {
+          this.onPush?.(frame as PushFrame);
+          return;
+        }
+        const res = frame as Response;
         if (res?.type !== "response") return;
         this.pending.get(res.id)?.(res);
         this.pending.delete(res.id);

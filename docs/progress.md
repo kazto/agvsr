@@ -168,14 +168,23 @@ Current validation: **52 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **55 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 14 — Server-Push Logs (`logs -f` real-time streaming) ✅
+
+| File                       | What it does                                                                                                                                                                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/protocol.ts`          | Adds `PushFrame { type:"push"; event:"msg.new"; data:Message }` and `msg.watch` request (`{ job_id, mark_read? }`). Updates `Frame` to include `PushFrame`.                                                                                                        |
+| `src/ipc/transport.ts`     | Adds `PushFn = (frame:PushFrame) => boolean` (returns false when the connection is gone). `RequestHandler` now receives `push: PushFn` as second arg. `serve()` creates a per-connection push function and passes it to every handler call. `Client` dispatches incoming push frames to `onPush` callback. |
+| `src/daemon/daemon.ts`     | Adds `msgWatchers: Map<job_id, Set<watcher>>` and `notifyWatchers`. Wraps every `store.createMessage` call with `createMsg()` which writes the message and immediately pushes it to any live watchers. `msg.watch` handler registers the push function as a watcher; dead connections are pruned on the next push attempt. |
+| `src/cli/agvsr.ts`         | `logs -f` now calls `msg.watch` and sets `c.onPush` instead of polling every second. The connection stays open until the process is killed.                                                                                                                         |
+| `test/ipc.test.ts`         | 3 new tests: push frame delivery, cross-job isolation (push only for the watched job), `not_found` error path.                                                                                                                                                      |
+
+Current validation: **58 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
    - Optionally run against actual claude-code/codex binaries with credentials available; the committed E2E now covers the same daemon/adapter/MCP path deterministically using a fake `claude`.
    - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
-
-2. **Persistence hardening**
-   - Consider a true server-push logs stream later; current `logs -f` uses portable polling.
 
 ### Key design constraints to respect
 
@@ -240,4 +249,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–13 merged, 55 tests pass |
+| `main` | Phase 0–14 merged, 58 tests pass |

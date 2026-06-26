@@ -59,6 +59,12 @@ export type Request =
   | {
       id: string;
       type: "request";
+      method: "msg.watch";
+      params: { job_id: string; mark_read?: boolean };
+    }
+  | {
+      id: string;
+      type: "request";
       method: "job.complete";
       params: { job_id: string; result: string };
     }
@@ -68,6 +74,13 @@ export type Request =
   | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 
 export type Method = Extract<Request, { type: "request" }>["method"];
+
+/** Server-initiated push frame sent to clients subscribed via msg.watch. */
+export interface PushFrame {
+  type: "push";
+  event: "msg.new";
+  data: Message;
+}
 
 export interface ResponseOk<T = unknown> {
   id: string;
@@ -94,4 +107,4 @@ export interface RoleSummary {
   model: string;
 }
 
-export type Frame = Request | Response;
+export type Frame = Request | Response | PushFrame;

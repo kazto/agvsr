@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import type { Job, Message, PingResult, Response, RoleSummary } from "../protocol.ts";
+import type { Job, Message, PingResult, PushFrame, Response, RoleSummary } from "../protocol.ts";
 
 const USAGE = `agvsr ${VERSION}
 
@@ -120,29 +120,34 @@ async function main(argv: string[]): Promise<void> {
       };
       await withClient(async (c) => {
         const seen = new Set<string>();
-        const fetchAndPrint = async (): Promise<number> => {
-          const { messages } = unwrap(
-            await c.request<{ messages: Message[] }>("msg.list", {
-              job_id: jobId,
-              mark_read: true,
-            }),
-          );
-          let count = 0;
-          for (const m of messages) {
-            if (seen.has(m.id)) continue;
-            seen.add(m.id);
-            print(m);
-            count++;
-          }
-          return count;
-        };
-
-        const firstCount = await fetchAndPrint();
-        if (!values.follow && firstCount === 0) console.log("no messages");
-        while (values.follow) {
-          await Bun.sleep(1000);
-          await fetchAndPrint();
+        const { messages } = unwrap(
+          await c.request<{ messages: Message[] }>("msg.list", {
+            job_id: jobId,
+            mark_read: true,
+          }),
+        );
+        let count = 0;
+        for (const m of messages) {
+          seen.add(m.id);
+          print(m);
+          count++;
         }
+
+        if (!values.follow) {
+          if (count === 0) console.log("no messages");
+          return;
+        }
+
+        // Server-push follow mode — no polling needed.
+        c.onPush = (frame: PushFrame) => {
+          if (frame.event !== "msg.new") return;
+          const m = frame.data;
+          if (m.job_id !== jobId || seen.has(m.id)) return;
+          seen.add(m.id);
+          print(m);
+        };
+        unwrap(await c.request("msg.watch", { job_id: jobId, mark_read: true }));
+        await new Promise(() => {}); // block until the process is killed
       });
       return;
     }
