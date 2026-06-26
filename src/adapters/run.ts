@@ -45,6 +45,12 @@ export async function runTurn(
     if (trimmed) events.push(...parser.push(trimmed));
   };
 
+  // Drain stderr concurrently to avoid the process blocking on a full stderr pipe.
+  const stderrDrain = (async () => {
+    // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional drain
+    for await (const _ of proc.stderr as AsyncIterable<Uint8Array>) {}
+  })();
+
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
     buf += decoder.decode(chunk, { stream: true });
     let nl: number;
@@ -56,6 +62,7 @@ export async function runTurn(
   if (buf) consume(buf); // trailing line without newline (e.g. agy)
 
   const exitCode = await proc.exited;
+  await stderrDrain;
   if (timeout) clearTimeout(timeout);
 
   // Synthesize a result for adapters that don't emit one (agy), or when the watchdog killed the turn.

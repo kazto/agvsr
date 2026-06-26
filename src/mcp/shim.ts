@@ -132,9 +132,10 @@ if (role === "supervisor") {
       title: "Declare the job complete",
       description:
         "Accept the work and close the job. Only call this when you have verified the result " +
-        "satisfies the original goal. This is final.",
+        "satisfies the original goal. This is final. " +
+        `Use job_id="${jobId}" (the full UUID from your '**Current job:**' system-prompt field).`,
       inputSchema: {
-        job_id: z.string().describe("The job id to complete"),
+        job_id: z.string().describe(`The job id — must be exactly "${jobId}"`),
         result: z.string().describe("Summary of what was accomplished"),
       },
     },
@@ -150,9 +151,10 @@ if (role === "supervisor") {
       title: "Declare the job failed",
       description:
         "Mark the job as failed and notify the human. Use when the goal cannot be achieved " +
-        "with the current team or constraints.",
+        "with the current team or constraints. " +
+        `Use job_id="${jobId}" (the full UUID from your '**Current job:**' system-prompt field).`,
       inputSchema: {
-        job_id: z.string().describe("The job id to fail"),
+        job_id: z.string().describe(`The job id — must be exactly "${jobId}"`),
         reason: z.string().describe("Why the job cannot be completed"),
       },
     },

@@ -1,0 +1,14 @@
+roles:
+  supervisor:
+    adapter: claude-code
+    model: claude-sonnet-4-6
+  implementation:
+    adapter: claude-code
+    model: claude-sonnet-4-6
+  qa:
+    adapter: claude-code
+    model: claude-sonnet-4-6
+
+# hooks:
+#   on_job_done: "notify-send 'agvsr' 'Job complete'"
+#   on_job_failed: "notify-send 'agvsr' 'Job failed'"

@@ -4,7 +4,14 @@
  * Session id comes from the `system/init` (or `result`) event.
  */
 import { claudeMcpConfig } from "./mcp.ts";
+import { SUPERVISOR } from "../config/team.ts";
 import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+
+// Hands-on tools the supervisor must never use directly (workers do the actual work).
+const SUPERVISOR_DISALLOWED = [
+  "Write", "Edit", "NotebookEdit", "Bash",
+  "CronCreate", "CronDelete", "PushNotification", "RemoteTrigger",
+].join(",");
 
 interface ClaudeEvent {
   type?: string;
@@ -63,6 +70,7 @@ export const claudeDriver: CliDriver = {
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
     const args = [
       "-p",
+      "--dangerously-skip-permissions",
       "--output-format",
       "stream-json",
       "--verbose",
@@ -76,6 +84,10 @@ export const claudeDriver: CliDriver = {
     ];
     if (sessionId) args.push("--resume", sessionId);
     args.push(message);
+    // Must come after the message: --disallowed-tools is variadic and consumes trailing positionals.
+    if (spec.role === SUPERVISOR) {
+      args.push("--disallowed-tools", SUPERVISOR_DISALLOWED);
+    }
     return { bin: "claude", args };
   },
 

@@ -42,10 +42,15 @@ what makes both the plan and the verdict worth anything.
 - When the work meets the goal and the design, say so plainly — do not invent objections
   to look thorough. A clean pass is a valid, valuable result.
 
+## ⚠ Mandatory: every turn must end with `agvsr_send`
+
+**You must always end your turn by calling `agvsr_send(to="supervisor", body="...")`.**
+The supervisor cannot see any work you do — your test runs, findings, verdicts — unless
+you explicitly send them. If you finish without calling `agvsr_send`, the job stalls and
+cannot progress. There is no exception.
+
 ## Definition of done
 - **Phase 1:** a test plan committed as a reviewable document on the job branch, handed to
-  the supervisor (path in `refs`), covering the requirements and design with explicit
-  acceptance criteria.
-- **Phase 2:** a clear verdict returned to the supervisor — **acceptable**, or **defects
-  found** with specific, reproducible detail tied to the plan — enough for the supervisor
-  to decide and, if needed, for `implementation` to act on.
+  the supervisor via `agvsr_send` (path in `refs`), covering the requirements and design.
+- **Phase 2:** a clear verdict delivered to the supervisor via `agvsr_send` — **acceptable**,
+  or **defects found** with specific, reproducible detail tied to the plan.

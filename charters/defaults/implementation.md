@@ -35,6 +35,13 @@ Implement the design as working code in the workspace at `{{cwd}}`.
   implemented, any deviations from the design (and why), anything left unverified, and the
   commits / changed files in `refs`.
 
+## ⚠ Mandatory: you MUST report back
+
+**Every turn must end with a call to `agvsr_send(to="supervisor", body="...")`.**
+The supervisor cannot see any work you do — files you write, commands you run, output you
+print — none of it reaches them unless you explicitly send it. If you finish work without
+calling `agvsr_send`, the job stalls completely and cannot progress. There is no exception.
+
 ## Definition of done
 The design is implemented, your self-checks pass, and a clear summary plus the changed
-files are handed to the supervisor — ready for independent QA.
+files are handed to the supervisor via `agvsr_send` — ready for independent QA.
