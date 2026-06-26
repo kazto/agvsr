@@ -92,7 +92,9 @@ export function serve(endpoint: string, handler: RequestHandler): Promise<IpcSer
 
 export class DaemonNotRunningError extends Error {
   constructor(endpoint: string) {
-    super(`agvsr daemon is not running (no IPC endpoint at ${endpoint}). Start it with: agvsr daemon`);
+    super(
+      `agvsr daemon is not running (no IPC endpoint at ${endpoint}). Start it with: agvsr daemon`,
+    );
     this.name = "DaemonNotRunningError";
   }
 }

@@ -49,7 +49,9 @@ export function parseTeam(text: string): TeamConfig {
 
   const parsed = TeamSchema.safeParse(raw);
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n");
+    const issues = parsed.error.issues
+      .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("\n");
     throw new TeamConfigError(`team.yaml is invalid:\n${issues}`);
   }
 
@@ -58,7 +60,9 @@ export function parseTeam(text: string): TeamConfig {
     throw new TeamConfigError("team.yaml defines no roles.");
   }
   if (!team.roles[SUPERVISOR]) {
-    throw new TeamConfigError(`team.yaml must define a "${SUPERVISOR}" role (the star-topology hub, D10).`);
+    throw new TeamConfigError(
+      `team.yaml must define a "${SUPERVISOR}" role (the star-topology hub, D10).`,
+    );
   }
   return team;
 }

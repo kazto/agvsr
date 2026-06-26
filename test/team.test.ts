@@ -18,11 +18,15 @@ describe("parseTeam", () => {
   });
 
   it("requires a supervisor role", () => {
-    expect(() => parseTeam(`roles:\n  design: { adapter: codex, model: m }`)).toThrow(TeamConfigError);
+    expect(() => parseTeam(`roles:\n  design: { adapter: codex, model: m }`)).toThrow(
+      TeamConfigError,
+    );
   });
 
   it("rejects unknown adapters", () => {
-    expect(() => parseTeam(`roles:\n  supervisor: { adapter: cursor, model: m }`)).toThrow(TeamConfigError);
+    expect(() => parseTeam(`roles:\n  supervisor: { adapter: cursor, model: m }`)).toThrow(
+      TeamConfigError,
+    );
   });
 
   it("rejects a role missing a model", () => {
@@ -34,7 +38,9 @@ describe("allowedTargets (star topology, D10)", () => {
   const team = parseTeam(VALID);
 
   it("lets the supervisor reach every worker plus the human", () => {
-    expect(allowedTargets(team, "supervisor").sort()).toEqual(["design", "implementation", "qa", "user"].sort());
+    expect(allowedTargets(team, "supervisor").sort()).toEqual(
+      ["design", "implementation", "qa", "user"].sort(),
+    );
   });
 
   it("restricts workers to the supervisor only", () => {

@@ -41,7 +41,10 @@ describe("CLI <-> daemon over local IPC", () => {
 
   it("creates and lists jobs (persisted by the daemon)", async () => {
     const c = await Client.connect(sock);
-    const created = await c.request<{ job: Job }>("job.create", { goal: "do a thing", cwd: "/repo" });
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "do a thing",
+      cwd: "/repo",
+    });
     expect(created.ok).toBe(true);
     const id = created.ok ? created.result.job.id : "";
 

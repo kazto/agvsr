@@ -10,8 +10,8 @@ const isWindows = process.platform === "win32";
 /** Per-user config directory: ~/.config/agvsr (POSIX) or %APPDATA%/agvsr (Windows). */
 export function configDir(): string {
   const base = isWindows
-    ? process.env.APPDATA ?? join(homedir(), "AppData", "Roaming")
-    : process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+    ? (process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"))
+    : (process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"));
   return join(base, "agvsr");
 }
 
