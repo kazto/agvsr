@@ -15,7 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
-import type { Request } from "../protocol.ts";
+import type { Job, Message, Request } from "../protocol.ts";
 
 const role = process.env.AGVSR_ROLE ?? "unknown";
 const jobId = process.env.AGVSR_JOB_ID ?? "";
@@ -35,6 +35,13 @@ async function relay(method: Request["method"], params: unknown): Promise<void> 
   const c = await getClient();
   const res = await c.request(method, params as never);
   if (!res.ok) throw new Error(res.error.message);
+}
+
+async function relayGet<T>(method: Request["method"], params: unknown): Promise<T> {
+  const c = await getClient();
+  const res = await c.request<T>(method, params as never);
+  if (!res.ok) throw new Error(res.error.message);
+  return res.result;
 }
 
 const server = new McpServer({ name: "agvsr", version: "0.0.0" });
@@ -77,6 +84,44 @@ server.registerTool(
   async ({ reason }) => {
     await relay("msg.escalate", { from: role, job_id: jobId, reason });
     return { content: [{ type: "text" as const, text: "escalated" }] };
+  },
+);
+
+server.registerTool(
+  "agvsr_status",
+  {
+    title: "Get current job status and recent audit messages",
+    description:
+      "Read-only. Returns job metadata (goal, status, branch, cwd) and the most recent " +
+      "audit messages so you can orient yourself without relying solely on session memory. " +
+      "Use this when you need to re-anchor to the job goal or review what was communicated.",
+    inputSchema: {
+      last_n: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("How many recent messages to return (default 10, max 50)"),
+    },
+  },
+  async ({ last_n = 10 }) => {
+    const { job } = await relayGet<{ job: Job }>("job.get", { id: jobId });
+    const { messages } = await relayGet<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    const recent = messages.slice(-last_n);
+    const lines = [
+      `goal: ${job.goal}`,
+      `status: ${job.status}`,
+      `branch: ${job.branch ?? "(not set)"}`,
+      `cwd: ${job.cwd}`,
+      ``,
+      `messages (last ${recent.length}):`,
+      ...recent.map(
+        (m) =>
+          `  [${m.created_at}] ${m.from_role} → ${m.to_role} (${m.kind}): ${m.body.slice(0, 200)}`,
+      ),
+    ];
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   },
 );
 

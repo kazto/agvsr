@@ -181,6 +181,76 @@ describe("agvsr-mcp shim", () => {
     }
   });
 
+  it("agvsr_status queries job.get and msg.list and returns a summary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
+    const sockPath = join(dir, "test.sock");
+
+    const stub = await startStub(sockPath, (req: any) => {
+      if (req.method === "job.get") {
+        return {
+          id: req.id,
+          type: "response",
+          ok: true,
+          result: {
+            job: {
+              id: "job-s",
+              goal: "add a feature",
+              status: "running",
+              cwd: "/repo",
+              branch: "agvsr/deadbeef",
+              created_at: "2026-01-01T00:00:00.000Z",
+              updated_at: "2026-01-01T00:00:00.000Z",
+            },
+          },
+        };
+      }
+      // msg.list
+      return {
+        id: req.id,
+        type: "response",
+        ok: true,
+        result: {
+          messages: [
+            {
+              id: "m1",
+              job_id: "job-s",
+              from_role: "user",
+              to_role: "supervisor",
+              kind: "message",
+              body: "hello world",
+              refs: null,
+              created_at: "2026-01-01T00:00:01.000Z",
+              read_at: null,
+            },
+          ],
+        },
+      };
+    });
+
+    try {
+      const responses = await callShim(
+        sockPath,
+        { AGVSR_ROLE: "implementation", AGVSR_JOB_ID: "job-s" },
+        "agvsr_status",
+        {},
+      );
+
+      const callResp = responses.find((r: any) => r.id === 2) as any;
+      const text = callResp?.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("add a feature");
+      expect(text).toContain("agvsr/deadbeef");
+      expect(text).toContain("running");
+      expect(text).toContain("hello world");
+
+      // Both relay calls must have been made
+      expect(stub.received.some((r: any) => r.method === "job.get")).toBe(true);
+      expect(stub.received.some((r: any) => r.method === "msg.list")).toBe(true);
+    } finally {
+      await stub.close();
+      try { unlinkSync(sockPath); } catch {}
+    }
+  });
+
   it("registers agvsr_complete only for supervisor role", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
     const sockPath = join(dir, "test.sock");

@@ -193,6 +193,15 @@ Current validation: **58 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **59 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 16 — `agvsr_status` MCP read-only tool (D19) ✅
+
+| File                 | What it does                                                                                                                                                                                                                                        |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/mcp/shim.ts`    | Adds `agvsr_status(last_n?)` tool available to all roles. Calls `job.get` + `msg.list` via IPC and returns a compact text summary: goal, status, branch, cwd, and the last N (default 10, max 50) audit messages. Adds `relayGet<T>` helper to shim for read-only IPC calls. |
+| `test/shim.test.ts`  | Test: stub returns canned `job.get` + `msg.list` responses; asserts summary contains goal, branch, status, message body, and that both IPC methods were called.                                                                                    |
+
+Current validation: **60 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -262,4 +271,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–15 merged, 59 tests pass |
+| `main` | Phase 0–16 merged, 60 tests pass |
