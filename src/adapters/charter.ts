@@ -14,6 +14,7 @@ export interface CharterContext {
   role: string;
   jobId: string;
   cwd: string;
+  branch?: string | null;
   allowedTargets: string[];
 }
 
@@ -43,6 +44,7 @@ export function fillScaffold(scaffold: string, ctx: CharterContext): string {
     role: ctx.role,
     job_id: ctx.jobId,
     cwd: ctx.cwd,
+    branch: ctx.branch ?? "(not set)",
     allowed_targets: ctx.allowedTargets.join(", "),
     completion_tools: isSupervisor ? COMPLETION_TOOLS : "",
   };
@@ -79,6 +81,7 @@ export function composeCharter(team: TeamConfig, role: string, ctx: Omit<Charter
     role,
     jobId: ctx.jobId,
     cwd: ctx.cwd,
+    branch: ctx.branch,
     allowedTargets: allowedTargets(team, role),
   });
   const roleCharter = readRoleCharter(role, cfg, dirs);

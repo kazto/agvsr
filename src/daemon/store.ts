@@ -55,12 +55,13 @@ export class Store {
 
   createJob(goal: string, cwd: string): Job {
     const ts = now();
+    const id = randomUUID();
     const job: Job = {
-      id: randomUUID(),
+      id,
       goal,
       status: "running",
       cwd,
-      branch: null,
+      branch: `agvsr/${id.slice(0, 8)}`,
       created_at: ts,
       updated_at: ts,
     };

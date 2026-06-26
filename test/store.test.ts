@@ -9,7 +9,7 @@ describe("Store", () => {
     expect(a.id).toBeTruthy();
     expect(a.status).toBe("running");
     expect(a.cwd).toBe("/repo");
-    expect(a.branch).toBeNull();
+    expect(a.branch).toBe(`agvsr/${a.id.slice(0, 8)}`);
 
     expect(store.getJob(a.id)).toMatchObject({ id: a.id, goal: "add health endpoint" });
     expect(store.getJob("nope")).toBeNull();

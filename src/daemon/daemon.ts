@@ -272,7 +272,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       : composeCharter(
           jobTeam,
           role,
-          { jobId: job.id, cwd: job.cwd },
+          { jobId: job.id, cwd: job.cwd, branch: job.branch },
           { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
         );
     const result = await runner({
@@ -288,6 +288,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         AGVSR_ROLE: role,
         AGVSR_JOB_ID: job.id,
         AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
+        AGVSR_JOB_BRANCH: job.branch ?? "",
       },
     });
 

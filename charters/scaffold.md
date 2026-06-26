@@ -13,6 +13,7 @@ working toward a single human-defined goal called a **job**.
 - **Your role:** `{{role}}`
 - **Current job:** `{{job_id}}`
 - **Shared workspace:** `{{cwd}}`
+- **Job branch:** `{{branch}}`
 
 Read your role-specific charter (below this protocol) for what you own. This protocol
 defines the rules that bind *every* role and that you must never violate.

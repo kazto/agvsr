@@ -180,6 +180,19 @@ Current validation: **55 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **58 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 15 — Job Branch Naming (CH5) ✅
+
+| File                       | What it does                                                                                                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/store.ts`      | `createJob` now generates `branch = "agvsr/<first-8-of-job-id>"` and stores it in `jobs.branch`. The column was always present but always null before.                                                                                               |
+| `src/adapters/charter.ts`  | Adds `branch?: string \| null` to `CharterContext`. `fillScaffold` maps `{{branch}}` → the branch name (or `"(not set)"` if absent). `composeCharter` forwards `ctx.branch` to `fillScaffold`.                                                       |
+| `charters/scaffold.md`     | Adds `- **Job branch:** \`{{branch}}\`` to the header block so every agent knows which branch to work on, satisfying CH5 without requiring the agent to invent a branch name.                                                                         |
+| `src/daemon/daemon.ts`     | Passes `branch: job.branch` to `composeCharter` and `AGVSR_JOB_BRANCH: job.branch ?? ""` in the env for every agent dispatch.                                                                                                                        |
+| `test/store.test.ts`       | Updates assertion: `branch` is now `"agvsr/<id-prefix>"` not null.                                                                                                                                                                                   |
+| `test/charter.test.ts`     | Adds `branch` to all `fillScaffold` / `composeCharter` calls; asserts branch appears in output and `{{branch}}` leaves no leftover placeholders.                                                                                                      |
+
+Current validation: **59 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -249,4 +262,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–14 merged, 58 tests pass |
+| `main` | Phase 0–15 merged, 59 tests pass |
