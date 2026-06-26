@@ -53,12 +53,20 @@ export interface StartDaemonOptions {
 }
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_MAX_WORKER_FAILURES = 3;
 
 function turnTimeoutMs(): number {
   const raw = process.env.AGVSR_TURN_TIMEOUT_MS;
   if (!raw) return DEFAULT_TURN_TIMEOUT_MS;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_TIMEOUT_MS;
+}
+
+function maxWorkerFailures(): number {
+  const raw = process.env.AGVSR_MAX_WORKER_FAILURES;
+  if (!raw) return DEFAULT_MAX_WORKER_FAILURES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_WORKER_FAILURES;
 }
 
 function defaultTurnRunner(team: TeamConfig): TurnRunner {
@@ -108,6 +116,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
   }
   const sessions = new Map<string, Map<string, string | null>>();
+  const failureCounts = new Map<string, Map<string, number>>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
 
@@ -126,6 +135,21 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
     byRole.set(role, sessionId);
     if (sessionId) store.setAgentSession(jobId, role, sessionId);
+  };
+
+  const incrementFailure = (jobId: string, role: string): number => {
+    let byRole = failureCounts.get(jobId);
+    if (!byRole) {
+      byRole = new Map();
+      failureCounts.set(jobId, byRole);
+    }
+    const count = (byRole.get(role) ?? 0) + 1;
+    byRole.set(role, count);
+    return count;
+  };
+
+  const resetFailure = (jobId: string, role: string): void => {
+    failureCounts.get(jobId)?.set(role, 0);
   };
 
   const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {
@@ -168,16 +192,31 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           body: `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`,
         });
       } else {
-        const body = `${role} turn failed with exit code ${result.outcome.exitCode}. Supervisor must decide whether to retry, reassign, or fail the job.`;
-        store.createMessage({
-          job_id: job.id,
-          from_role: "daemon",
-          to_role: SUPERVISOR,
-          kind: "escalation",
-          body,
-        });
-        enqueueDispatch(job, SUPERVISOR, body);
+        const failures = incrementFailure(job.id, role);
+        const threshold = maxWorkerFailures();
+        if (failures >= threshold) {
+          store.setJobStatus(job.id, "failed");
+          store.createMessage({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "failure",
+            body: `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+          });
+        } else {
+          const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
+          store.createMessage({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: SUPERVISOR,
+            kind: "escalation",
+            body,
+          });
+          enqueueDispatch(job, SUPERVISOR, body);
+        }
       }
+    } else {
+      resetFailure(job.id, role);
     }
   };
 
@@ -199,15 +238,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             body: message,
           });
         } else {
-          const body = `${role} turn crashed: ${message}. Supervisor must decide whether to retry, reassign, or fail the job.`;
-          store.createMessage({
-            job_id: job.id,
-            from_role: "daemon",
-            to_role: SUPERVISOR,
-            kind: "escalation",
-            body,
-          });
-          enqueueDispatch(job, SUPERVISOR, body);
+          const failures = incrementFailure(job.id, role);
+          const threshold = maxWorkerFailures();
+          if (failures >= threshold) {
+            store.setJobStatus(job.id, "failed");
+            store.createMessage({
+              job_id: job.id,
+              from_role: "daemon",
+              to_role: "user",
+              kind: "failure",
+              body: `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+            });
+          } else {
+            const body = `${role} turn crashed: ${message} (crash ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
+            store.createMessage({
+              job_id: job.id,
+              from_role: "daemon",
+              to_role: SUPERVISOR,
+              kind: "escalation",
+              body,
+            });
+            enqueueDispatch(job, SUPERVISOR, body);
+          }
         }
       });
     inflight.set(key, next);
@@ -338,6 +390,42 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           body: req.params.reason,
         });
         return ok(req.id, { failed: true });
+      }
+
+      case "job.tell": {
+        const noTeam = requireTeam(req.id);
+        if (noTeam) return noTeam;
+        const { job_id, body } = req.params;
+        const job = store.getJob(job_id);
+        if (!job) return err(req.id, "not_found", `no job ${job_id}`);
+        if (job.status !== "running")
+          return err(req.id, "bad_request", `job ${job_id} is not running (status: ${job.status})`);
+        if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
+        const msg = store.createMessage({
+          job_id,
+          from_role: "user",
+          to_role: SUPERVISOR,
+          kind: "message",
+          body,
+        });
+        enqueueDispatch(job, SUPERVISOR, body);
+        return ok(req.id, { queued: true, message: msg });
+      }
+
+      case "job.stop": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        if (job.status !== "running")
+          return err(req.id, "bad_request", `job ${req.params.job_id} is not running (status: ${job.status})`);
+        store.setJobStatus(req.params.job_id, "failed");
+        store.createMessage({
+          job_id: req.params.job_id,
+          from_role: "user",
+          to_role: "user",
+          kind: "failure",
+          body: "Job stopped by user.",
+        });
+        return ok(req.id, { stopped: true });
       }
 
       default:

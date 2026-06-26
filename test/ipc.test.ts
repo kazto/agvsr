@@ -366,6 +366,172 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("tells a running job supervisor and dispatches the message", async () => {
+    const base = join(tmpdir(), `agvsr-tell-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "tell test",
+      cwd: "/repo",
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    const beforeTell = seen.length;
+    const res = await c.request<{ queued: true; message: Message }>("job.tell", {
+      job_id: jobId,
+      body: "please prioritize X",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.result.message.from_role).toBe("user");
+      expect(res.result.message.to_role).toBe("supervisor");
+      expect(res.result.message.kind).toBe("message");
+    }
+    for (let i = 0; i < 50 && seen.length < beforeTell + 1; i++) await Bun.sleep(5);
+    expect(seen.at(-1)!.role).toBe("supervisor");
+    expect(seen.at(-1)!.message).toBe("please prioritize X");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try { rmSync(f); } catch {}
+    }
+  });
+
+  it("stops a running job and marks it failed", async () => {
+    const base = join(tmpdir(), `agvsr-stop-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => ({
+        events: [{ kind: "result", ok: true, text: dispatch.role }],
+        outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+      }),
+    });
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "stop me", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    const stopped = await c.request("job.stop", { job_id: jobId });
+    expect(stopped.ok).toBe(true);
+
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("failed");
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.body === "Job stopped by user.")).toBe(true);
+
+    const alreadyStopped = await c.request("job.stop", { job_id: jobId });
+    expect(alreadyStopped.ok).toBe(false);
+    if (!alreadyStopped.ok) expect(alreadyStopped.error.code).toBe("bad_request");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try { rmSync(f); } catch {}
+    }
+  });
+
+  it("hard-fails a job when a worker exceeds the consecutive failure threshold (Tier2)", async () => {
+    const base = join(tmpdir(), `agvsr-tier2-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "always fails" }],
+            outcome: { sessionId: "impl-session", finalText: "always fails", exitCode: 1 },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+    process.env.AGVSR_MAX_WORKER_FAILURES = "2";
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "tier2 test", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "fail once",
+    });
+    for (let i = 0; i < 50 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+      await Bun.sleep(5);
+    }
+
+    await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "fail twice",
+    });
+    for (let i = 0; i < 100; i++) {
+      const r = await c.request<{ job: Job }>("job.get", { id: jobId });
+      if (!r.ok || r.result.job.status !== "running") break;
+      await Bun.sleep(5);
+    }
+
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("failed");
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(
+      logs.result.messages.some(
+        (m) => m.kind === "failure" && m.to_role === "user" && m.body.includes("Tier2"),
+      ),
+    ).toBe(true);
+
+    delete process.env.AGVSR_MAX_WORKER_FAILURES;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try { rmSync(f); } catch {}
+    }
+  });
+
   it("returns the configured team roles", async () => {
     const c = await Client.connect(sock);
     const res = await c.request<{ roles: RoleSummary[] }>("team.get");

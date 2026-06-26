@@ -12,12 +12,14 @@ import type { Job, Message, PingResult, Response, RoleSummary } from "../protoco
 const USAGE = `agvsr ${VERSION}
 
 Usage:
-  agvsr daemon                 Run the agvsrd daemon in the foreground
-  agvsr ping                   Check the daemon is up
-  agvsr job "<goal>" [--cwd D] Submit a job (D is the target repo, default: cwd)
-  agvsr status                 List jobs
-  agvsr logs <job-id> [-f]     Show audit messages for a job
-  agvsr team                   Show configured roles
+  agvsr daemon                      Run the agvsrd daemon in the foreground
+  agvsr ping                        Check the daemon is up
+  agvsr job "<goal>" [--cwd D]      Submit a job (D is the target repo, default: cwd)
+  agvsr status                      List jobs
+  agvsr logs <job-id> [-f]          Show audit messages for a job
+  agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
+  agvsr stop <job-id>               Stop a running job (mark failed)
+  agvsr team                        Show configured roles
 `;
 
 function unwrap<T>(res: Response<T>): T {
@@ -140,6 +142,33 @@ async function main(argv: string[]): Promise<void> {
           await Bun.sleep(1000);
           await fetchAndPrint();
         }
+      });
+      return;
+    }
+
+    case "tell": {
+      const jobId = rest[0];
+      const body = rest.slice(1).join(" ").trim();
+      if (!jobId || !body) {
+        console.error('usage: agvsr tell <job-id> "<message>"');
+        process.exit(1);
+      }
+      await withClient(async (c) => {
+        unwrap(await c.request("job.tell", { job_id: jobId, body }));
+        console.log("message queued to supervisor");
+      });
+      return;
+    }
+
+    case "stop": {
+      const jobId = rest[0];
+      if (!jobId) {
+        console.error("usage: agvsr stop <job-id>");
+        process.exit(1);
+      }
+      await withClient(async (c) => {
+        unwrap(await c.request("job.stop", { job_id: jobId }));
+        console.log(`job ${jobId} stopped`);
       });
       return;
     }

@@ -125,15 +125,27 @@ Current validation: **38 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **38 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 10 — Watchdog Tier2 Threshold + Human Intervention ✅
+
+| File                   | What it does                                                                                                                                                                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/daemon/daemon.ts` | Tracks consecutive per-role failure counts per job. After N failures (default 3, env `AGVSR_MAX_WORKER_FAILURES`), escalates to Tier2: hard-fails the job and writes a user-facing failure audit row. Success resets the counter. Crash path uses the same threshold logic. Adds `job.tell` handler (user → supervisor dispatch for running jobs) and `job.stop` handler (human-initiated job termination). |
+| `src/protocol.ts`      | Adds `job.tell` (`{ job_id, body }`) and `job.stop` (`{ job_id }`) request types.                                                                                                                                                                                                  |
+| `src/cli/agvsr.ts`     | Adds `agvsr tell <job-id> "<message>"` (D15 steering) and `agvsr stop <job-id>` (D15 forced stop).                                                                                                                                                                                 |
+| `test/ipc.test.ts`     | Covers `job.tell` dispatch, `job.stop` status transition + double-stop rejection, and Tier2 hard-fail after N consecutive worker failures.                                                                                                                                          |
+
+Current validation: **41 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
    - Optionally run against actual claude-code/codex binaries with credentials available; the committed E2E now covers the same daemon/adapter/MCP path deterministically using a fake `claude`.
    - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
 
-2. **Watchdog tiering**
-   - Add loop/no-progress detection beyond wall-clock timeout.
-   - Add configurable thresholds for repeated Tier1 worker failures before hard-failing a job.
+2. **Loop/no-progress watchdog signals** (D14)
+   - Same-tool-same-args repeated N times.
+   - No file changes for N turns (zero `tool_use` events touching the workspace).
+   These require parsing `TurnEvent` stream data from adapter drivers, which is not yet wired into the daemon.
 
 3. **Persistence hardening**
    - Consider a true server-push logs stream later; current `logs -f` uses portable polling.
@@ -199,9 +211,6 @@ examples/
 
 ## Branch Status
 
-| Branch             | Status                                            |
-| ------------------ | ------------------------------------------------- |
-| `main`             | Phase 0 + Phase 1 merged                          |
-| `phase-2-adapters` | Phase 2 work (29 tests passing) — **needs merge** |
-
-Run `git log --oneline` on `phase-2-adapters` to see commits.
+| Branch | Status                           |
+| ------ | -------------------------------- |
+| `main` | Phase 0–10 merged, 41 tests pass |
