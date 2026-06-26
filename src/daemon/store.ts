@@ -95,6 +95,15 @@ export class Store {
       .run({ $status: status, $ts: now(), $id: id });
   }
 
+  interruptRunningJobs(): Job[] {
+    const jobs = this.db.query(`SELECT * FROM jobs WHERE status = 'running'`).all() as Job[];
+    const ts = now();
+    this.db
+      .query(`UPDATE jobs SET status = 'interrupted', updated_at = $ts WHERE status = 'running'`)
+      .run({ $ts: ts });
+    return jobs.map((j) => ({ ...j, status: "interrupted", updated_at: ts }));
+  }
+
   createMessage(input: {
     job_id: string;
     from_role: string;

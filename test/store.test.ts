@@ -43,6 +43,11 @@ describe("Store", () => {
     store.setAgentSession(a.id, "supervisor", "session-2");
     expect(store.getAgentSession(a.id, "supervisor")).toBe("session-2");
 
+    const interrupted = store.interruptRunningJobs();
+    expect(interrupted.map((j) => j.id)).toEqual([b.id]);
+    expect(store.getJob(b.id)!.status).toBe("interrupted");
+    expect(store.interruptRunningJobs()).toEqual([]);
+
     store.close();
   });
 });

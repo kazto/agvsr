@@ -85,12 +85,31 @@ Current validation: **35 passing tests, 0 failing**; `bun run typecheck` passes.
 | `test/store.test.ts`   | Covers session insert/update/read behavior.                                                                                                                                          |
 | `test/ipc.test.ts`     | Covers daemon restart: a persisted supervisor session is reused and the system prompt is not reinjected.                                                                             |
 
-Current validation: **35 passing tests, 0 failing**; `bun run typecheck` passes.
+Current validation: **36 passing tests, 0 failing**; `bun run typecheck` passes.
+
+### Phase 6 — Restart Fail-Safe ✅
+
+| File                   | What it does                                                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/store.ts`  | Adds `interruptRunningJobs()`, atomically moving stale `running` jobs to `interrupted`.                                                                                    |
+| `src/daemon/daemon.ts` | On daemon start, marks stale running jobs interrupted and writes a daemon-to-user audit message. `interruptRunningJobsOnStart: false` is available only for focused tests. |
+| `test/store.test.ts`   | Covers idempotent interruption of running jobs.                                                                                                                            |
+| `test/ipc.test.ts`     | Covers daemon startup fail-safe and verifies stale jobs are not dispatched automatically.                                                                                  |
+
+Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
+
+### Phase 7 — Deterministic E2E Smoke ✅
+
+| File               | What it does                                                                                                                                                                                                                                                      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/e2e.test.ts` | Runs a real daemon, real default adapter runner, fake `claude` executable on `PATH`, and the real MCP shim. The fake CLI reads `--mcp-config`, starts `src/mcp/shim.ts`, calls `agvsr_complete`, and verifies the job reaches `done` with a completion audit row. |
+
+Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Remaining next work:
 
 1. **Real CLI smoke tests**
-   - Run a controlled local job through actual claude-code/codex with the shim loaded and verify `agvsr_send` / `agvsr_complete` round-trip.
+   - Optionally run against actual claude-code/codex binaries with credentials available; the committed E2E now covers the same daemon/adapter/MCP path deterministically using a fake `claude`.
    - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
 
 2. **Watchdog tiering**
@@ -99,7 +118,6 @@ Remaining next work:
 
 3. **Persistence hardening**
    - Add message read tracking to CLI logs if follow mode is introduced.
-   - Consider marking running jobs `interrupted` on daemon restart before accepting new work (D17).
 
 ### Key design constraints to respect
 
@@ -149,6 +167,7 @@ test/
   adapters.test.ts     ← per-driver spawn/parse tests
   run.test.ts          ← runTurn() tests
   shim.test.ts         ← MCP shim integration tests
+  e2e.test.ts          ← deterministic daemon → adapter → fake CLI → MCP shim smoke test
 spikes/
   s1b-claude-resume.ts ← confirmed resume model for claude
   s2-codex.ts          ← confirmed codex exec resume shape

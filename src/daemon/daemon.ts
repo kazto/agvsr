@@ -48,6 +48,8 @@ export interface StartDaemonOptions {
   team?: TeamConfig | null;
   endpoint?: string;
   turnRunner?: TurnRunner;
+  /** D17 fail-safe: mark stale running jobs interrupted when a daemon starts. */
+  interruptRunningJobsOnStart?: boolean;
 }
 
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -94,6 +96,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const team = options.team === undefined ? resolveTeam() : options.team;
   const endpoint = options.endpoint ?? ipcEndpoint();
   const runner = team ? (options.turnRunner ?? defaultTurnRunner(team)) : null;
+  if (options.interruptRunningJobsOnStart !== false) {
+    for (const job of store.interruptRunningJobs()) {
+      store.createMessage({
+        job_id: job.id,
+        from_role: "daemon",
+        to_role: "user",
+        kind: "failure",
+        body: "Daemon started with this job still marked running; marked interrupted for fail-safe recovery.",
+      });
+    }
+  }
   const sessions = new Map<string, Map<string, string | null>>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();

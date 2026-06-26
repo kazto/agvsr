@@ -5,6 +5,7 @@ import { rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
+import { Store } from "../src/daemon/store.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
 import type { Job, Message, PingResult, RoleSummary } from "../src/protocol.ts";
 
@@ -176,6 +177,38 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("interrupts stale running jobs on daemon start", async () => {
+    const base = join(tmpdir(), `agvsr-interrupt-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const setup = new Store(db);
+    const stale = setup.createJob("stale job", "/repo");
+    setup.close();
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      turnRunner: async () => {
+        throw new Error("should not dispatch stale jobs");
+      },
+    });
+    const c = await Client.connect(sockLocal);
+    const got = await c.request<{ job: Job }>("job.get", { id: stale.id });
+    expect(got.ok && got.result.job.status).toBe("interrupted");
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: stale.id });
+    expect(logs.ok && logs.result.messages.some((m) => m.from_role === "daemon")).toBe(true);
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("persists role sessions across daemon restarts", async () => {
     const base = join(tmpdir(), `agvsr-session-test-${randomUUID()}`);
     const sock1 = `${base}-1.sock`;
@@ -189,6 +222,7 @@ describe("CLI <-> daemon over local IPC", () => {
       endpoint: sock1,
       storeFile: db,
       team: TEAM,
+      interruptRunningJobsOnStart: false,
       turnRunner: async (dispatch) => {
         seen.push(dispatch);
         return {
@@ -216,6 +250,7 @@ describe("CLI <-> daemon over local IPC", () => {
       endpoint: sock2,
       storeFile: db,
       team: TEAM,
+      interruptRunningJobsOnStart: false,
       turnRunner: async (dispatch) => {
         seen.push(dispatch);
         return {
