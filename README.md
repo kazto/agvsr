@@ -23,7 +23,9 @@
 
 `agvsr` は npm パッケージとして配布できますが、実行時には Bun が必要です。
 
+- インストール: `npm install agvsr`
 - 直接起動: `bunx agvsr --help`
-- インストール後に起動: `npm exec agvsr -- --help` か `bunx agvsr --help`
+- ローカルインストール後に起動: `npm exec agvsr -- --help`
+- Bun のランタイム要件: `agvsr` は Bun 上で動作します。Node-only 環境では実行できません。
 
 公開用に tarball を作るときは、`npm pack --dry-run --json` で `src/`, `charters/`, `examples/`, `README.md` が入ることを確認します。

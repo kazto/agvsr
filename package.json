@@ -9,9 +9,6 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./cli": "./src/cli/agvsr.ts",
-    "./daemon": "./src/daemon/daemon.ts",
-    "./mcp": "./src/mcp/shim.ts",
     "./package.json": "./package.json"
   },
   "bin": {

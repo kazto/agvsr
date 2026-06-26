@@ -10,6 +10,21 @@ describe("package surface", () => {
     expect(typeof startDaemon).toBe("function");
   });
 
+  it("exposes only the intended runtime API names", async () => {
+    const api = await import("../src/index.ts");
+    expect(Object.keys(api).sort()).toEqual(
+      [
+        "SUPERVISOR",
+        "TeamConfigError",
+        "VERSION",
+        "allowedTargets",
+        "loadTeam",
+        "parseTeam",
+        "startDaemon",
+      ].sort(),
+    );
+  });
+
   it("packages only the runtime surface for npm", async () => {
     const proc = Bun.spawn(["npm", "pack", "--dry-run", "--json"], {
       cwd: ROOT,
@@ -32,14 +47,21 @@ describe("package surface", () => {
     }>;
     if (!pack) throw new Error("npm pack did not return any metadata");
     const files = new Set(pack.files.map((f) => f.path));
+    const allowedPrefixes = ["package.json", "README.md", "src/", "charters/", "examples/"];
+    const isAllowed = (path: string): boolean =>
+      allowedPrefixes.some((prefix) => path === prefix || path.startsWith(prefix));
 
     expect(pack.name).toBe("agvsr");
+    expect([...files].every(isAllowed)).toBe(true);
+    expect(files.has("package.json")).toBe(true);
     expect(files.has("src/index.ts")).toBe(true);
     expect(files.has("src/cli/agvsr.ts")).toBe(true);
     expect(files.has("charters/scaffold.md")).toBe(true);
     expect(files.has("examples/team.yaml")).toBe(true);
     expect(files.has("README.md")).toBe(true);
-    expect(files.has("test/e2e.test.ts")).toBe(false);
-    expect(files.has("docs/design.md")).toBe(false);
+    expect([...files].some((path) => path.startsWith("test/"))).toBe(false);
+    expect([...files].some((path) => path.startsWith("docs/") && path !== "README.md")).toBe(
+      false,
+    );
   });
 });
