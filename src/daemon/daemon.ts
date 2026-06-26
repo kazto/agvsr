@@ -157,7 +157,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     });
 
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
-    if (result.outcome.exitCode !== 0) store.setJobStatus(job.id, "failed");
+    if (result.outcome.exitCode !== 0) {
+      if (role === SUPERVISOR || result.outcome.timedOut) {
+        store.setJobStatus(job.id, "failed");
+        store.createMessage({
+          job_id: job.id,
+          from_role: "daemon",
+          to_role: "user",
+          kind: "failure",
+          body: `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`,
+        });
+      } else {
+        const body = `${role} turn failed with exit code ${result.outcome.exitCode}. Supervisor must decide whether to retry, reassign, or fail the job.`;
+        store.createMessage({
+          job_id: job.id,
+          from_role: "daemon",
+          to_role: SUPERVISOR,
+          kind: "escalation",
+          body,
+        });
+        enqueueDispatch(job, SUPERVISOR, body);
+      }
+    }
   };
 
   const enqueueDispatch = (job: Job, role: string, message: string): void => {
@@ -167,14 +188,27 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       .catch(() => {})
       .then(() => dispatchRole(job, role, message))
       .catch((e) => {
-        store.setJobStatus(job.id, "failed");
-        store.createMessage({
-          job_id: job.id,
-          from_role: "daemon",
-          to_role: "user",
-          kind: "failure",
-          body: (e as Error).message,
-        });
+        const message = (e as Error).message;
+        if (role === SUPERVISOR) {
+          store.setJobStatus(job.id, "failed");
+          store.createMessage({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "failure",
+            body: message,
+          });
+        } else {
+          const body = `${role} turn crashed: ${message}. Supervisor must decide whether to retry, reassign, or fail the job.`;
+          store.createMessage({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: SUPERVISOR,
+            kind: "escalation",
+            body,
+          });
+          enqueueDispatch(job, SUPERVISOR, body);
+        }
       });
     inflight.set(key, next);
     pendingDispatches.add(next);

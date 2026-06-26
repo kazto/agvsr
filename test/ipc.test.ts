@@ -189,6 +189,69 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("routes non-timeout worker failures to supervisor instead of failing the job", async () => {
+    const base = join(tmpdir(), `agvsr-tier1-test-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "boom" }],
+            outcome: { sessionId: "impl-session", finalText: "boom", exitCode: 2 },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "tier1", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    const sent = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "please fail",
+    });
+    expect(sent.ok).toBe(true);
+    for (let i = 0; i < 50 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+      await Bun.sleep(5);
+    }
+
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("running");
+    expect(seen.at(-1)!.role).toBe("supervisor");
+    expect(seen.at(-1)!.message).toContain("implementation turn failed");
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(
+      logs.result.messages.some((m) => m.kind === "escalation" && m.from_role === "daemon"),
+    ).toBe(true);
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("interrupts stale running jobs on daemon start", async () => {
     const base = join(tmpdir(), `agvsr-interrupt-test-${randomUUID()}`);
     const sockLocal = `${base}.sock`;

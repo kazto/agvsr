@@ -114,7 +114,16 @@ Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
 | `src/cli/agvsr.ts`                         | Adds `agvsr logs <job-id> --follow/-f`, implemented as portable polling over IPC. Displayed messages are marked read. |
 | `test/ipc.test.ts`                         | Covers `msg.list mark_read` and verifies subsequent reads expose `read_at`.                                           |
 
-Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
+Current validation: **38 passing tests, 0 failing**; `bun run typecheck` passes.
+
+### Phase 9 — Watchdog Tier1 Worker Failure Routing ✅
+
+| File                   | What it does                                                                                                                                                                                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/daemon.ts` | Non-timeout worker turn failures now create a daemon-to-supervisor `escalation` and re-dispatch supervisor instead of immediately failing the job. Supervisor failures and timeout failures remain hard failures. Worker turn crashes follow the same Tier1 path. |
+| `test/ipc.test.ts`     | Covers worker non-timeout failure: job remains `running`, an escalation audit row is written, and supervisor receives the failure context.                                                                                                                        |
+
+Current validation: **38 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Remaining next work:
 
@@ -123,8 +132,8 @@ Remaining next work:
    - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
 
 2. **Watchdog tiering**
-   - Replace immediate failure on failed worker turns with supervisor-visible Tier1 events where appropriate.
    - Add loop/no-progress detection beyond wall-clock timeout.
+   - Add configurable thresholds for repeated Tier1 worker failures before hard-failing a job.
 
 3. **Persistence hardening**
    - Consider a true server-push logs stream later; current `logs -f` uses portable polling.
