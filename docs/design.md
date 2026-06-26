@@ -282,10 +282,19 @@ agy は ccgate 非対応・構造化stdout欠如のため、claude/codex より�
 - **S1（claude ライブ駆動）= 想定外**: `claude -p --input-format stream-json` は**単発実行**で、最初の `result` 後に stdout を閉じる。「1プロセスを生かして stdin に複数ターン注入」は **CLI では不可**（Agent SDK 専用機能）。公式 headless ドキュメントも、多ターンは `--continue`/`--resume <session_id>`（別プロセスで継続）と明記。
 - **S1b（claude 再開駆動）= PASS**: `claude -p --resume <session_id> "<msg>" --output-format json` で会話継続を実証（別プロセスのターン2が、ターン1だけで述べた事実を想起。session_id も維持）。**claude も codex/agy と同一の resume-invoke モデルで駆動可能** → D8 の2モデルを単一モデルに統一できる（下記 D1/D7/D8 改訂、要ユーザ確認）。
 
+- **S2（codex 再開）= PASS**: `codex exec --json` のイベントは `thread.started`(`thread_id`=session id) → `turn.started` → `item.completed`(`item:{type:"agent_message", text}` / ツールは `item.type` 別) → `turn.completed`(`usage`)。`codex exec resume <thread_id> --json --skip-git-repo-check "<msg>"` で記憶継続を実証。**注意: resume は `--sandbox` 不可**（`-c sandbox_mode=...` か config で渡す）。`spikes/s2-codex.ts`。
+- **S2（agy 再開）= PASS（条件付き）**: `agy --continue -p "<msg>"` で会話継続を実証（recall PASS）。ただし: ①agy は**自前 conversation id を受け付けず** UUID を自動生成、`~/.gemini/antigravity-cli/conversations/<uuid>.db`（per-conversation SQLite）に保存 → agvsr は**spawn 後に新規 db を検出して id を捕捉**する必要。②`--conversation <id>`（明示id）は一度ハング（コールド起動の遅さ/不安定）→ 実装時にタイムアウト/リトライで要堅牢化。③構造化出力なし（D28 のまま）。→ **claude/codex が堅い一級、agy は best-effort**。
+
+- **S3（MCP 傍受 end-to-end）= PASS**: claude が `agvsr_send(to,body)` を呼び、**MCP stdio shim → ローカル UDS（`Bun.listen` unix）→ スタブデーモン**まで到達（`node:net` UDS クライアントで中継）。エージェントの stdout 形式に依存せずツール呼び出しを捕捉できることを実証（D18/D19）。`spikes/s3-mcp/`・`spikes/s3-run.ts`。
+  - 注意: claude の `--bare` は OAuth 認証をスキップ（`ANTHROPIC_API_KEY`/`apiKeyHelper` 必須）→ OAuth ログイン運用では `--bare` を使わない。MCP ツールは `--allowedTools "mcp__<server>__<tool>"` で事前承認。
+
+### Phase 0 まとめ
+S1–S3 完了（Linux 実機）。**設計の中核前提はすべて検証 or 改訂済み**: 単一 resume-invoke モデル（3種）／MCP shim→ローカルIPC→デーモン傍受／Bun `node:net` IPC／各CLIのイベント形状。残る **S4（Windows 名前付きパイプ実挙動）は実 Windows 必須**で未実施。
+
 ### 実装フェーズで潰す残検証
-- Bun の Windows 名前付きパイプ実挙動（D18、WSL/Linux からは確認不可・実 Windows 必須）。
-- codex `exec resume --json` / agy `--conversation` の実イベント形状（S2 で確定予定）。
-- MCP shim 傍受経路の end-to-end（S3 で確定予定）。
+- S4: Bun の Windows 名前付きパイプ実挙動（D18、実 Windows 必須）。
+- agy `--conversation <id>` のハング原因・堅牢化（タイムアウト/リトライ、id 捕捉の確実性）。
+- 各アダプタのツール呼び出しイベント（claude: stream-json の `tool_use` / codex: `item.completed` の tool item）を実タスクで確定。
 
 ---
 
