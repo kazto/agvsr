@@ -64,7 +64,8 @@ export type Request =
     }
   | { id: string; type: "request"; method: "job.fail"; params: { job_id: string; reason: string } }
   | { id: string; type: "request"; method: "job.tell"; params: { job_id: string; body: string } }
-  | { id: string; type: "request"; method: "job.stop"; params: { job_id: string } };
+  | { id: string; type: "request"; method: "job.stop"; params: { job_id: string } }
+  | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 
 export type Method = Extract<Request, { type: "request" }>["method"];
 

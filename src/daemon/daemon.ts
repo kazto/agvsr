@@ -34,6 +34,10 @@ export interface Daemon {
 
 export interface TurnDispatch {
   role: string;
+  /** Adapter type from the job's team snapshot (D17). */
+  adapter: string;
+  /** Model string from the job's team snapshot (D17). */
+  model: string;
   job: Job;
   message: string;
   sessionId: string | null;
@@ -104,21 +108,12 @@ function toolUseFingerprint(events: TurnEvent[]): string {
     .join("|");
 }
 
-function defaultTurnRunner(team: TeamConfig): TurnRunner {
-  return async ({ role, job, message, sessionId, systemPrompt, env }) => {
-    const roleConfig = team.roles[role];
-    if (!roleConfig) throw new Error(`no role ${role}`);
-    const driver = driverFor(roleConfig.adapter);
+function defaultTurnRunner(): TurnRunner {
+  return async ({ role, adapter, model, job, message, sessionId, systemPrompt, env }) => {
+    const driver = driverFor(adapter as import("../config/team.ts").Adapter);
     return runTurn(
       driver,
-      {
-        role,
-        adapter: roleConfig.adapter,
-        model: roleConfig.model,
-        cwd: job.cwd,
-        systemPrompt,
-        env,
-      },
+      { role, adapter: adapter as import("../config/team.ts").Adapter, model, cwd: job.cwd, systemPrompt, env },
       sessionId,
       message,
       { timeoutMs: turnTimeoutMs() },
@@ -136,14 +131,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   ensureConfigDir();
   const store = options.store ?? new Store(options.storeFile ?? storePath());
   const ownsStore = !options.store;
-  const team = options.team === undefined ? resolveTeam() : options.team;
+  let team = options.team === undefined ? resolveTeam() : options.team;
   const endpoint = options.endpoint ?? ipcEndpoint();
-  const runner = team ? (options.turnRunner ?? defaultTurnRunner(team)) : null;
+  let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
+  // Always reads current `team` so hooks update immediately after reload.
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
     if (cmd) hookRun(cmd, event);
   };
+  // Per-job team snapshots (D17): role config captured at job creation so
+  // reload doesn't change adapter/model mid-job.
+  const jobTeamSnapshots = new Map<string, TeamConfig>();
   if (options.interruptRunningJobsOnStart !== false) {
     for (const job of store.interruptRunningJobs()) {
       store.createMessage({
@@ -243,21 +242,25 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   };
 
   const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {
-    if (!team || !runner) throw new Error("no team.yaml configured");
-    const roleConfig = team.roles[role];
+    if (!runner) throw new Error("no team.yaml configured");
+    const jobTeam = jobTeamSnapshots.get(job.id) ?? team;
+    if (!jobTeam) throw new Error("no team.yaml configured");
+    const roleConfig = jobTeam.roles[role];
     if (!roleConfig) throw new Error(`no role ${role}`);
 
     const sessionId = sessionFor(job.id, role);
     const systemPrompt = sessionId
       ? ""
       : composeCharter(
-          team,
+          jobTeam,
           role,
           { jobId: job.id, cwd: job.cwd },
           { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
         );
     const result = await runner({
       role,
+      adapter: roleConfig.adapter,
+      model: roleConfig.model,
       job,
       message,
       sessionId,
@@ -266,7 +269,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         AGVSR_SOCK: endpoint,
         AGVSR_ROLE: role,
         AGVSR_JOB_ID: job.id,
-        AGVSR_ALLOWED: allowedTargets(team, role).join(","),
+        AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
       },
     });
 
@@ -398,6 +401,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const { goal, cwd } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
         const job = store.createJob(goal.trim(), cwd);
+        if (team) jobTeamSnapshots.set(job.id, team);
         store.createMessage({
           job_id: job.id,
           from_role: "user",
@@ -444,7 +448,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const job = store.getJob(job_id);
         if (!job) return err(req.id, "not_found", `no job ${job_id}`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
-        if (!isAllowed(team!, from, to))
+        const routingTeam = jobTeamSnapshots.get(job_id) ?? team!;
+        if (!isAllowed(routingTeam, from, to))
           return err(req.id, "forbidden", `${from} may not send to ${to}`);
         const msg = store.createMessage({
           job_id,
@@ -470,7 +475,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (!job) return err(req.id, "not_found", `no job ${job_id}`);
         if (!reason?.trim())
           return err(req.id, "bad_request", "escalation reason must not be empty");
-        if (!team!.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
+        const escalationTeam = jobTeamSnapshots.get(job_id) ?? team!;
+        if (!escalationTeam.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
         const msg = store.createMessage({
           job_id,
           from_role: from,
@@ -547,6 +553,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         });
         hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: "Job stopped by user." });
         return ok(req.id, { stopped: true });
+      }
+
+      case "reload": {
+        const teamPath = process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
+        try {
+          const newTeam = loadTeam(teamPath);
+          team = newTeam;
+          if (!options.turnRunner) runner = defaultTurnRunner();
+          const roles: RoleSummary[] = Object.entries(newTeam.roles).map(([name, r]) => ({
+            name,
+            adapter: r.adapter,
+            model: r.model,
+          }));
+          return ok(req.id, { roles });
+        } catch (e) {
+          return err(req.id, "reload_failed", (e as Error).message);
+        }
       }
 
       default:

@@ -157,6 +157,17 @@ Current validation: **49 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **52 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 13 — Config Reload Without Restart (D17) ✅
+
+| File                       | What it does                                                                                                                                                                                                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/daemon.ts`     | `team` and `runner` are now `let` so the `reload` handler can atomically swap them. Per-job team snapshots (`jobTeamSnapshots: Map<string, TeamConfig>`) are captured at `job.create` time. `dispatchRole`, `msg.send` routing, and `msg.escalate` all prefer the per-job snapshot, falling back to the live `team` only for jobs created before any snapshot was recorded. After `reload`, new jobs use the new team; existing jobs keep their snapshot. `defaultTurnRunner` reads `adapter`/`model` from `TurnDispatch` (not a captured closure), so it uses the right config for each job regardless of when reload fired. |
+| `src/protocol.ts`          | Adds `reload` request type (no params, returns `{ roles: RoleSummary[] }`).                                                                                                                                                                                                                   |
+| `src/cli/agvsr.ts`         | Adds `agvsr reload` command: prints the new team's role table on success.                                                                                                                                                                                                                     |
+| `test/ipc.test.ts`         | Covers: reload reflects new roles, reload error path, snapshot isolation (old job routes to impl after reload removed impl; new job is forbidden).                                                                                                                                            |
+
+Current validation: **55 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -229,4 +240,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–12 merged, 52 tests pass |
+| `main` | Phase 0–13 merged, 55 tests pass |

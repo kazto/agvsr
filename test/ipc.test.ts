@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
@@ -706,5 +706,178 @@ describe("CLI <-> daemon over local IPC", () => {
       expect(names).toContain("qa");
     }
     c.close();
+  });
+
+  it("reloads team.yaml at runtime and reflects new roles (D17)", async () => {
+    const base = join(tmpdir(), `agvsr-reload-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const yamlPath = `${base}.team.yaml`;
+    const seen: TurnDispatch[] = [];
+
+    writeFileSync(
+      yamlPath,
+      `roles:\n  supervisor: { adapter: claude-code, model: claude-opus-4-8 }\n  design: { adapter: claude-code, model: claude-sonnet-4-6 }\n`,
+    );
+    process.env.AGVSR_TEAM = yamlPath;
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+    const before = await c.request<{ roles: RoleSummary[] }>("team.get");
+    expect(before.ok).toBe(true);
+    if (before.ok) expect(before.result.roles.map((r) => r.name)).toContain("design");
+
+    // Update team.yaml on disk — swap design for a new "qa" role
+    writeFileSync(
+      yamlPath,
+      `roles:\n  supervisor: { adapter: claude-code, model: claude-opus-4-8 }\n  qa: { adapter: agy, model: gemini-3-pro }\n`,
+    );
+    const reloaded = await c.request<{ roles: RoleSummary[] }>("reload");
+    expect(reloaded.ok).toBe(true);
+    if (reloaded.ok) {
+      const names = reloaded.result.roles.map((r) => r.name);
+      expect(names).toContain("qa");
+      expect(names).not.toContain("design");
+    }
+
+    // team.get now reflects new config
+    const after = await c.request<{ roles: RoleSummary[] }>("team.get");
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.result.roles.map((r) => r.name)).toContain("qa");
+
+    delete process.env.AGVSR_TEAM;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, yamlPath]) {
+      try { rmSync(f); } catch {}
+    }
+  });
+
+  it("reload returns an error when team.yaml is missing or invalid", async () => {
+    const base = join(tmpdir(), `agvsr-reload-err-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const yamlPath = `${base}-nonexistent.yaml`;
+    process.env.AGVSR_TEAM = yamlPath;
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(`roles:\n  supervisor: { adapter: claude-code, model: m }\n`),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (d) => ({
+        events: [],
+        outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
+      }),
+    });
+
+    const c = await Client.connect(sockLocal);
+    const res = await c.request("reload");
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("reload_failed");
+
+    // Original team is still operational
+    const ping = await c.request<{ roles: RoleSummary[] }>("team.get");
+    expect(ping.ok).toBe(true);
+
+    delete process.env.AGVSR_TEAM;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try { rmSync(f); } catch {}
+    }
+  });
+
+  it("running jobs keep their team snapshot after reload (D17)", async () => {
+    const base = join(tmpdir(), `agvsr-reload-snap-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const yamlPath = `${base}.team.yaml`;
+    const seen: TurnDispatch[] = [];
+
+    const oldYaml = `roles:\n  supervisor: { adapter: claude-code, model: old-model }\n  impl: { adapter: codex, model: old-model }\n`;
+    writeFileSync(yamlPath, oldYaml);
+    process.env.AGVSR_TEAM = yamlPath;
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+    const c = await Client.connect(sockLocal);
+
+    // Create job BEFORE reload — snapshot should be old team
+    const created = await c.request<{ job: Job }>("job.create", { goal: "snap test", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    // Reload with a team that has only supervisor (no impl)
+    writeFileSync(yamlPath, `roles:\n  supervisor: { adapter: claude-code, model: new-model }\n`);
+    const reloadRes = await c.request("reload");
+    expect(reloadRes.ok).toBe(true);
+
+    // Routing for the OLD job must still accept impl (snapshot has it)
+    const sent = await c.request<{ queued: true; message: Message }>("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "impl",
+      body: "continue",
+    });
+    expect(sent.ok).toBe(true); // routing must work via snapshot
+
+    // The audit log must contain the impl message
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.to_role === "impl" && m.body === "continue")).toBe(true);
+
+    // New job after reload — routing to impl must be FORBIDDEN (not in new team)
+    const newCreated = await c.request<{ job: Job }>("job.create", {
+      goal: "new after reload",
+      cwd: "/repo",
+    });
+    expect(newCreated.ok).toBe(true);
+    const newJobId = newCreated.ok ? newCreated.result.job.id : "";
+    for (let i = 0; i < 50 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+      await Bun.sleep(5);
+    }
+    const forbidden = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: newJobId,
+      to: "impl",
+      body: "should fail",
+    });
+    expect(forbidden.ok).toBe(false);
+    if (!forbidden.ok) expect(forbidden.error.code).toBe("forbidden");
+
+    delete process.env.AGVSR_TEAM;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, yamlPath]) {
+      try { rmSync(f); } catch {}
+    }
   });
 });

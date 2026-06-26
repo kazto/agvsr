@@ -19,6 +19,7 @@ Usage:
   agvsr logs <job-id> [-f]          Show audit messages for a job
   agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
   agvsr stop <job-id>               Stop a running job (mark failed)
+  agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
 `;
 
@@ -172,6 +173,16 @@ async function main(argv: string[]): Promise<void> {
       });
       return;
     }
+
+    case "reload":
+      await withClient(async (c) => {
+        const { roles } = unwrap(await c.request<{ roles: RoleSummary[] }>("reload"));
+        console.log("team.yaml reloaded:");
+        for (const r of roles) {
+          console.log(`  ${r.name.padEnd(16)} ${r.adapter.padEnd(12)} ${r.model}`);
+        }
+      });
+      return;
 
     case "team":
       await withClient(async (c) => {
