@@ -1,26 +1,22 @@
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
-import { VERSION, startDaemon } from "../src/index.ts";
+import { VERSION } from "../src/index.ts";
 
 const ROOT = join(import.meta.dir, "..");
 
 describe("package surface", () => {
   it("exports a stable public entrypoint", () => {
     expect(VERSION).toBe("0.0.0");
-    expect(typeof startDaemon).toBe("function");
   });
 
   it("exposes only the intended runtime API names", async () => {
     const api = await import("../src/index.ts");
     expect(Object.keys(api).sort()).toEqual(
       [
-        "SUPERVISOR",
         "TeamConfigError",
         "VERSION",
-        "allowedTargets",
         "loadTeam",
         "parseTeam",
-        "startDaemon",
       ].sort(),
     );
   });
