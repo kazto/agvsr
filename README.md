@@ -19,3 +19,11 @@
 
 `~/.config/agvsr/inbox.sqlite` を介してメッセージをやりとりします。
 
+# npm 配布
+
+`agvsr` は npm パッケージとして配布できますが、実行時には Bun が必要です。
+
+- 直接起動: `bunx agvsr --help`
+- インストール後に起動: `npm exec agvsr -- --help` か `bunx agvsr --help`
+
+公開用に tarball を作るときは、`npm pack --dry-run --json` で `src/`, `charters/`, `examples/`, `README.md` が入ることを確認します。

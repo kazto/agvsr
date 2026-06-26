@@ -2,14 +2,21 @@
  * agvsrd — the central daemon (D6). Owns the store, IPC server, message router,
  * and the per-job agent session registry used by the resume-invoke runtime.
  */
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve, join } from "node:path";
 import { serve, type PushFn } from "../ipc/transport.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import { composeCharter, driverFor, runTurn, type TurnEvent, type TurnResult } from "../adapters/index.ts";
+import {
+  composeCharter,
+  driverFor,
+  runTurn,
+  type TurnEvent,
+  type TurnResult,
+} from "../adapters/index.ts";
 import { fireHook, type HookEvent } from "../hooks.ts";
 import type { Job, Message, PushFrame, Request, Response, RoleSummary } from "../protocol.ts";
 
@@ -143,12 +150,33 @@ function defaultTurnRunner(): TurnRunner {
     const driver = driverFor(adapter as import("../config/team.ts").Adapter);
     return runTurn(
       driver,
-      { role, adapter: adapter as import("../config/team.ts").Adapter, model, cwd: job.cwd, systemPrompt, env },
+      {
+        role,
+        adapter: adapter as import("../config/team.ts").Adapter,
+        model,
+        cwd: job.cwd,
+        systemPrompt,
+        env,
+      },
       sessionId,
       message,
       { timeoutMs: turnTimeoutMs() },
     );
   };
+}
+
+function normalizeCwd(input: string): string {
+  const expanded =
+    input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
+  return resolve(expanded);
+}
+
+function cwdError(cwd: string): string | null {
+  try {
+    return statSync(cwd).isDirectory() ? null : `cwd is not a directory: ${cwd}`;
+  } catch (err) {
+    return `cwd does not exist: ${cwd} (${(err as Error).message})`;
+  }
 }
 
 function isAllowed(team: TeamConfig, from: string, to: string): boolean {
@@ -165,7 +193,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const endpoint = options.endpoint ?? ipcEndpoint();
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
-  const userPath = options.userPath ?? await resolveUserPath();
+  const userPath = options.userPath ?? (await resolveUserPath());
   // Always reads current `team` so hooks update immediately after reload.
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
@@ -200,7 +228,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     const set = msgWatchers.get(msg.job_id);
     if (!set || set.size === 0) return;
     const frame: PushFrame = { type: "push", event: "msg.new", data: msg };
-    for (const watcher of [...set]) {
+    for (const watcher of set) {
       if (!watcher(frame)) set.delete(watcher); // prune dead connections
     }
   };
@@ -244,9 +272,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     failureCounts.get(jobId)?.set(role, 0);
   };
 
-  const byRole = <V>(map: Map<string, Map<string, V>>, jobId: string, role: string): Map<string, V> => {
+  const byRole = <V>(map: Map<string, Map<string, V>>, jobId: string): Map<string, V> => {
     let m = map.get(jobId);
-    if (!m) { m = new Map(); map.set(jobId, m); }
+    if (!m) {
+      m = new Map();
+      map.set(jobId, m);
+    }
     return m;
   };
 
@@ -265,26 +296,26 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     const toolUses = events.filter((e) => e.kind === "tool_use");
 
     if (toolUses.length === 0) {
-      const count = (byRole(noProgressCounts, jobId, role).get(role) ?? 0) + 1;
-      byRole(noProgressCounts, jobId, role).set(role, count);
-      byRole(loopFingerprints, jobId, role).delete(role);
+      const count = (byRole(noProgressCounts, jobId).get(role) ?? 0) + 1;
+      byRole(noProgressCounts, jobId).set(role, count);
+      byRole(loopFingerprints, jobId).delete(role);
       if (count >= noProgressTurns()) {
-        byRole(noProgressCounts, jobId, role).set(role, 0);
+        byRole(noProgressCounts, jobId).set(role, 0);
         return `${role} produced no tool_use events for ${count} consecutive turns (no-progress Tier1 watchdog signal, D14).`;
       }
     } else {
-      byRole(noProgressCounts, jobId, role).set(role, 0);
+      byRole(noProgressCounts, jobId).set(role, 0);
       const fp = toolUseFingerprint(events);
-      const prev = byRole(loopFingerprints, jobId, role).get(role);
+      const prev = byRole(loopFingerprints, jobId).get(role);
       if (prev && prev.fp === fp) {
         const count = prev.count + 1;
-        byRole(loopFingerprints, jobId, role).set(role, { fp, count });
+        byRole(loopFingerprints, jobId).set(role, { fp, count });
         if (count >= loopRepeatTurns()) {
-          byRole(loopFingerprints, jobId, role).set(role, { fp, count: 0 });
+          byRole(loopFingerprints, jobId).set(role, { fp, count: 0 });
           return `${role} repeated identical tool calls for ${count} consecutive turns (loop Tier1 watchdog signal, D14).`;
         }
       } else {
-        byRole(loopFingerprints, jobId, role).set(role, { fp, count: 1 });
+        byRole(loopFingerprints, jobId).set(role, { fp, count: 1 });
       }
     }
     return null;
@@ -297,6 +328,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     const roleConfig = jobTeam.roles[role];
     if (!roleConfig) throw new Error(`no role ${role}`);
 
+    const messageCountBeforeTurn = store.listMessages(job.id).length;
     const sessionId = sessionFor(job.id, role);
     const systemPrompt = sessionId
       ? ""
@@ -325,6 +357,43 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     });
 
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
+
+    const messagesFromTurn = store.listMessages(job.id).slice(messageCountBeforeTurn);
+    const statusAfterTurn = store.getJob(job.id)?.status ?? job.status;
+    const routedByRole = messagesFromTurn.some((m) => m.from_role === role);
+    const finalText = result.outcome.finalText.trim();
+    if (finalText) {
+      createMsg({
+        job_id: job.id,
+        from_role: role,
+        to_role: "daemon",
+        kind: "message",
+        body: finalText,
+      });
+    }
+
+    if (
+      role === SUPERVISOR &&
+      result.outcome.exitCode === 0 &&
+      statusAfterTurn === "running" &&
+      finalText &&
+      !routedByRole
+    ) {
+      const reason =
+        "supervisor turn ended with assistant text but no agvsr tool call was recorded; " +
+        "the text was saved to the audit log, but no work was routed and the job cannot progress.";
+      store.setJobStatus(job.id, "failed");
+      createMsg({
+        job_id: job.id,
+        from_role: "daemon",
+        to_role: "user",
+        kind: "failure",
+        body: reason,
+      });
+      hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
+      return;
+    }
+
     if (result.outcome.exitCode !== 0) {
       if (role === SUPERVISOR || result.outcome.timedOut) {
         const reason = `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`;
@@ -373,10 +442,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (escalations >= maxLoop) {
           const reason = `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`;
           store.setJobStatus(job.id, "failed");
-          createMsg({ job_id: job.id, from_role: "daemon", to_role: "user", kind: "failure", body: reason });
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "failure",
+            body: reason,
+          });
           hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
-          createMsg({ job_id: job.id, from_role: "daemon", to_role: SUPERVISOR, kind: "escalation", body: loopMsg });
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: SUPERVISOR,
+            kind: "escalation",
+            body: loopMsg,
+          });
           enqueueDispatch(job, SUPERVISOR, loopMsg);
         }
       } else {
@@ -402,7 +483,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             kind: "failure",
             body: message,
           });
-          hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: message });
+          hook("on_job_failed", {
+            event: "job_failed",
+            job_id: job.id,
+            goal: job.goal,
+            reason: message,
+          });
         } else {
           const failures = incrementFailure(job.id, role);
           const threshold = maxWorkerFailures();
@@ -451,7 +537,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (noTeam) return noTeam;
         const { goal, cwd } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
-        const job = store.createJob(goal.trim(), cwd);
+        const normalizedCwd = normalizeCwd(cwd);
+        const invalidCwd = cwdError(normalizedCwd);
+        if (invalidCwd) return err(req.id, "bad_request", invalidCwd);
+        const job = store.createJob(goal.trim(), normalizedCwd);
         if (team) jobTeamSnapshots.set(job.id, team);
         createMsg({
           job_id: job.id,
@@ -563,7 +652,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "completion",
           body: req.params.result,
         });
-        hook("on_job_done", { event: "job_done", job_id: job.id, goal: job.goal, result: req.params.result });
+        hook("on_job_done", {
+          event: "job_done",
+          job_id: job.id,
+          goal: job.goal,
+          result: req.params.result,
+        });
         return ok(req.id, { done: true });
       }
 
@@ -578,7 +672,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "failure",
           body: req.params.reason,
         });
-        hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: req.params.reason });
+        hook("on_job_failed", {
+          event: "job_failed",
+          job_id: job.id,
+          goal: job.goal,
+          reason: req.params.reason,
+        });
         return ok(req.id, { failed: true });
       }
 
@@ -606,7 +705,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         if (job.status !== "running")
-          return err(req.id, "bad_request", `job ${req.params.job_id} is not running (status: ${job.status})`);
+          return err(
+            req.id,
+            "bad_request",
+            `job ${req.params.job_id} is not running (status: ${job.status})`,
+          );
         store.setJobStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,
@@ -615,7 +718,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "failure",
           body: "Job stopped by user.",
         });
-        hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason: "Job stopped by user." });
+        hook("on_job_failed", {
+          event: "job_failed",
+          job_id: job.id,
+          goal: job.goal,
+          reason: "Job stopped by user.",
+        });
         return ok(req.id, { stopped: true });
       }
 
@@ -644,7 +752,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const server = await serve(endpoint, handle);
 
   const close = async (): Promise<void> => {
-    await Promise.allSettled([...pendingDispatches]);
+    await Promise.allSettled(pendingDispatches);
     await server.close();
     if (ownsStore) store.close();
   };
