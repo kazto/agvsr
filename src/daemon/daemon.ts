@@ -66,6 +66,27 @@ export async function startDaemon(): Promise<Daemon> {
         return ok(req.id, { roles });
       }
 
+      // Phase 3 will implement actual routing; stubs ack for now.
+      case "msg.send":
+        return ok(req.id, { queued: true });
+
+      case "msg.escalate":
+        return ok(req.id, { queued: true });
+
+      case "job.complete": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        store.setJobStatus(req.params.job_id, "done");
+        return ok(req.id, { done: true });
+      }
+
+      case "job.fail": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        store.setJobStatus(req.params.job_id, "failed");
+        return ok(req.id, { failed: true });
+      }
+
       default:
         return err((req as Request).id, "unknown_method", `unknown method`);
     }

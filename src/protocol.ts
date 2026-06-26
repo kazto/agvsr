@@ -23,7 +23,16 @@ export type Request =
   | { id: string; type: "request"; method: "job.create"; params: { goal: string; cwd: string } }
   | { id: string; type: "request"; method: "job.list"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "job.get"; params: { id: string } }
-  | { id: string; type: "request"; method: "team.get"; params?: Record<string, never> };
+  | { id: string; type: "request"; method: "team.get"; params?: Record<string, never> }
+  | {
+      id: string;
+      type: "request";
+      method: "msg.send";
+      params: { from: string; job_id: string; to: string; body: string; refs?: string[] };
+    }
+  | { id: string; type: "request"; method: "msg.escalate"; params: { from: string; job_id: string; reason: string } }
+  | { id: string; type: "request"; method: "job.complete"; params: { job_id: string; result: string } }
+  | { id: string; type: "request"; method: "job.fail"; params: { job_id: string; reason: string } };
 
 export type Method = Extract<Request, { type: "request" }>["method"];
 
