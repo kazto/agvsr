@@ -6,7 +6,7 @@
  */
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { Job, JobStatus } from "../protocol.ts";
+import type { Job, JobStatus, Message, MessageKind } from "../protocol.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -85,6 +85,54 @@ export class Store {
     this.db
       .query(`UPDATE jobs SET status = $status, updated_at = $ts WHERE id = $id`)
       .run({ $status: status, $ts: now(), $id: id });
+  }
+
+  createMessage(input: {
+    job_id: string;
+    from_role: string;
+    to_role: string;
+    kind: MessageKind;
+    body: string;
+    refs?: string[];
+  }): Message {
+    const msg: Message = {
+      id: randomUUID(),
+      job_id: input.job_id,
+      from_role: input.from_role,
+      to_role: input.to_role,
+      kind: input.kind,
+      body: input.body,
+      refs: input.refs ? JSON.stringify(input.refs) : null,
+      created_at: now(),
+      read_at: null,
+    };
+    this.db
+      .query(
+        `INSERT INTO messages (id, job_id, from_role, to_role, kind, body, refs, created_at, read_at)
+         VALUES ($id, $job_id, $from_role, $to_role, $kind, $body, $refs, $created_at, $read_at)`,
+      )
+      .run({
+        $id: msg.id,
+        $job_id: msg.job_id,
+        $from_role: msg.from_role,
+        $to_role: msg.to_role,
+        $kind: msg.kind,
+        $body: msg.body,
+        $refs: msg.refs,
+        $created_at: msg.created_at,
+        $read_at: msg.read_at,
+      });
+    return msg;
+  }
+
+  listMessages(jobId: string): Message[] {
+    return this.db
+      .query(`SELECT * FROM messages WHERE job_id = $job_id ORDER BY created_at ASC`)
+      .all({ $job_id: jobId }) as Message[];
+  }
+
+  markMessageRead(id: string): void {
+    this.db.query(`UPDATE messages SET read_at = $ts WHERE id = $id`).run({ $ts: now(), $id: id });
   }
 
   close(): void {

@@ -4,21 +4,51 @@ import { join } from "node:path";
 import { rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
-import type { Daemon } from "../src/daemon/daemon.ts";
-import type { Job, PingResult, RoleSummary } from "../src/protocol.ts";
+import { parseTeam } from "../src/config/team.ts";
+import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
+import type { Job, Message, PingResult, RoleSummary } from "../src/protocol.ts";
 
 const tmp = join(tmpdir(), `agvsr-test-${randomUUID()}`);
 const sock = `${tmp}.sock`;
 const store = `${tmp}.sqlite`;
+const TEAM = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: claude-opus-4-8 }
+  design: { adapter: claude-code, model: claude-sonnet-4-6 }
+  implementation: { adapter: codex, model: gpt-5-codex }
+  qa: { adapter: agy, model: gemini-3-pro }
+`);
 
 let daemon: Daemon;
+const dispatches: TurnDispatch[] = [];
+let seq = 0;
+
+async function waitForDispatches(n: number): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (dispatches.length >= n) return;
+    await Bun.sleep(5);
+  }
+  throw new Error(`expected ${n} dispatches, got ${dispatches.length}`);
+}
 
 beforeAll(async () => {
-  process.env.AGVSR_SOCK = sock;
-  process.env.AGVSR_STORE = store;
-  process.env.AGVSR_TEAM = join(import.meta.dir, "..", "examples", "team.yaml");
   const { startDaemon } = await import("../src/daemon/daemon.ts");
-  daemon = await startDaemon();
+  daemon = await startDaemon({
+    endpoint: sock,
+    storeFile: store,
+    team: TEAM,
+    turnRunner: async (dispatch) => {
+      dispatches.push(dispatch);
+      return {
+        events: [{ kind: "result", ok: true, text: `ok ${dispatch.role}` }],
+        outcome: {
+          sessionId: `${dispatch.role}-${++seq}`,
+          finalText: `ok ${dispatch.role}`,
+          exitCode: 0,
+        },
+      };
+    },
+  });
 });
 
 afterAll(async () => {
@@ -39,8 +69,9 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
-  it("creates and lists jobs (persisted by the daemon)", async () => {
+  it("creates, dispatches and lists jobs (persisted by the daemon)", async () => {
     const c = await Client.connect(sock);
+    const before = dispatches.length;
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "do a thing",
       cwd: "/repo",
@@ -48,11 +79,96 @@ describe("CLI <-> daemon over local IPC", () => {
     expect(created.ok).toBe(true);
     const id = created.ok ? created.result.job.id : "";
 
+    await waitForDispatches(before + 1);
+    const first = dispatches.at(-1)!;
+    expect(first.role).toBe("supervisor");
+    expect(first.job.id).toBe(id);
+    expect(first.message).toBe("do a thing");
+    expect(first.sessionId).toBeNull();
+    expect(first.systemPrompt).toContain("supervisor");
+    expect(first.env.AGVSR_ALLOWED!.split(",").sort()).toEqual(
+      ["design", "implementation", "qa", "user"].sort(),
+    );
+
     const got = await c.request<{ job: Job }>("job.get", { id });
     expect(got.ok && got.result.job.goal).toBe("do a thing");
 
     const list = await c.request<{ jobs: Job[] }>("job.list");
     expect(list.ok && list.result.jobs.some((j) => j.id === id)).toBe(true);
+    c.close();
+  });
+
+  it("routes allowed messages and resumes the target session", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "route me", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    await waitForDispatches(beforeCreate + 1);
+    const job = created.ok ? created.result.job : null;
+    expect(job).toBeTruthy();
+
+    const beforeSend = dispatches.length;
+    const sent = await c.request<{ queued: true; message: Message }>("msg.send", {
+      from: "supervisor",
+      job_id: job!.id,
+      to: "implementation",
+      body: "please implement",
+      refs: ["docs/design.md"],
+    });
+    expect(sent.ok).toBe(true);
+    await waitForDispatches(beforeSend + 1);
+    const last = dispatches.at(-1)!;
+    expect(last.role).toBe("implementation");
+    expect(last.message).toBe("please implement");
+    expect(last.env.AGVSR_ALLOWED!).toBe("supervisor");
+    expect(sent.ok && JSON.parse(sent.result.message.refs!)).toEqual(["docs/design.md"]);
+    c.close();
+  });
+
+  it("rejects disallowed worker-to-worker messages", async () => {
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "bad route",
+      cwd: "/repo",
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    const res = await c.request("msg.send", {
+      from: "implementation",
+      job_id: jobId,
+      to: "qa",
+      body: "skip the hub",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("forbidden");
+    c.close();
+  });
+
+  it("routes escalation to the supervisor", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "needs escalation",
+      cwd: "/repo",
+    });
+    expect(created.ok).toBe(true);
+    await waitForDispatches(beforeCreate + 1);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    const beforeEscalate = dispatches.length;
+    const res = await c.request<{ queued: true; message: Message }>("msg.escalate", {
+      from: "implementation",
+      job_id: jobId,
+      reason: "permission denied",
+    });
+    expect(res.ok).toBe(true);
+    await waitForDispatches(beforeEscalate + 1);
+    const last = dispatches.at(-1)!;
+    expect(last.role).toBe("supervisor");
+    expect(last.sessionId).toMatch(/^supervisor-/);
+    expect(last.systemPrompt).toBe("");
+    expect(last.message).toContain("permission denied");
+    expect(res.ok && res.result.message.kind).toBe("escalation");
     c.close();
   });
 

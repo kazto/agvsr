@@ -19,7 +19,7 @@ export async function runTurn(
 
   const proc = Bun.spawn([bin, ...args], {
     cwd: spec.cwd,
-    env: env ? { ...process.env, ...env } : process.env,
+    env: { ...process.env, ...spec.env, ...env },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -50,7 +50,8 @@ export async function runTurn(
   }
 
   const sessionId2 =
-    parser.sessionId() ?? (driver.resolveSessionId && before ? driver.resolveSessionId(spec, before) : null);
+    parser.sessionId() ??
+    (driver.resolveSessionId && before ? driver.resolveSessionId(spec, before) : null);
 
   return {
     events,

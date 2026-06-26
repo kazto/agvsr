@@ -19,6 +19,8 @@ export interface AgentSpec {
   cwd: string;
   /** Composed charter (scaffold + role charter), injected as the system prompt (D25). */
   systemPrompt: string;
+  /** Daemon-provided runtime environment, mainly for the MCP stdio shim (D19). */
+  env?: Record<string, string>;
 }
 
 /** Structured events surfaced from a turn (observability; routing is via MCP). */

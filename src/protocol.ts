@@ -17,6 +17,20 @@ export interface Job {
   updated_at: string;
 }
 
+export type MessageKind = "message" | "escalation" | "completion" | "failure";
+
+export interface Message {
+  id: string;
+  job_id: string;
+  from_role: string;
+  to_role: string;
+  kind: MessageKind;
+  body: string;
+  refs: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
 /** Requests the client can send. Keep methods coarse and explicit. */
 export type Request =
   | { id: string; type: "request"; method: "ping"; params?: Record<string, never> }
@@ -30,8 +44,18 @@ export type Request =
       method: "msg.send";
       params: { from: string; job_id: string; to: string; body: string; refs?: string[] };
     }
-  | { id: string; type: "request"; method: "msg.escalate"; params: { from: string; job_id: string; reason: string } }
-  | { id: string; type: "request"; method: "job.complete"; params: { job_id: string; result: string } }
+  | {
+      id: string;
+      type: "request";
+      method: "msg.escalate";
+      params: { from: string; job_id: string; reason: string };
+    }
+  | {
+      id: string;
+      type: "request";
+      method: "job.complete";
+      params: { job_id: string; result: string };
+    }
   | { id: string; type: "request"; method: "job.fail"; params: { job_id: string; reason: string } };
 
 export type Method = Extract<Request, { type: "request" }>["method"];

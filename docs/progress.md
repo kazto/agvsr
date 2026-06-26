@@ -9,7 +9,9 @@
 ## Current State
 
 ### Phase 0 — Spikes ✅
+
 Three real-machine spikes confirmed the adapter model:
+
 - **S1/S1b** (`spikes/s1b-claude-resume.ts`): `claude --resume <id>` continues conversation across processes.
 - **S2** (`spikes/s2-codex.ts`): codex `exec resume <thread_id>` pattern, asymmetric flag set.
 - **S3** (`spikes/s3-run.ts` + `spikes/s3-mcp/`): stdio MCP shim intercepts tool calls and relays to UDS daemon.
@@ -17,66 +19,74 @@ Three real-machine spikes confirmed the adapter model:
 Key finding: all three CLIs fit a unified **resume-invoke** model (D1). No persistent stdin injection needed.
 
 ### Phase 1 — Daemon skeleton ✅ (merged to main)
-| File | What it does |
-|---|---|
-| `src/ipc/transport.ts` | `serve()` / `Client` / `DaemonNotRunningError`. POSIX UDS + Windows named pipe via same `node:net` path. |
-| `src/daemon/store.ts` | `Store` — `bun:sqlite` WAL, jobs table, `createJob / getJob / listJobs / setJobStatus`. |
-| `src/daemon/daemon.ts` | `startDaemon()` — IPC handler for `ping / job.* / team.get / msg.* / job.complete / job.fail`. |
-| `src/config/team.ts` | `parseTeam / loadTeam / allowedTargets` — Zod-validated `team.yaml`, star topology edge derivation. |
-| `src/paths.ts` | Cross-platform `configDir()`, `ipcEndpoint()`, `storePath()`. |
-| `src/protocol.ts` | Wire types: `Job`, `Request` (all methods), `Response<T>`, `Frame`. |
-| `src/cli/agvsr.ts` | CLI: `daemon / ping / job / status / team`. |
-| `test/{store,team,ipc}.test.ts` | 11 passing tests. |
+
+| File                            | What it does                                                                                             |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `src/ipc/transport.ts`          | `serve()` / `Client` / `DaemonNotRunningError`. POSIX UDS + Windows named pipe via same `node:net` path. |
+| `src/daemon/store.ts`           | `Store` — `bun:sqlite` WAL, jobs table, `createJob / getJob / listJobs / setJobStatus`.                  |
+| `src/daemon/daemon.ts`          | `startDaemon()` — IPC handler for `ping / job.* / team.get / msg.* / job.complete / job.fail`.           |
+| `src/config/team.ts`            | `parseTeam / loadTeam / allowedTargets` — Zod-validated `team.yaml`, star topology edge derivation.      |
+| `src/paths.ts`                  | Cross-platform `configDir()`, `ipcEndpoint()`, `storePath()`.                                            |
+| `src/protocol.ts`               | Wire types: `Job`, `Request` (all methods), `Response<T>`, `Frame`.                                      |
+| `src/cli/agvsr.ts`              | CLI: `daemon / ping / job / status / team`.                                                              |
+| `test/{store,team,ipc}.test.ts` | 11 passing tests.                                                                                        |
 
 ### Phase 2 — Adapter layer ✅ (on branch `phase-2-adapters`, not yet merged)
-| File | What it does |
-|---|---|
-| `src/adapters/types.ts` | `AgentSpec`, `TurnEvent`, `TurnOutcome`, `TurnResult`, `CliDriver`, `TurnParser`, `SpawnSpec`, `SessionProbe`. |
-| `src/adapters/charter.ts` | `stripHtmlComments`, `fillScaffold`, `composeCharter`. Scaffold + `defaults/<role>.md` composition. |
-| `src/adapters/claude.ts` | `claudeDriver`: `--append-system-prompt`, `--resume`, stream-json parser. |
-| `src/adapters/codex.ts` | `codexDriver`: `exec --json` / `exec resume <id>`, charter preamble, thread_id parser. |
-| `src/adapters/agy.ts` | `agyDriver`: plain text, `probeSession` / `resolveSessionId` via conversations dir diff. |
-| `src/adapters/run.ts` | `runTurn()`: shared spawn → stream → resolve session-id runner. |
-| `src/adapters/index.ts` | Registry: `driverFor(adapter)`. Re-exports `runTurn`, `composeCharter`, types. |
-| `src/mcp/shim.ts` | stdio MCP server. Exposes `agvsr_send`, `agvsr_escalate` (all roles), `agvsr_complete`, `agvsr_fail` (supervisor). Relays over UDS to daemon via `Client`. |
-| `test/{charter,adapters,run,shim}.test.ts` | 18 passing tests (14 adapter + 4 shim integration). |
+
+| File                                       | What it does                                                                                                                                               |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/adapters/types.ts`                    | `AgentSpec`, `TurnEvent`, `TurnOutcome`, `TurnResult`, `CliDriver`, `TurnParser`, `SpawnSpec`, `SessionProbe`.                                             |
+| `src/adapters/charter.ts`                  | `stripHtmlComments`, `fillScaffold`, `composeCharter`. Scaffold + `defaults/<role>.md` composition.                                                        |
+| `src/adapters/claude.ts`                   | `claudeDriver`: `--append-system-prompt`, `--resume`, stream-json parser.                                                                                  |
+| `src/adapters/codex.ts`                    | `codexDriver`: `exec --json` / `exec resume <id>`, charter preamble, thread_id parser.                                                                     |
+| `src/adapters/agy.ts`                      | `agyDriver`: plain text, `probeSession` / `resolveSessionId` via conversations dir diff.                                                                   |
+| `src/adapters/run.ts`                      | `runTurn()`: shared spawn → stream → resolve session-id runner.                                                                                            |
+| `src/adapters/index.ts`                    | Registry: `driverFor(adapter)`. Re-exports `runTurn`, `composeCharter`, types.                                                                             |
+| `src/mcp/shim.ts`                          | stdio MCP server. Exposes `agvsr_send`, `agvsr_escalate` (all roles), `agvsr_complete`, `agvsr_fail` (supervisor). Relays over UDS to daemon via `Client`. |
+| `test/{charter,adapters,run,shim}.test.ts` | 18 passing tests (14 adapter + 4 shim integration).                                                                                                        |
 
 **Total: 29 passing tests, 0 failing.**
 
+### Phase 3 — Orchestration Runtime ✅ (router/session core)
+
+| File                                            | What it does                                                                                                                                                                                                                                        |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/daemon.ts`                          | `startDaemon(options)` with injectable store/team/runner; `job.create` dispatches supervisor; `msg.send` routes allowed targets; `msg.escalate` routes to supervisor; role-per-job sessions are tracked in memory; per-role dispatch is serialized. |
+| `src/daemon/store.ts`                           | Message audit API: `createMessage / listMessages / markMessageRead`.                                                                                                                                                                                |
+| `src/protocol.ts`                               | `MessageKind` / `Message` wire/store types.                                                                                                                                                                                                         |
+| `src/adapters/types.ts` + `src/adapters/run.ts` | `AgentSpec.env` passes daemon runtime env into spawned CLIs for MCP shim context.                                                                                                                                                                   |
+| `test/ipc.test.ts`                              | Fake-runner daemon tests for job dispatch, allowed routing, forbidden worker-to-worker routing, escalation routing, and session resume.                                                                                                             |
+| `test/store.test.ts`                            | Message audit persistence coverage.                                                                                                                                                                                                                 |
+
+Current validation: **32 passing tests, 0 failing**; `bun run typecheck` passes.
+
+Remaining Phase 3/next hardening:
+
+- Wire CLI-specific MCP server registration flags/config into adapter spawns, not just env (`AGVSR_SOCK`, `AGVSR_ROLE`, `AGVSR_JOB_ID`, `AGVSR_ALLOWED`).
+- Add human-visible result surfacing beyond audit rows for `job.complete` / `job.fail` (stdout/event hook later, D26).
+- Decide whether failed agent turns should immediately fail the job or become supervisor-visible failures once watchdog tiers exist.
+
 ---
 
-## Immediate Next Step: Phase 3 — Orchestration Runtime
+## Next Step: MCP Spawn Wiring and Runtime Hardening
 
-This is where the project reaches **MVP**: a real job can be dispatched, an agent runs, completes, and the result is returned to the human.
+The daemon now dispatches jobs and routes messages with a fake-runner-tested core. The next step is making real spawned CLIs reliably load the MCP shim so `agvsr_send` / `agvsr_complete` can round-trip in an actual agent job.
 
-### What Phase 3 must build
+### What to build next
 
-1. **Message router** in `daemon.ts`
-   - `msg.send`: look up the target role in team config, spawn/resume the target agent, inject the body as a new turn.
-   - `msg.escalate`: route to supervisor role.
-   - Enforce star topology (D10): workers may only send to supervisor; daemon rejects disallowed targets.
+1. **Adapter-specific MCP registration**
+   - claude-code: add the correct stdio MCP server registration for `bun run src/mcp/shim.ts`.
+   - codex: add the equivalent MCP server config/flag for `codex exec`.
+   - agy: document or generate the `mcp_config.json` path/config needed for Antigravity.
 
-2. **Job lifecycle** (`src/daemon/jobs.ts` or extend `daemon.ts`)
-   - `job.create` already creates a DB record (Phase 1).
-   - Phase 3: on `job.create`, spawn the **supervisor** agent with the goal as first turn.
-   - On `job.complete` / `job.fail`: mark the store, notify the human (stdout / hook for now).
-   - Conversation lifecycle: session IDs are stored per role-per-job; reset on new job (D12).
+2. **Real job smoke test**
+   - Minimal team with one supervisor role using a controllable/local fake CLI or a deterministic fixture driver.
+   - End-to-end path: `job.create` → supervisor turn → `job.complete` via shim → job status `done`.
 
-3. **Agent session registry**
-   - Track `Map<roleId, sessionId | null>` in memory (per job). Persist to SQLite in Phase 6.
-   - On first turn for a role+job: `sessionId = null` → charter is injected (new session).
-   - On subsequent turns: `sessionId` is passed to `runTurn` → resume.
-
-4. **MCP shim wiring**
-   - When spawning an agent via `runTurn`, pass `--mcp-server "bun run src/mcp/shim.ts"` (or equivalent) with env:
-     - `AGVSR_SOCK` — daemon socket path
-     - `AGVSR_ROLE` — role name
-     - `AGVSR_JOB_ID` — job id
-     - `AGVSR_ALLOWED` — comma-separated allowed targets (from `allowedTargets()`)
-
-5. **Tests**
-   - Unit: fake `CliDriver` (returns canned `TurnResult`) to test router, lifecycle, session registry deterministically.
-   - E2E (optional here, required by Phase 5): `agvsr job "..."` → supervisor → implementation → `agvsr_complete` on a toy repo.
+3. **Runtime hardening**
+   - Surface `job.complete` / `job.fail` results to the human-facing CLI/logs path.
+   - Introduce the first watchdog timeout around `runTurn`.
+   - Persist role session IDs in SQLite later (current Phase 3 registry is in-memory by design).
 
 ### Key design constraints to respect
 
@@ -138,9 +148,9 @@ examples/
 
 ## Branch Status
 
-| Branch | Status |
-|---|---|
-| `main` | Phase 0 + Phase 1 merged |
+| Branch             | Status                                            |
+| ------------------ | ------------------------------------------------- |
+| `main`             | Phase 0 + Phase 1 merged                          |
 | `phase-2-adapters` | Phase 2 work (29 tests passing) — **needs merge** |
 
 Run `git log --oneline` on `phase-2-adapters` to see commits.

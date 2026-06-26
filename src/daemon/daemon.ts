@@ -1,16 +1,16 @@
 /**
- * agvsrd — the central daemon (D6). Owns the store and the IPC server. In Phase 1
- * it handles bookkeeping requests (ping, jobs, team); spawning/driving agents and
- * routing messages arrive in Phase 2/3.
+ * agvsrd — the central daemon (D6). Owns the store, IPC server, message router,
+ * and the per-job agent session registry used by the resume-invoke runtime.
  */
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { serve } from "../ipc/transport.ts";
 import { Store } from "./store.ts";
-import { loadTeam, type TeamConfig } from "../config/team.ts";
+import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import type { Request, Response, RoleSummary } from "../protocol.ts";
+import { composeCharter, driverFor, runTurn, type TurnResult } from "../adapters/index.ts";
+import type { Job, Request, Response, RoleSummary } from "../protocol.ts";
 
 function resolveTeam(): TeamConfig | null {
   const candidate = process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
@@ -31,11 +31,132 @@ export interface Daemon {
   close(): Promise<void>;
 }
 
-export async function startDaemon(): Promise<Daemon> {
+export interface TurnDispatch {
+  role: string;
+  job: Job;
+  message: string;
+  sessionId: string | null;
+  systemPrompt: string;
+  env: Record<string, string>;
+}
+
+export type TurnRunner = (dispatch: TurnDispatch) => Promise<TurnResult>;
+
+export interface StartDaemonOptions {
+  store?: Store;
+  storeFile?: string;
+  team?: TeamConfig | null;
+  endpoint?: string;
+  turnRunner?: TurnRunner;
+}
+
+function defaultTurnRunner(team: TeamConfig): TurnRunner {
+  return async ({ role, job, message, sessionId, systemPrompt, env }) => {
+    const roleConfig = team.roles[role];
+    if (!roleConfig) throw new Error(`no role ${role}`);
+    const driver = driverFor(roleConfig.adapter);
+    return runTurn(
+      driver,
+      {
+        role,
+        adapter: roleConfig.adapter,
+        model: roleConfig.model,
+        cwd: job.cwd,
+        systemPrompt,
+        env,
+      },
+      sessionId,
+      message,
+    );
+  };
+}
+
+function isAllowed(team: TeamConfig, from: string, to: string): boolean {
+  if (from === "user") return to === SUPERVISOR;
+  if (!team.roles[from]) return false;
+  return allowedTargets(team, from).includes(to);
+}
+
+export async function startDaemon(options: StartDaemonOptions = {}): Promise<Daemon> {
   ensureConfigDir();
-  const store = new Store(storePath());
-  const team = resolveTeam();
-  const endpoint = ipcEndpoint();
+  const store = options.store ?? new Store(options.storeFile ?? storePath());
+  const ownsStore = !options.store;
+  const team = options.team === undefined ? resolveTeam() : options.team;
+  const endpoint = options.endpoint ?? ipcEndpoint();
+  const runner = team ? (options.turnRunner ?? defaultTurnRunner(team)) : null;
+  const sessions = new Map<string, Map<string, string | null>>();
+  const inflight = new Map<string, Promise<void>>();
+  const pendingDispatches = new Set<Promise<void>>();
+
+  const sessionFor = (jobId: string, role: string): string | null =>
+    sessions.get(jobId)?.get(role) ?? null;
+  const setSession = (jobId: string, role: string, sessionId: string | null): void => {
+    let byRole = sessions.get(jobId);
+    if (!byRole) {
+      byRole = new Map();
+      sessions.set(jobId, byRole);
+    }
+    byRole.set(role, sessionId);
+  };
+
+  const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {
+    if (!team || !runner) throw new Error("no team.yaml configured");
+    const roleConfig = team.roles[role];
+    if (!roleConfig) throw new Error(`no role ${role}`);
+
+    const sessionId = sessionFor(job.id, role);
+    const systemPrompt = sessionId
+      ? ""
+      : composeCharter(
+          team,
+          role,
+          { jobId: job.id, cwd: job.cwd },
+          { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
+        );
+    const result = await runner({
+      role,
+      job,
+      message,
+      sessionId,
+      systemPrompt,
+      env: {
+        AGVSR_SOCK: endpoint,
+        AGVSR_ROLE: role,
+        AGVSR_JOB_ID: job.id,
+        AGVSR_ALLOWED: allowedTargets(team, role).join(","),
+      },
+    });
+
+    setSession(job.id, role, result.outcome.sessionId ?? sessionId);
+    if (result.outcome.exitCode !== 0) store.setJobStatus(job.id, "failed");
+  };
+
+  const enqueueDispatch = (job: Job, role: string, message: string): void => {
+    const key = `${job.id}:${role}`;
+    const previous = inflight.get(key) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(() => dispatchRole(job, role, message))
+      .catch((e) => {
+        store.setJobStatus(job.id, "failed");
+        store.createMessage({
+          job_id: job.id,
+          from_role: "daemon",
+          to_role: "user",
+          kind: "failure",
+          body: (e as Error).message,
+        });
+      });
+    inflight.set(key, next);
+    pendingDispatches.add(next);
+    next.finally(() => {
+      pendingDispatches.delete(next);
+      if (inflight.get(key) === next) inflight.delete(key);
+    });
+  };
+
+  const requireTeam = (id: string): Response | null =>
+    team ? null : err(id, "no_team", "no team.yaml configured");
 
   const handle = (req: Request): Response => {
     switch (req.method) {
@@ -43,9 +164,20 @@ export async function startDaemon(): Promise<Daemon> {
         return ok(req.id, { pong: true, version: VERSION });
 
       case "job.create": {
+        const noTeam = requireTeam(req.id);
+        if (noTeam) return noTeam;
         const { goal, cwd } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
-        return ok(req.id, { job: store.createJob(goal.trim(), cwd) });
+        const job = store.createJob(goal.trim(), cwd);
+        store.createMessage({
+          job_id: job.id,
+          from_role: "user",
+          to_role: SUPERVISOR,
+          kind: "message",
+          body: job.goal,
+        });
+        enqueueDispatch(job, SUPERVISOR, job.goal);
+        return ok(req.id, { job });
       }
 
       case "job.list":
@@ -66,17 +198,58 @@ export async function startDaemon(): Promise<Daemon> {
         return ok(req.id, { roles });
       }
 
-      // Phase 3 will implement actual routing; stubs ack for now.
-      case "msg.send":
-        return ok(req.id, { queued: true });
+      case "msg.send": {
+        const noTeam = requireTeam(req.id);
+        if (noTeam) return noTeam;
+        const { from, job_id, to, body, refs } = req.params;
+        const job = store.getJob(job_id);
+        if (!job) return err(req.id, "not_found", `no job ${job_id}`);
+        if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
+        if (!isAllowed(team!, from, to))
+          return err(req.id, "forbidden", `${from} may not send to ${to}`);
+        const msg = store.createMessage({
+          job_id,
+          from_role: from,
+          to_role: to,
+          kind: "message",
+          body,
+          refs,
+        });
+        if (to !== "user") enqueueDispatch(job, to, body);
+        return ok(req.id, { queued: true, message: msg });
+      }
 
-      case "msg.escalate":
-        return ok(req.id, { queued: true });
+      case "msg.escalate": {
+        const noTeam = requireTeam(req.id);
+        if (noTeam) return noTeam;
+        const { from, job_id, reason } = req.params;
+        const job = store.getJob(job_id);
+        if (!job) return err(req.id, "not_found", `no job ${job_id}`);
+        if (!reason?.trim())
+          return err(req.id, "bad_request", "escalation reason must not be empty");
+        if (!team!.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
+        const msg = store.createMessage({
+          job_id,
+          from_role: from,
+          to_role: SUPERVISOR,
+          kind: "escalation",
+          body: reason,
+        });
+        enqueueDispatch(job, SUPERVISOR, `Escalation from ${from}:\n\n${reason}`);
+        return ok(req.id, { queued: true, message: msg });
+      }
 
       case "job.complete": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         store.setJobStatus(req.params.job_id, "done");
+        store.createMessage({
+          job_id: req.params.job_id,
+          from_role: SUPERVISOR,
+          to_role: "user",
+          kind: "completion",
+          body: req.params.result,
+        });
         return ok(req.id, { done: true });
       }
 
@@ -84,6 +257,13 @@ export async function startDaemon(): Promise<Daemon> {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         store.setJobStatus(req.params.job_id, "failed");
+        store.createMessage({
+          job_id: req.params.job_id,
+          from_role: SUPERVISOR,
+          to_role: "user",
+          kind: "failure",
+          body: req.params.reason,
+        });
         return ok(req.id, { failed: true });
       }
 
@@ -95,8 +275,9 @@ export async function startDaemon(): Promise<Daemon> {
   const server = await serve(endpoint, handle);
 
   const close = async (): Promise<void> => {
+    await Promise.allSettled([...pendingDispatches]);
     await server.close();
-    store.close();
+    if (ownsStore) store.close();
   };
 
   return { endpoint, close };
