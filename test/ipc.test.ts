@@ -124,9 +124,21 @@ describe("CLI <-> daemon over local IPC", () => {
     expect(last.env.AGVSR_ALLOWED!).toBe("supervisor");
     expect(sent.ok && JSON.parse(sent.result.message.refs!)).toEqual(["docs/design.md"]);
 
-    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: job!.id });
+    const logs = await c.request<{ messages: Message[] }>("msg.list", {
+      job_id: job!.id,
+      mark_read: true,
+    });
     expect(logs.ok).toBe(true);
-    expect(logs.ok && logs.result.messages.some((m) => m.body === "please implement")).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.body === "please implement")).toBe(true);
+
+    const readLogs = await c.request<{ messages: Message[] }>("msg.list", { job_id: job!.id });
+    expect(readLogs.ok).toBe(true);
+    if (!readLogs.ok) throw new Error("msg.list failed");
+    const lastReadAt = logs.result.messages.at(-1)!.created_at;
+    expect(readLogs.result.messages.every((m) => m.read_at || m.created_at > lastReadAt)).toBe(
+      true,
+    );
     c.close();
   });
 

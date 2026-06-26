@@ -16,7 +16,7 @@ Usage:
   agvsr ping                   Check the daemon is up
   agvsr job "<goal>" [--cwd D] Submit a job (D is the target repo, default: cwd)
   agvsr status                 List jobs
-  agvsr logs <job-id>          Show audit messages for a job
+  agvsr logs <job-id> [-f]     Show audit messages for a job
   agvsr team                   Show configured roles
 `;
 
@@ -100,23 +100,45 @@ async function main(argv: string[]): Promise<void> {
       return;
 
     case "logs": {
-      const jobId = rest[0];
+      const { values, positionals } = parseArgs({
+        args: rest,
+        options: { follow: { type: "boolean", short: "f" } },
+        allowPositionals: true,
+      });
+      const jobId = positionals[0];
       if (!jobId) {
         console.error("a job id is required, e.g. agvsr logs <job-id>");
         process.exit(1);
       }
+      const print = (m: Message) => {
+        const refs = m.refs ? ` refs=${m.refs}` : "";
+        console.log(`[${m.created_at}] ${m.kind} ${m.from_role} -> ${m.to_role}${refs}`);
+        console.log(m.body);
+      };
       await withClient(async (c) => {
-        const { messages } = unwrap(
-          await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId }),
-        );
-        if (messages.length === 0) {
-          console.log("no messages");
-          return;
-        }
-        for (const m of messages) {
-          const refs = m.refs ? ` refs=${m.refs}` : "";
-          console.log(`[${m.created_at}] ${m.kind} ${m.from_role} -> ${m.to_role}${refs}`);
-          console.log(m.body);
+        const seen = new Set<string>();
+        const fetchAndPrint = async (): Promise<number> => {
+          const { messages } = unwrap(
+            await c.request<{ messages: Message[] }>("msg.list", {
+              job_id: jobId,
+              mark_read: true,
+            }),
+          );
+          let count = 0;
+          for (const m of messages) {
+            if (seen.has(m.id)) continue;
+            seen.add(m.id);
+            print(m);
+            count++;
+          }
+          return count;
+        };
+
+        const firstCount = await fetchAndPrint();
+        if (!values.follow && firstCount === 0) console.log("no messages");
+        while (values.follow) {
+          await Bun.sleep(1000);
+          await fetchAndPrint();
         }
       });
       return;

@@ -106,6 +106,16 @@ Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 8 — Log Follow and Read Tracking ✅
+
+| File                                       | What it does                                                                                                          |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `src/protocol.ts` + `src/daemon/daemon.ts` | Extends `msg.list` with `mark_read`; daemon marks listed audit messages read via `read_at`.                           |
+| `src/cli/agvsr.ts`                         | Adds `agvsr logs <job-id> --follow/-f`, implemented as portable polling over IPC. Displayed messages are marked read. |
+| `test/ipc.test.ts`                         | Covers `msg.list mark_read` and verifies subsequent reads expose `read_at`.                                           |
+
+Current validation: **37 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -117,7 +127,7 @@ Remaining next work:
    - Add loop/no-progress detection beyond wall-clock timeout.
 
 3. **Persistence hardening**
-   - Add message read tracking to CLI logs if follow mode is introduced.
+   - Consider a true server-push logs stream later; current `logs -f` uses portable polling.
 
 ### Key design constraints to respect
 
@@ -148,7 +158,7 @@ src/
     run.ts             ← runTurn() shared runner
     index.ts           ← driverFor() registry
   mcp/shim.ts          ← stdio MCP server (agvsr_send, escalate, complete, fail)
-  cli/agvsr.ts         ← CLI entrypoint (job/status/team/logs)
+  cli/agvsr.ts         ← CLI entrypoint (job/status/team/logs/logs -f)
 charters/
   scaffold.md          ← Layer 1 protocol (immutable, filled at spawn time)
   defaults/

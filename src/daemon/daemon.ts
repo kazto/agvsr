@@ -230,7 +230,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "msg.list": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
-        return ok(req.id, { messages: store.listMessages(req.params.job_id) });
+        const messages = store.listMessages(req.params.job_id);
+        if (req.params.mark_read) {
+          for (const msg of messages) store.markMessageRead(msg.id);
+        }
+        return ok(req.id, { messages });
       }
 
       case "msg.send": {
