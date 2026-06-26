@@ -1,0 +1,79 @@
+/**
+ * claude-code driver (resume-invoke, D8). Drives a turn via stream-json output
+ * and `--resume <session_id>`; the system prompt goes in via --append-system-prompt.
+ * Session id comes from the `system/init` (or `result`) event.
+ */
+import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+
+interface ClaudeEvent {
+  type?: string;
+  subtype?: string;
+  session_id?: string;
+  message?: { content?: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
+  result?: string;
+}
+
+function createParser(): TurnParser {
+  let session: string | null = null;
+  let text = "";
+
+  return {
+    push(line: string): TurnEvent[] {
+      let ev: ClaudeEvent;
+      try {
+        ev = JSON.parse(line) as ClaudeEvent;
+      } catch {
+        return [];
+      }
+
+      if (ev.type === "system" && ev.subtype === "init") {
+        if (ev.session_id) session = ev.session_id;
+        return [];
+      }
+
+      if (ev.type === "assistant") {
+        const out: TurnEvent[] = [];
+        for (const block of ev.message?.content ?? []) {
+          if (block.type === "text" && typeof block.text === "string") {
+            text += block.text;
+            out.push({ kind: "text", text: block.text });
+          } else if (block.type === "tool_use" && block.name) {
+            out.push({ kind: "tool_use", name: block.name, input: block.input });
+          }
+        }
+        return out;
+      }
+
+      if (ev.type === "result") {
+        if (ev.session_id) session = ev.session_id;
+        return [{ kind: "result", ok: ev.subtype === "success", text: ev.result }];
+      }
+
+      return [];
+    },
+    sessionId: () => session,
+    finalText: () => text,
+  };
+}
+
+export const claudeDriver: CliDriver = {
+  adapter: "claude-code",
+
+  buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--model",
+      spec.model,
+      "--append-system-prompt",
+      spec.systemPrompt,
+    ];
+    if (sessionId) args.push("--resume", sessionId);
+    args.push(message);
+    return { bin: "claude", args };
+  },
+
+  createParser,
+};
