@@ -9,7 +9,7 @@ import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import { composeCharter, driverFor, runTurn, type TurnResult } from "../adapters/index.ts";
+import { composeCharter, driverFor, runTurn, type TurnEvent, type TurnResult } from "../adapters/index.ts";
 import { fireHook, type HookEvent } from "../hooks.ts";
 import type { Job, Request, Response, RoleSummary } from "../protocol.ts";
 
@@ -72,6 +72,38 @@ function maxWorkerFailures(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_WORKER_FAILURES;
 }
 
+const DEFAULT_NO_PROGRESS_TURNS = 3;
+const DEFAULT_LOOP_REPEAT_TURNS = 3;
+const DEFAULT_MAX_LOOP_ESCALATIONS = 3;
+
+function noProgressTurns(): number {
+  const raw = process.env.AGVSR_NO_PROGRESS_TURNS;
+  if (!raw) return DEFAULT_NO_PROGRESS_TURNS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_NO_PROGRESS_TURNS;
+}
+
+function loopRepeatTurns(): number {
+  const raw = process.env.AGVSR_LOOP_REPEAT_TURNS;
+  if (!raw) return DEFAULT_LOOP_REPEAT_TURNS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_LOOP_REPEAT_TURNS;
+}
+
+function maxLoopEscalations(): number {
+  const raw = process.env.AGVSR_MAX_LOOP_ESCALATIONS;
+  if (!raw) return DEFAULT_MAX_LOOP_ESCALATIONS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_LOOP_ESCALATIONS;
+}
+
+function toolUseFingerprint(events: TurnEvent[]): string {
+  return events
+    .filter((e): e is Extract<TurnEvent, { kind: "tool_use" }> => e.kind === "tool_use")
+    .map((e) => `${e.name}:${JSON.stringify(e.input)}`)
+    .join("|");
+}
+
 function defaultTurnRunner(team: TeamConfig): TurnRunner {
   return async ({ role, job, message, sessionId, systemPrompt, env }) => {
     const roleConfig = team.roles[role];
@@ -125,6 +157,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   }
   const sessions = new Map<string, Map<string, string | null>>();
   const failureCounts = new Map<string, Map<string, number>>();
+  // Loop/no-progress watchdog state (D14)
+  const noProgressCounts = new Map<string, Map<string, number>>();
+  const loopFingerprints = new Map<string, Map<string, { fp: string; count: number }>>();
+  const loopEscalationCounts = new Map<string, number>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
 
@@ -158,6 +194,52 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   const resetFailure = (jobId: string, role: string): void => {
     failureCounts.get(jobId)?.set(role, 0);
+  };
+
+  const byRole = <V>(map: Map<string, Map<string, V>>, jobId: string, role: string): Map<string, V> => {
+    let m = map.get(jobId);
+    if (!m) { m = new Map(); map.set(jobId, m); }
+    return m;
+  };
+
+  /**
+   * Detects loop/no-progress patterns on a successful turn (D14 Tier1 signals).
+   * Returns a human-readable escalation message if a signal fires, null otherwise.
+   * Skips detection for agy (no structured tool_use events in stdout, D28).
+   */
+  const checkLoopSignal = (
+    jobId: string,
+    role: string,
+    adapter: string,
+    events: TurnEvent[],
+  ): string | null => {
+    if (adapter === "agy") return null;
+    const toolUses = events.filter((e) => e.kind === "tool_use");
+
+    if (toolUses.length === 0) {
+      const count = (byRole(noProgressCounts, jobId, role).get(role) ?? 0) + 1;
+      byRole(noProgressCounts, jobId, role).set(role, count);
+      byRole(loopFingerprints, jobId, role).delete(role);
+      if (count >= noProgressTurns()) {
+        byRole(noProgressCounts, jobId, role).set(role, 0);
+        return `${role} produced no tool_use events for ${count} consecutive turns (no-progress Tier1 watchdog signal, D14).`;
+      }
+    } else {
+      byRole(noProgressCounts, jobId, role).set(role, 0);
+      const fp = toolUseFingerprint(events);
+      const prev = byRole(loopFingerprints, jobId, role).get(role);
+      if (prev && prev.fp === fp) {
+        const count = prev.count + 1;
+        byRole(loopFingerprints, jobId, role).set(role, { fp, count });
+        if (count >= loopRepeatTurns()) {
+          byRole(loopFingerprints, jobId, role).set(role, { fp, count: 0 });
+          return `${role} repeated identical tool calls for ${count} consecutive turns (loop Tier1 watchdog signal, D14).`;
+        }
+      } else {
+        byRole(loopFingerprints, jobId, role).set(role, { fp, count: 1 });
+      }
+    }
+    return null;
   };
 
   const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {
@@ -229,6 +311,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       }
     } else {
       resetFailure(job.id, role);
+      const loopMsg = checkLoopSignal(job.id, role, roleConfig.adapter, result.events);
+      if (loopMsg) {
+        const escalations = (loopEscalationCounts.get(job.id) ?? 0) + 1;
+        loopEscalationCounts.set(job.id, escalations);
+        const maxLoop = maxLoopEscalations();
+        if (escalations >= maxLoop) {
+          const reason = `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`;
+          store.setJobStatus(job.id, "failed");
+          store.createMessage({ job_id: job.id, from_role: "daemon", to_role: "user", kind: "failure", body: reason });
+          hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
+        } else {
+          store.createMessage({ job_id: job.id, from_role: "daemon", to_role: SUPERVISOR, kind: "escalation", body: loopMsg });
+          enqueueDispatch(job, SUPERVISOR, loopMsg);
+        }
+      } else {
+        loopEscalationCounts.set(job.id, 0);
+      }
     }
   };
 

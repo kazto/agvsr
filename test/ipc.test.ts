@@ -532,6 +532,170 @@ describe("CLI <-> daemon over local IPC", () => {
     }
   });
 
+  it("sends Tier1 escalation to supervisor after N no-tool-use turns by a worker", async () => {
+    const base = join(tmpdir(), `agvsr-noprogress-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+    process.env.AGVSR_NO_PROGRESS_TURNS = "2";
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "no-progress", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    // Two turns from implementation with no tool_use events → Tier1 on second turn
+    for (let turn = 0; turn < 2; turn++) {
+      const beforeSend = seen.filter((d) => d.role === "supervisor").length;
+      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `work turn ${turn}` });
+      if (turn === 1) {
+        for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSend + 1; i++) {
+          await Bun.sleep(5);
+        }
+      } else {
+        for (let i = 0; i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1; i++) {
+          await Bun.sleep(5);
+        }
+      }
+    }
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("no-progress"))).toBe(true);
+    expect(seen.at(-1)!.role).toBe("supervisor");
+
+    delete process.env.AGVSR_NO_PROGRESS_TURNS;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+  });
+
+  it("sends Tier1 escalation when a worker repeats identical tool calls", async () => {
+    const base = join(tmpdir(), `agvsr-loopfp-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        const events =
+          dispatch.role === "implementation"
+            ? [{ kind: "tool_use" as const, name: "bash", input: { command: "ls" } }, { kind: "result" as const, ok: true }]
+            : [{ kind: "result" as const, ok: true, text: dispatch.role }];
+        return { events, outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 } };
+      },
+    });
+    process.env.AGVSR_LOOP_REPEAT_TURNS = "2";
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "loop fp", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    for (let turn = 0; turn < 2; turn++) {
+      const beforeSupervisor = seen.filter((d) => d.role === "supervisor").length;
+      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `repeat ${turn}` });
+      if (turn === 1) {
+        for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < beforeSupervisor + 1; i++) {
+          await Bun.sleep(5);
+        }
+      } else {
+        for (let i = 0; i < 50 && seen.filter((d) => d.role === "implementation").length < turn + 1; i++) {
+          await Bun.sleep(5);
+        }
+      }
+    }
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.kind === "escalation" && m.body.includes("loop Tier1"))).toBe(true);
+
+    delete process.env.AGVSR_LOOP_REPEAT_TURNS;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+  });
+
+  it("Tier2 hard-fails a job after N loop escalations", async () => {
+    const base = join(tmpdir(), `agvsr-looptier2-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        const events =
+          dispatch.role === "implementation"
+            ? [{ kind: "result" as const, ok: true, text: "text only" }]
+            : [{ kind: "result" as const, ok: true, text: dispatch.role }];
+        return { events, outcome: { sessionId: `${dispatch.role}-s`, finalText: dispatch.role, exitCode: 0 } };
+      },
+    });
+    process.env.AGVSR_NO_PROGRESS_TURNS = "1";
+    process.env.AGVSR_MAX_LOOP_ESCALATIONS = "2";
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "loop tier2", cwd: "/repo" });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    for (let turn = 0; turn < 2; turn++) {
+      await c.request("msg.send", { from: "supervisor", job_id: jobId, to: "implementation", body: `no progress ${turn}` });
+      for (let i = 0; i < 100; i++) {
+        const r = await c.request<{ job: Job }>("job.get", { id: jobId });
+        if (!r.ok) break;
+        const status = r.result.job.status;
+        if (status === "failed") break;
+        if (turn === 0 && seen.filter((d) => d.role === "supervisor").length >= 2) break;
+        await Bun.sleep(5);
+      }
+    }
+
+    for (let i = 0; i < 100; i++) {
+      const r = await c.request<{ job: Job }>("job.get", { id: jobId });
+      if (!r.ok || r.result.job.status !== "running") break;
+      await Bun.sleep(5);
+    }
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("failed");
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(logs.result.messages.some((m) => m.kind === "failure" && m.body.includes("Tier2"))).toBe(true);
+
+    delete process.env.AGVSR_NO_PROGRESS_TURNS;
+    delete process.env.AGVSR_MAX_LOOP_ESCALATIONS;
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) { try { rmSync(f); } catch {} }
+  });
+
   it("returns the configured team roles", async () => {
     const c = await Client.connect(sock);
     const res = await c.request<{ roles: RoleSummary[] }>("team.get");

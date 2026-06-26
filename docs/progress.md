@@ -148,18 +148,22 @@ Current validation: **41 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Current validation: **49 passing tests, 0 failing**; `bun run typecheck` passes.
 
+### Phase 12 — Loop / No-Progress Watchdog (D14 Tier1 signals) ✅
+
+| File                   | What it does                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/daemon/daemon.ts` | Inspects `TurnResult.events` after every successful worker turn. Detects two Tier1 signals: (1) zero `tool_use` events for N consecutive turns (`AGVSR_NO_PROGRESS_TURNS`, default 3); (2) identical tool-call fingerprint for N consecutive turns (`AGVSR_LOOP_REPEAT_TURNS`, default 3). Either fires a Tier1 escalation to supervisor. After `AGVSR_MAX_LOOP_ESCALATIONS` (default 3) total loop Tier1s for a job, escalates to Tier2 hard-fail. agy adapter is skipped (no structured tool events in stdout, D28). Resets the loop escalation counter on any clean turn. |
+| `test/ipc.test.ts`     | Covers: no-progress Tier1, same-fingerprint Tier1, loop Tier2 after N escalations.                                                                                                                                                                                                              |
+
+Current validation: **52 passing tests, 0 failing**; `bun run typecheck` passes.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
    - Optionally run against actual claude-code/codex binaries with credentials available; the committed E2E now covers the same daemon/adapter/MCP path deterministically using a fake `claude`.
    - For agy, verify whether the generated `mcp_config.json` location can be configured without mutating global user state; if not, keep it as documented setup.
 
-2. **Loop/no-progress watchdog signals** (D14)
-   - Same-tool-same-args repeated N times.
-   - No file changes for N turns (zero `tool_use` events touching the workspace).
-   These require parsing `TurnEvent` stream data from adapter drivers, which is not yet wired into the daemon.
-
-3. **Persistence hardening**
+2. **Persistence hardening**
    - Consider a true server-push logs stream later; current `logs -f` uses portable polling.
 
 ### Key design constraints to respect
@@ -225,4 +229,4 @@ examples/
 
 | Branch | Status                           |
 | ------ | -------------------------------- |
-| `main` | Phase 0–11 merged, 49 tests pass |
+| `main` | Phase 0–12 merged, 52 tests pass |
