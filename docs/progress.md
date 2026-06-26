@@ -74,7 +74,18 @@ Current validation: **34 passing tests, 0 failing**; `bun run typecheck` passes.
 | `src/protocol.ts` + `src/daemon/daemon.ts` + `src/cli/agvsr.ts` | Adds `msg.list` and `agvsr logs <job-id>` so humans can read audit messages, including completion/failure rows.                                                                                                                             |
 | `test/{adapters,run,ipc}.test.ts`                               | Covers MCP argv/config generation, timeout kill behavior, and audit log listing.                                                                                                                                                            |
 
-Current validation: **34 passing tests, 0 failing**; `bun run typecheck` passes.
+Current validation: **35 passing tests, 0 failing**; `bun run typecheck` passes.
+
+### Phase 5 — Session Persistence ✅
+
+| File                   | What it does                                                                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/daemon/store.ts`  | Adds `agent_sessions(job_id, role, session_id, updated_at)` plus `getAgentSession / setAgentSession`, preserving the daemon single-writer model.                                     |
+| `src/daemon/daemon.ts` | Restores role/job session IDs from SQLite on cache miss and persists every non-null session returned by `runTurn`. Charter injection remains first-turn only (`sessionId === null`). |
+| `test/store.test.ts`   | Covers session insert/update/read behavior.                                                                                                                                          |
+| `test/ipc.test.ts`     | Covers daemon restart: a persisted supervisor session is reused and the system prompt is not reinjected.                                                                             |
+
+Current validation: **35 passing tests, 0 failing**; `bun run typecheck` passes.
 
 Remaining next work:
 
@@ -87,8 +98,8 @@ Remaining next work:
    - Add loop/no-progress detection beyond wall-clock timeout.
 
 3. **Persistence hardening**
-   - Persist role session IDs in SQLite; current registry remains in-memory.
    - Add message read tracking to CLI logs if follow mode is introduced.
+   - Consider marking running jobs `interrupted` on daemon restart before accepting new work (D17).
 
 ### Key design constraints to respect
 

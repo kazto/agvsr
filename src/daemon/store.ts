@@ -29,6 +29,14 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL,
   read_at    TEXT
 );
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  job_id     TEXT NOT NULL,
+  role       TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, role),
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
 CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(to_role, read_at) WHERE read_at IS NULL;
 `;
@@ -133,6 +141,25 @@ export class Store {
 
   markMessageRead(id: string): void {
     this.db.query(`UPDATE messages SET read_at = $ts WHERE id = $id`).run({ $ts: now(), $id: id });
+  }
+
+  getAgentSession(jobId: string, role: string): string | null {
+    const row = this.db
+      .query(`SELECT session_id FROM agent_sessions WHERE job_id = $job_id AND role = $role`)
+      .get({ $job_id: jobId, $role: role }) as { session_id: string } | null;
+    return row?.session_id ?? null;
+  }
+
+  setAgentSession(jobId: string, role: string, sessionId: string): void {
+    this.db
+      .query(
+        `INSERT INTO agent_sessions (job_id, role, session_id, updated_at)
+         VALUES ($job_id, $role, $session_id, $updated_at)
+         ON CONFLICT(job_id, role) DO UPDATE SET
+           session_id = excluded.session_id,
+           updated_at = excluded.updated_at`,
+      )
+      .run({ $job_id: jobId, $role: role, $session_id: sessionId, $updated_at: now() });
   }
 
   close(): void {

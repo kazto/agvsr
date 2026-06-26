@@ -98,8 +98,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
 
-  const sessionFor = (jobId: string, role: string): string | null =>
-    sessions.get(jobId)?.get(role) ?? null;
+  const sessionFor = (jobId: string, role: string): string | null => {
+    const cached = sessions.get(jobId)?.get(role);
+    if (cached !== undefined) return cached;
+    const persisted = store.getAgentSession(jobId, role);
+    if (persisted) setSession(jobId, role, persisted);
+    return persisted;
+  };
   const setSession = (jobId: string, role: string, sessionId: string | null): void => {
     let byRole = sessions.get(jobId);
     if (!byRole) {
@@ -107,6 +112,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       sessions.set(jobId, byRole);
     }
     byRole.set(role, sessionId);
+    if (sessionId) store.setAgentSession(jobId, role, sessionId);
   };
 
   const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {

@@ -37,6 +37,12 @@ describe("Store", () => {
     store.markMessageRead(msg.id);
     expect(store.listMessages(a.id).find((m) => m.id === msg.id)!.read_at).toBeTruthy();
 
+    expect(store.getAgentSession(a.id, "supervisor")).toBeNull();
+    store.setAgentSession(a.id, "supervisor", "session-1");
+    expect(store.getAgentSession(a.id, "supervisor")).toBe("session-1");
+    store.setAgentSession(a.id, "supervisor", "session-2");
+    expect(store.getAgentSession(a.id, "supervisor")).toBe("session-2");
+
     store.close();
   });
 });

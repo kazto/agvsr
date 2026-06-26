@@ -176,6 +176,78 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("persists role sessions across daemon restarts", async () => {
+    const base = join(tmpdir(), `agvsr-session-test-${randomUUID()}`);
+    const sock1 = `${base}-1.sock`;
+    const sock2 = `${base}-2.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    let localSeq = 0;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+
+    const firstDaemon = await startDaemon({
+      endpoint: sock1,
+      storeFile: db,
+      team: TEAM,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: {
+            sessionId: `${dispatch.role}-persisted-${++localSeq}`,
+            finalText: dispatch.role,
+            exitCode: 0,
+          },
+        };
+      },
+    });
+    const firstClient = await Client.connect(sock1);
+    const created = await firstClient.request<{ job: Job }>("job.create", {
+      goal: "persist sessions",
+      cwd: "/repo",
+    });
+    expect(created.ok).toBe(true);
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    firstClient.close();
+    await firstDaemon.close();
+
+    const jobId = created.ok ? created.result.job.id : "";
+    const secondDaemon = await startDaemon({
+      endpoint: sock2,
+      storeFile: db,
+      team: TEAM,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: dispatch.sessionId, finalText: dispatch.role, exitCode: 0 },
+        };
+      },
+    });
+    const secondClient = await Client.connect(sock2);
+    const beforeEscalate = seen.length;
+    const escalated = await secondClient.request("msg.escalate", {
+      from: "implementation",
+      job_id: jobId,
+      reason: "resume supervisor",
+    });
+    expect(escalated.ok).toBe(true);
+    for (let i = 0; i < 50 && seen.length < beforeEscalate + 1; i++) await Bun.sleep(5);
+
+    const resumed = seen.at(-1)!;
+    expect(resumed.role).toBe("supervisor");
+    expect(resumed.sessionId).toBe("supervisor-persisted-1");
+    expect(resumed.systemPrompt).toBe("");
+
+    secondClient.close();
+    await secondDaemon.close();
+    for (const f of [sock1, sock2, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("rejects an empty goal", async () => {
     const c = await Client.connect(sock);
     const res = await c.request("job.create", { goal: "  ", cwd: "/repo" });
