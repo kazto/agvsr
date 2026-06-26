@@ -327,11 +327,12 @@ S1–S3 完了（Linux 実機）。**設計の中核前提はすべて検証 or 
 - **S3 MCP shim + IPC**: 極薄 `agvsr-mcp`（stdio）→ ローカル IPC（UDS）→ スタブデーモン、を claude/codex/agy で登録し、`agvsr_send` 1発が傍受される経路を実証（D18/D19）。agy は `mcp_config.json` 経由。
 - **S4 Windows IPC**（実 Windows）: 名前付きパイプで client↔daemon 疎通（D18）。
 
-### Phase 1 — デーモン骨格
-- デーモン本体 ＋ ローカル IPC サーバ（POSIX=UDS / Windows=名前付きパイプ抽象、D18）。
-- 薄い CLI クライアント `agvsr`（D6/D15）。
-- sqlite ストア（single writer）: `messages` / `jobs`（D13/D24）。
-- `team.yaml` ローダ＋検証（役割・adapter・model、D9/D16）。
+### Phase 1 — デーモン骨格 ✅ 実装済み（bun test 緑・E2E スモーク済み）
+- デーモン本体 ＋ ローカル IPC サーバ（POSIX=UDS / Windows=名前付きパイプ抽象、D18） — `src/ipc/transport.ts`（`node:net` 1コードパス）、`src/daemon/daemon.ts`。
+- 薄い CLI クライアント `agvsr`（D6/D15） — `src/cli/agvsr.ts`（`ping`/`job`/`status`/`team`/`daemon`）。
+- sqlite ストア（single writer）: `jobs` / `messages`（D13/D24） — `src/daemon/store.ts`（bun:sqlite, WAL）。
+- `team.yaml` ローダ＋検証（役割・adapter・model、D9/D16） — `src/config/team.ts`（zod, star 許可辺の導出 D10）。model 文字列の実在検証は Phase 2（アダプタ依存）。
+- テスト: `test/{store,team,ipc}.test.ts`（11 pass）。`tsconfig.json` で `tsc --noEmit` クリーン。
 
 ### Phase 2 — アダプタ層
 - アダプタ I/F `deliver(agentId, message) → event stream`（D8、単一 resume-invoke 実装）。

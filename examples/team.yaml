@@ -1,0 +1,17 @@
+# Example agvsr team (D9). One instance per role, static (v1).
+# `model` is a raw per-CLI model string; team.yaml is the source of truth (D16).
+# Omit `charter` to use the bundled default; `charter_append` adds project rules;
+# `charter` replaces it wholesale (D25).
+roles:
+  supervisor:
+    adapter: claude-code
+    model: claude-opus-4-8
+  design:
+    adapter: claude-code
+    model: claude-sonnet-4-6
+  implementation:
+    adapter: codex
+    model: gpt-5-codex
+  qa:
+    adapter: agy
+    model: gemini-3-pro
