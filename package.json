@@ -22,7 +22,8 @@
   ],
   "scripts": {
     "agvsr": "bun run src/cli/agvsr.ts",
-    "daemon": "bun run src/daemon/daemon.ts",
+    "daemon": "bun run agvsr daemon",
+    "job": "bun run agvsr job",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bunx oxfmt src && bun run typecheck && bun test && bunx oxlint src"

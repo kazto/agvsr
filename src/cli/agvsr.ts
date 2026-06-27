@@ -10,11 +10,13 @@ import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import type { Job, Message, PingResult, PushFrame, Response, RoleSummary } from "../protocol.ts";
+import { restartDaemonDetached, startDaemonDetached } from "./daemon.ts";
 
 const USAGE = `agvsr ${VERSION}
 
 Usage:
   agvsr daemon [--team F]           Run the agvsrd daemon in the foreground
+  agvsr daemon start [--team F]     Start the daemon in the background
   agvsr daemon stop                 Stop the running daemon gracefully
   agvsr daemon restart [--team F]   Restart the daemon (optionally with a new team file)
   agvsr ping                        Check the daemon is up
@@ -77,20 +79,24 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
 
+      if (subCmd === "start") {
+        const started = await startDaemonDetached({
+          teamFile: daemonOpts.team,
+        });
+        if (started.alreadyRunning) {
+          console.log("daemon already running");
+        } else {
+          console.log("daemon started");
+        }
+        return;
+      }
+
       if (subCmd === "restart") {
         await withClient(async (c) => {
           unwrap(await c.request("daemon.stop"));
           console.log("daemon stopped, restarting...");
         });
-        const [bunExec, scriptPath] = process.argv as [string, string, ...string[]];
-        const teamArgs = daemonOpts.team ? ["--team", daemonOpts.team] : [];
-        const child = Bun.spawn([bunExec, scriptPath, "daemon", ...teamArgs], {
-          detached: true,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-        child.unref();
+        restartDaemonDetached({ teamFile: daemonOpts.team });
         console.log("daemon restarted");
         return;
       }

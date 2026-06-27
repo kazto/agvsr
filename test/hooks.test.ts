@@ -1,11 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
-import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
+import type { TurnDispatch } from "../src/daemon/daemon.ts";
 import type { HookEvent } from "../src/hooks.ts";
 import type { Job } from "../src/protocol.ts";
 
