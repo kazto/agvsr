@@ -1117,4 +1117,61 @@ describe("CLI <-> daemon over local IPC", () => {
       } catch {}
     }
   });
+
+  it("lazy-loads team.yaml on job.create and reports a helpful error when missing", async () => {
+    const base = join(tmpdir(), `agvsr-lazy-team-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const yamlPath = `${base}.team.yaml`;
+    const seen: TurnDispatch[] = [];
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    // Start daemon without team and without an existing yaml file.
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      teamFile: yamlPath,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+
+    // No team.yaml yet — error should mention the path and supervisor requirement.
+    const missing = await c.request("job.create", { goal: "lazy test", cwd: repo });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.error.code).toBe("no_team");
+      expect(missing.error.message).toContain(yamlPath);
+      expect(missing.error.message).toContain("supervisor");
+    }
+
+    // Write a minimal team.yaml (supervisor only) — no restart needed.
+    writeFileSync(
+      yamlPath,
+      `roles:\n  supervisor: { adapter: claude-code, model: claude-opus-4-8 }\n`,
+    );
+
+    // Next job.create should lazy-load and succeed.
+    const created = await c.request<{ job: Job }>("job.create", { goal: "lazy test 2", cwd: repo });
+    expect(created.ok).toBe(true);
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    expect(seen[0]!.role).toBe("supervisor");
+    // supervisor-only team: allowed targets should only include "user".
+    expect(seen[0]!.env.AGVSR_ALLOWED).toBe("user");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, yamlPath]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
 });

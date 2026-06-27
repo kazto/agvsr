@@ -576,8 +576,34 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     });
   };
 
-  const requireTeam = (id: string): Response | null =>
-    team ? null : err(id, "no_team", "no team.yaml configured");
+  // Last error from a failed lazy-load attempt, surfaced in requireTeam messages.
+  let teamLoadError: string | null = null;
+
+  // Try to (re-)load team.yaml if team is currently null.
+  const ensureTeam = (): void => {
+    if (team) return;
+    teamLoadError = null;
+    try {
+      const loaded = resolveTeam(options.teamFile);
+      if (loaded) {
+        team = loaded;
+        if (!options.turnRunner) runner = defaultTurnRunner();
+        debug("team lazy-loaded", { teamFile });
+      }
+    } catch (e) {
+      teamLoadError = (e as Error).message;
+      debug("team lazy-load failed", { error: teamLoadError });
+    }
+  };
+
+  const requireTeam = (id: string): Response | null => {
+    ensureTeam();
+    if (team) return null;
+    const detail = teamLoadError
+      ? `team.yaml is invalid: ${teamLoadError}`
+      : `no team.yaml found at ${teamFile}. Create one with at least a '${SUPERVISOR}' role, or specify with --team or AGVSR_TEAM.`;
+    return err(id, "no_team", detail);
+  };
 
   const handle = (req: Request, push: PushFn): Response => {
     switch (req.method) {
