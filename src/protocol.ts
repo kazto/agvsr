@@ -32,6 +32,14 @@ export interface JobRuntime {
   last_activity_at: string | null;
   /** Milliseconds since last_activity_at, computed when the response is built. */
   idle_ms: number | null;
+  /** ISO timestamps of when the current turn started per in-flight role. */
+  turn_started_at?: Record<string, string>;
+  /** Hard timeout remaining ms per in-flight role (0 when expired). */
+  hard_remaining_ms?: Record<string, number>;
+  /** ISO timestamps of last stdout progress per in-flight role (Tier 2). */
+  last_progress_at?: Record<string, string>;
+  /** Ms since last stdout progress per in-flight role (Tier 2). */
+  idle_since_progress_ms?: Record<string, number>;
 }
 
 export type MessageKind = "message" | "escalation" | "completion" | "failure" | "note";

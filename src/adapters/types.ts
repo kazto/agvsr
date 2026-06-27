@@ -37,6 +37,8 @@ export interface TurnOutcome {
   exitCode: number;
   /** True when the deterministic runtime watchdog killed the turn (D14). */
   timedOut?: boolean;
+  /** Which timeout fired: "hard" for wall-clock limit, "idle" for no-progress limit. */
+  timeoutKind?: "hard" | "idle";
 }
 
 /** Result of driving one turn: collected events + the outcome. */

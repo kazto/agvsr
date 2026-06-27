@@ -60,9 +60,20 @@ function formatDuration(ms: number): string {
 function formatRuntime(job: Job, rt: JobRuntime): string {
   if (job.status !== "running") return "";
   const idle = rt.idle_ms != null ? `, idle ${formatDuration(rt.idle_ms)}` : "";
-  return rt.in_flight
-    ? ` — working: ${rt.active_roles.join(", ")}${idle}`
-    : ` — no in-flight turn${idle} (possibly stalled)`;
+  if (!rt.in_flight) {
+    return ` — no in-flight turn${idle} (possibly stalled)`;
+  }
+  const roleDetails = rt.active_roles
+    .map((role) => {
+      const parts: string[] = [role];
+      const remaining = rt.hard_remaining_ms?.[role];
+      if (remaining !== undefined) parts.push(`budget ${formatDuration(remaining)} left`);
+      const idleSince = rt.idle_since_progress_ms?.[role];
+      if (idleSince !== undefined) parts.push(`last progress ${formatDuration(idleSince)} ago`);
+      return parts.join(", ");
+    })
+    .join("; ");
+  return ` — working: ${roleDetails}${idle}`;
 }
 
 function formatMessageKind(kind: Message["kind"]): string {

@@ -7,7 +7,14 @@
 import type { AgentSpec, CliDriver, TurnEvent, TurnResult } from "./types.ts";
 
 export interface RunTurnOptions {
+  /** Absolute upper bound. Kill regardless of progress (safety cap). */
+  hardTimeoutMs?: number;
+  /** No-progress upper bound. Kill if no stdout line arrives for this long. */
+  idleTimeoutMs?: number;
+  /** Backward compat: treated as hard fallback when hardTimeoutMs absent. */
   timeoutMs?: number;
+  /** Called on each stdout line arrival (Tier 2 progress tracking for daemon). */
+  onProgress?: () => void;
   signal?: AbortSignal;
 }
 
@@ -39,12 +46,41 @@ export async function runTurn(
   }
 
   let timedOut = false;
-  const timeout = options.timeoutMs
-    ? setTimeout(() => {
+  let timeoutKind: "hard" | "idle" | null = null;
+
+  const hardMs = options.hardTimeoutMs ?? options.timeoutMs ?? null;
+  const idleMs = options.idleTimeoutMs ?? null;
+
+  let hardTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  if (hardMs) {
+    hardTimer = setTimeout(() => {
+      if (!timedOut) {
         timedOut = true;
+        timeoutKind = "hard";
+      }
+      try {
         proc.kill();
-      }, options.timeoutMs)
-    : null;
+      } catch {}
+    }, hardMs);
+  }
+
+  const resetIdle = (): void => {
+    if (!idleMs) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (!timedOut) {
+        timedOut = true;
+        timeoutKind = "idle";
+      }
+      try {
+        proc.kill();
+      } catch {}
+    }, idleMs);
+  };
+
+  if (idleMs) resetIdle();
 
   let aborted = false;
   const onAbort = () => {
@@ -64,24 +100,33 @@ export async function runTurn(
 
   // Drain stderr concurrently to avoid the process blocking on a full stderr pipe.
   const stderrDrain = (async () => {
-    // biome-ignore lint/suspicious/noEmptyBlockStatements: intentional drain
     for await (const _ of proc.stderr as AsyncIterable<Uint8Array>) {
+      options.onProgress?.();
+      resetIdle();
     }
   })();
 
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    resetIdle();
     buf += decoder.decode(chunk, { stream: true });
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
       consume(buf.slice(0, nl));
+      options.onProgress?.();
+      resetIdle();
       buf = buf.slice(nl + 1);
     }
   }
-  if (buf) consume(buf); // trailing line without newline (e.g. agy)
+  if (buf) {
+    consume(buf); // trailing line without newline (e.g. agy)
+    options.onProgress?.();
+    resetIdle();
+  }
 
   const exitCode = await proc.exited;
   await stderrDrain;
-  if (timeout) clearTimeout(timeout);
+  if (hardTimer) clearTimeout(hardTimer);
+  if (idleTimer) clearTimeout(idleTimer);
   options.signal?.removeEventListener("abort", onAbort);
 
   // Synthesize a result for adapters that don't emit one (agy), or when the watchdog killed the turn.
@@ -90,7 +135,9 @@ export async function runTurn(
       kind: "result",
       ok: exitCode === 0 && !timedOut && !aborted,
       text: timedOut
-        ? `turn timed out after ${options.timeoutMs}ms`
+        ? timeoutKind === "idle"
+          ? `turn made no progress for ${idleMs}ms`
+          : `turn exceeded hard timeout ${hardMs}ms`
         : aborted
           ? "turn killed by user request"
           : parser.finalText(),
@@ -103,6 +150,12 @@ export async function runTurn(
 
   return {
     events,
-    outcome: { sessionId: sessionId2, finalText: parser.finalText(), exitCode, timedOut },
+    outcome: {
+      sessionId: sessionId2,
+      finalText: parser.finalText(),
+      exitCode,
+      timedOut,
+      ...(timeoutKind ? { timeoutKind } : {}),
+    },
   };
 }

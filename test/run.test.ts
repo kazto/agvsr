@@ -36,6 +36,51 @@ function fakeDriver(opts: { sessionId: string | null; resolve?: string }): CliDr
   };
 }
 
+/** Driver that emits N lines, each after delayMs, then exits. */
+function timedLinesDriver(delayMs: number, lines: number): CliDriver {
+  const script = `
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+    for (let i = 0; i < ${lines}; i++) {
+      await delay(${delayMs});
+      process.stdout.write("line " + i + "\\n");
+    }
+  `;
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({ bin: "bun", args: ["-e", script] }),
+    createParser: () => textParser(null),
+  };
+}
+
+/** Driver that emits one line then goes silent for silenceMs. */
+function silentAfterOneDriver(silenceMs: number): CliDriver {
+  const script = `
+    process.stdout.write("start\\n");
+    await new Promise(r => setTimeout(r, ${silenceMs}));
+  `;
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({ bin: "bun", args: ["-e", script] }),
+    createParser: () => textParser(null),
+  };
+}
+
+/** Driver that emits lines every intervalMs indefinitely (until killed). */
+function infiniteProgressDriver(intervalMs: number): CliDriver {
+  const script = `
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+    while (true) {
+      await delay(${intervalMs});
+      process.stdout.write("tick\\n");
+    }
+  `;
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({ bin: "bun", args: ["-e", script] }),
+    createParser: () => textParser(null),
+  };
+}
+
 function slowDriver(): CliDriver {
   return {
     adapter: "claude-code",
@@ -70,10 +115,97 @@ describe("runTurn", () => {
     expect(outcome.sessionId).toBe("RESOLVED");
   });
 
-  it("kills a turn that exceeds the timeout", async () => {
+  it("kills a turn that exceeds the hard timeout (legacy timeoutMs)", async () => {
     const { events, outcome } = await runTurn(slowDriver(), spec, null, "go", { timeoutMs: 25 });
     expect(outcome.timedOut).toBe(true);
+    expect(outcome.timeoutKind).toBe("hard");
     expect(outcome.exitCode).not.toBe(0);
-    expect(events.at(-1)).toEqual({ kind: "result", ok: false, text: "turn timed out after 25ms" });
+    expect(events.at(-1)).toEqual({
+      kind: "result",
+      ok: false,
+      text: "turn exceeded hard timeout 25ms",
+    });
+  });
+
+  it("kills a turn that exceeds the hardTimeoutMs", async () => {
+    const { events, outcome } = await runTurn(slowDriver(), spec, null, "go", {
+      hardTimeoutMs: 25,
+    });
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.timeoutKind).toBe("hard");
+    expect(events.at(-1)?.kind).toBe("result");
+    const result = events.at(-1) as Extract<(typeof events)[0], { kind: "result" }>;
+    expect(result.text).toContain("hard timeout 25ms");
+  });
+
+  describe("AC-1: progress resets idle timer", () => {
+    it("survives when lines arrive within the idle window", async () => {
+      // 5 lines × 50ms apart = 250ms total; idleTimeout=250ms leaves room for process startup.
+      const { outcome } = await runTurn(timedLinesDriver(50, 5), spec, null, "go", {
+        idleTimeoutMs: 250,
+        hardTimeoutMs: 2000,
+      });
+      expect(outcome.timedOut).toBeFalsy();
+      expect(outcome.exitCode).toBe(0);
+    });
+  });
+
+  describe("AC-2: idle timeout fires when progress stops", () => {
+    it("kills the turn after idle threshold with no progress", async () => {
+      // Emits 1 line then waits 400ms; idleTimeout=150ms → should fire
+      const { events, outcome } = await runTurn(silentAfterOneDriver(400), spec, null, "go", {
+        idleTimeoutMs: 150,
+        hardTimeoutMs: 2000,
+      });
+      expect(outcome.timedOut).toBe(true);
+      expect(outcome.timeoutKind).toBe("idle");
+      expect(outcome.exitCode).not.toBe(0);
+      const result = events.at(-1) as Extract<(typeof events)[0], { kind: "result" }>;
+      expect(result.kind).toBe("result");
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("no progress for 150ms");
+    });
+  });
+
+  describe("AC-3: hard timeout fires even with continuing progress", () => {
+    it("kills the turn after hard limit regardless of progress", async () => {
+      // Lines every 30ms; idleTimeout=300ms (never fires); hardTimeout=120ms → hard fires
+      const { events, outcome } = await runTurn(infiniteProgressDriver(30), spec, null, "go", {
+        idleTimeoutMs: 300,
+        hardTimeoutMs: 120,
+      });
+      expect(outcome.timedOut).toBe(true);
+      expect(outcome.timeoutKind).toBe("hard");
+      expect(outcome.exitCode).not.toBe(0);
+      const result = events.at(-1) as Extract<(typeof events)[0], { kind: "result" }>;
+      expect(result.text).toContain("hard timeout 120ms");
+    });
+  });
+
+  describe("AC-1 (onProgress callback)", () => {
+    it("calls onProgress on each stdout line", async () => {
+      let progressCount = 0;
+      await runTurn(fakeDriver({ sessionId: null }), spec, null, "go", {
+        onProgress: () => progressCount++,
+      });
+      // fakeDriver emits "alpha\n" and "beta\n"
+      expect(progressCount).toBe(2);
+    });
+  });
+
+  describe("AC-6: legacy AGVSR_TURN_TIMEOUT_MS path", () => {
+    it("timeoutMs without hardTimeoutMs still triggers hard timeout", async () => {
+      const { outcome } = await runTurn(slowDriver(), spec, null, "go", { timeoutMs: 25 });
+      expect(outcome.timedOut).toBe(true);
+      expect(outcome.timeoutKind).toBe("hard");
+    });
+  });
+
+  describe("no timeout options", () => {
+    it("completes normally when no timeout is set", async () => {
+      const { outcome } = await runTurn(fakeDriver({ sessionId: null }), spec, null, "go");
+      expect(outcome.timedOut).toBeFalsy();
+      expect(outcome.exitCode).toBe(0);
+    });
   });
 });
