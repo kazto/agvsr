@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   status     TEXT NOT NULL DEFAULT 'running',
   cwd        TEXT NOT NULL,
   branch     TEXT,
+  worktree   TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -51,6 +52,14 @@ export class Store {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  private migrate(): void {
+    const cols = this.db.query("PRAGMA table_info(jobs)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "worktree")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN worktree TEXT");
+    }
   }
 
   createJob(goal: string, cwd: string, id?: string): Job {
@@ -63,13 +72,14 @@ export class Store {
       status: "running",
       cwd,
       branch,
+      worktree: null,
       created_at: ts,
       updated_at: ts,
     };
     this.db
       .query(
-        `INSERT INTO jobs (id, goal, status, cwd, branch, created_at, updated_at)
-         VALUES ($id, $goal, $status, $cwd, $branch, $created_at, $updated_at)`,
+        `INSERT INTO jobs (id, goal, status, cwd, branch, worktree, created_at, updated_at)
+         VALUES ($id, $goal, $status, $cwd, $branch, NULL, $created_at, $updated_at)`,
       )
       .run({
         $id: jobId,
@@ -81,6 +91,12 @@ export class Store {
         $updated_at: job.updated_at,
       });
     return job;
+  }
+
+  setJobWorktree(id: string, worktree: string): void {
+    this.db
+      .query(`UPDATE jobs SET worktree = $worktree, updated_at = $ts WHERE id = $id`)
+      .run({ $worktree: worktree, $ts: now(), $id: id });
   }
 
   getJob(id: string): Job | null {

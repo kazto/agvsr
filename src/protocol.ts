@@ -13,6 +13,7 @@ export interface Job {
   status: JobStatus;
   cwd: string;
   branch: string | null;
+  worktree: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -6,6 +6,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { serve, type PushFn } from "../ipc/transport.ts";
+import { provisionWorktree } from "../git/worktree.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, storePath } from "../paths.ts";
@@ -64,6 +65,8 @@ export interface TurnDispatch {
   env: Record<string, string>;
   /** AbortSignal wired to job.kill — set to abort when the job is forcefully killed. */
   signal?: AbortSignal;
+  /** Effective working directory for agent execution: job.worktree if set, else job.cwd. */
+  effectiveCwd: string;
 }
 
 export type TurnRunner = (dispatch: TurnDispatch) => Promise<TurnResult>;
@@ -170,7 +173,17 @@ function toolUseFingerprint(events: TurnEvent[]): string {
 }
 
 function defaultTurnRunner(): TurnRunner {
-  return async ({ role, adapter, model, job, message, sessionId, systemPrompt, env, signal }) => {
+  return async ({
+    role,
+    adapter,
+    model,
+    effectiveCwd,
+    message,
+    sessionId,
+    systemPrompt,
+    env,
+    signal,
+  }) => {
     const driver = driverFor(adapter as import("../config/team.ts").Adapter);
     return runTurn(
       driver,
@@ -178,7 +191,7 @@ function defaultTurnRunner(): TurnRunner {
         role,
         adapter: adapter as import("../config/team.ts").Adapter,
         model,
-        cwd: job.cwd,
+        cwd: effectiveCwd,
         systemPrompt,
         env,
       },
@@ -375,12 +388,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
     const messageCountBeforeTurn = store.listMessages(job.id).length;
     const sessionId = sessionFor(job.id, role);
+    const effectiveCwd = job.worktree ?? job.cwd;
     const systemPrompt = sessionId
       ? ""
       : composeCharter(
           jobTeam,
           role,
-          { jobId: job.id, cwd: job.cwd, branch: job.branch },
+          { jobId: job.id, cwd: effectiveCwd, branch: job.branch },
           { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
         );
 
@@ -401,6 +415,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         adapter: roleConfig.adapter,
         model: roleConfig.model,
         job,
+        effectiveCwd,
         message,
         sessionId,
         systemPrompt,
@@ -691,7 +706,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
   };
 
-  const handle = (req: Request, push: PushFn): Response => {
+  const handle = async (req: Request, push: PushFn): Promise<Response> => {
     switch (req.method) {
       case "ping":
         return ok(req.id, { pong: true, version: VERSION });
@@ -716,7 +731,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const invalidCwd = cwdError(normalizedCwd);
         if (invalidCwd) return err(req.id, "bad_request", invalidCwd);
         const job = store.createJob(goal.trim(), normalizedCwd, customId);
-        debug("job created", { job: job.id, goal: job.goal });
+
+        // Provision git worktree for isolation. Fails the job immediately if the
+        // source is a real git repo but worktree creation fails (accepted decision).
+        try {
+          const worktree = await provisionWorktree(normalizedCwd, job.id, job.branch!);
+          if (worktree) {
+            store.setJobWorktree(job.id, worktree);
+            job.worktree = worktree;
+          }
+        } catch (e) {
+          store.setJobStatus(job.id, "failed");
+          store.createMessage({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "failure",
+            body: `Worktree provisioning failed: ${(e as Error).message}`,
+          });
+          return err(req.id, "provisioning_failed", (e as Error).message);
+        }
+
+        debug("job created", { job: job.id, goal: job.goal, worktree: job.worktree });
         if (team) jobTeamSnapshots.set(job.id, team);
         createMsg({
           job_id: job.id,

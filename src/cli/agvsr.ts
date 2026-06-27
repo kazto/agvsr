@@ -322,6 +322,7 @@ async function main(argv: string[]): Promise<void> {
           console.log(`${job.id}  ${job.status}${formatRuntime(job, runtime)}`);
           console.log(`goal: ${job.goal}`);
           console.log(`cwd: ${job.cwd}`);
+          console.log(`worktree: ${job.worktree ?? "(none)"}`);
           console.log(`branch: ${job.branch ?? "(not set)"}`);
           console.log(`created_at: ${job.created_at}`);
           console.log(`updated_at: ${job.updated_at}`);

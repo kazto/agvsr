@@ -31,6 +31,11 @@ export function ipcEndpoint(): string {
   return join(runtime, "agvsrd.sock");
 }
 
+/** Directory for per-job git worktrees: configDir()/worktrees. */
+export function worktreesDir(): string {
+  return join(configDir(), "worktrees");
+}
+
 /** Ensure the config dir exists; returns it. */
 export function ensureConfigDir(): string {
   const dir = configDir();
