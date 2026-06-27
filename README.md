@@ -1,5 +1,20 @@
 # agvsr (AGents superViSoR)
 
+## Getting started
+
+```sh
+# 1. Generate a team.yaml (4 standard roles, all claude-code)
+agvsr init
+
+# 2. Start the daemon
+agvsr daemon start
+
+# 3. Submit a job
+agvsr job "add a health endpoint"
+```
+
+See `agvsr init --help` for options (`--adapter`, `--model`, `--role`, `--stdout`, etc.).
+
 `agvsr` とは、ClaudeCode / Codex / Gemini / Antigravity など複数のAIエージェントに役割を割り当て、相互に指示をやり取りしあうSkill、スクリプト群です。
 
 いわゆるAIオーケストレーターと言われるもののひとつです。

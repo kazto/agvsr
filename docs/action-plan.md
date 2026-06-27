@@ -6,11 +6,19 @@ daemon + 薄い CLI）の使いやすさを上げるための施策案。実装�
 
 ## 1. 導入・オンボーディングの摩擦を減らす
 
-### `agvsr init`（対話ウィザード）
+### `agvsr init`（対話ウィザード） ✅ 非対話形式で実装済み
 
 - 現状 `team.yaml` は手書きが必要で、`examples/team.yaml` をコピーするしかない。
 - `charters/scaffold.md` という雛形資産があるのにスキャフォルドコマンドが無い。
 - `agvsr init` で「どの役割を、どの adapter/model で」を対話選択して `team.yaml` を生成。
+
+実装内容（`docs/design-init-command.md` に基づく非対話形式）:
+
+- `src/config/init.ts`: `buildTeamYaml(spec)` — 純粋関数。フラグ入力を YAML 文字列に変換し、
+  `parseTeam()` による自己検査で常に valid な出力を保証する。
+- `src/cli/agvsr.ts`: `case "init"` — フラグ解析・ファイル書き込み・上書き保護を担う CLI ラッパー。
+- `test/init.test.ts` / `test/cli-init.test.ts`: ユニットテストと E2E テスト。
+- 対話ウィザードは同じ `buildTeamYaml` を呼ぶ薄いフロントエンドとして後から追加できる。
 
 ### `agvsr doctor`
 
