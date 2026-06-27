@@ -33,6 +33,7 @@ Usage:
   agvsr job "<goal>" [--cwd D] [--id ID]  Submit a job (D is the target repo, default: cwd)
   agvsr status [job-id]             List jobs, or show one job with recent audit state
   agvsr logs <job-id> [-f]          Show audit messages for a job
+  agvsr watch [--all] [--poll N]    Stream role messages across all running jobs in real time
   agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
   agvsr stop <job-id>               Stop a running job gracefully (mark failed)
   agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
@@ -66,6 +67,19 @@ function formatRuntime(job: Job, rt: JobRuntime): string {
   return rt.in_flight
     ? ` — working: ${rt.active_roles.join(", ")}${idle}`
     : ` — no in-flight turn${idle} (possibly stalled)`;
+}
+
+/**
+ * Parse the --poll N argument for `agvsr watch`.
+ * Returns the clamped poll interval in ms, or throws RangeError for invalid input.
+ */
+export function parsePollMs(raw: string | undefined): number {
+  if (raw === undefined) return 2000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new RangeError(`--poll must be a positive finite number, got: ${raw}`);
+  }
+  return Math.max(500, n);
 }
 
 function formatMessageKind(kind: Message["kind"]): string {
@@ -401,6 +415,99 @@ async function main(argv: string[]): Promise<void> {
         };
         unwrap(await c.request("msg.watch", { job_id: jobId, mark_read: true }));
         await new Promise(() => {}); // block until the process is killed
+      });
+      return;
+    }
+
+    case "watch": {
+      const { values: watchOpts } = parseArgs({
+        args: rest,
+        options: {
+          all: { type: "boolean" },
+          poll: { type: "string" },
+        },
+        allowPositionals: false,
+      });
+      let pollMs: number;
+      try {
+        pollMs = parsePollMs(watchOpts.poll);
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`);
+        process.exit(1);
+      }
+      const showAll = watchOpts.all ?? false;
+
+      await withClient(async (c) => {
+        const watchedJobs = new Set<string>();
+        const seen = new Set<string>();
+
+        const shortId = (id: string): string => id.slice(0, 8);
+
+        const dim = (s: string): string => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
+
+        const printMsg = (jobId: string, m: Message): void => {
+          const ts = new Date(m.created_at).toLocaleTimeString("en-US", { hour12: false });
+          const refs = m.refs ? ` refs=${m.refs}` : "";
+          console.log(
+            `[${shortId(jobId)}] ${ts}  ${formatMessageKind(m.kind)} ${m.from_role} -> ${m.to_role}${refs}`,
+          );
+          console.log(m.body);
+          console.log();
+        };
+
+        c.onPush = (frame: PushFrame): void => {
+          if (frame.event !== "msg.new") return;
+          const m = frame.data;
+          if (seen.has(m.id)) return;
+          seen.add(m.id);
+          printMsg(m.job_id, m);
+        };
+
+        const subscribeToJob = async (job: Job): Promise<void> => {
+          if (watchedJobs.has(job.id)) return;
+          watchedJobs.add(job.id);
+          console.log(dim(`+ watching [${shortId(job.id)}] ${job.status.padEnd(11)} ${job.goal}`));
+          const listRes = await c.request<{ messages: Message[] }>("msg.list", {
+            job_id: job.id,
+          });
+          if (listRes.ok) {
+            for (const m of listRes.result.messages) {
+              if (!seen.has(m.id)) {
+                seen.add(m.id);
+                printMsg(job.id, m);
+              }
+            }
+          }
+          await c.request("msg.watch", { job_id: job.id });
+        };
+
+        const poll = async (): Promise<void> => {
+          const listRes = await c.request<{ jobs: Job[] }>("job.list");
+          if (!listRes.ok) return;
+          for (const job of listRes.result.jobs) {
+            if (!showAll && job.status !== "running") continue;
+            await subscribeToJob(job);
+          }
+        };
+
+        console.log(
+          `agvsr watch  ${showAll ? "all jobs" : "running jobs only"}  (poll ${pollMs}ms, Ctrl-C to stop)`,
+        );
+        await poll();
+
+        if (watchedJobs.size === 0) {
+          const tip = showAll
+            ? "no jobs found"
+            : `no running jobs (use 'agvsr job "..."' to start one, or --all to include finished jobs)`;
+          console.log(tip);
+        }
+
+        const timer = setInterval(() => {
+          void poll();
+        }, pollMs);
+
+        await new Promise(() => {}); // block until the process is killed
+        clearInterval(timer);
       });
       return;
     }
