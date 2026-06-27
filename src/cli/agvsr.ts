@@ -99,20 +99,24 @@ function daemonArgs(teamFile?: string): string[] {
   return teamFile ? ["daemon", "--team", teamFile] : ["daemon"];
 }
 
-function spawnDetachedDaemon({
-  bunExec,
-  scriptPath,
-  teamFile,
-  spawn = Bun.spawn,
-}: Required<Pick<DetachedDaemonOptions, "bunExec" | "scriptPath">> &
-  Pick<DetachedDaemonOptions, "teamFile" | "spawn">): void {
+function spawnDetachedDaemon(
+  {
+    bunExec,
+    scriptPath,
+    teamFile,
+    spawn = Bun.spawn,
+  }: Required<Pick<DetachedDaemonOptions, "bunExec" | "scriptPath">> &
+    Pick<DetachedDaemonOptions, "teamFile" | "spawn">,
+  stderr: "ignore" | "pipe" = "ignore",
+): ReturnType<typeof Bun.spawn> {
   const child = spawn([bunExec, scriptPath, ...daemonArgs(teamFile)], {
     detached: true,
     stdin: "ignore",
     stdout: "ignore",
-    stderr: "ignore",
+    stderr,
   });
   child.unref();
+  return child;
 }
 
 async function probeDaemon(
@@ -135,10 +139,26 @@ async function waitForDaemon(
   sleep: (ms: number) => Promise<void> = Bun.sleep,
   readyTimeoutMs = 3000,
   readyPollMs = 50,
+  childExit?: Promise<number>,
+  childStderr?: Promise<string>,
 ): Promise<void> {
+  let exitCode: number | null = null;
+  childExit?.then(
+    (code) => (exitCode = code),
+    () => (exitCode = -1),
+  );
+
   const deadline = Date.now() + readyTimeoutMs;
   while (Date.now() <= deadline) {
     if (await probeDaemon(endpoint, connect)) return;
+    if (exitCode !== null) {
+      const stderr = (await childStderr)?.trim();
+      const detail = stderr
+        ? `:
+${stderr}`
+        : ".";
+      throw new Error(`daemon process exited before becoming ready (exit ${exitCode})${detail}`);
+    }
     await sleep(readyPollMs);
   }
   throw new Error(`daemon did not become ready at ${endpoint} within ${readyTimeoutMs}ms`);
@@ -152,18 +172,26 @@ export async function startDaemonDetached(
   if (await probeDaemon(endpoint, connect)) return { alreadyRunning: true, started: false };
 
   const [bunExec, scriptPath] = process.argv as [string, string, ...string[]];
-  spawnDetachedDaemon({
-    bunExec: options.bunExec ?? bunExec,
-    scriptPath: options.scriptPath ?? scriptPath,
-    teamFile: options.teamFile,
-    spawn: options.spawn,
-  });
+  const child = spawnDetachedDaemon(
+    {
+      bunExec: options.bunExec ?? bunExec,
+      scriptPath: options.scriptPath ?? scriptPath,
+      teamFile: options.teamFile,
+      spawn: options.spawn,
+    },
+    "pipe",
+  );
+  const stderrText = child.stderr
+    ? new Response(child.stderr as ReadableStream).text().catch(() => "")
+    : Promise.resolve("");
   await waitForDaemon(
     endpoint,
     connect,
     options.sleep,
     options.readyTimeoutMs,
     options.readyPollMs,
+    child.exited,
+    stderrText,
   );
   return { alreadyRunning: false, started: true };
 }

@@ -78,9 +78,32 @@ describe("daemon start helper", () => {
       detached: true,
       stdin: "ignore",
       stdout: "ignore",
-      stderr: "ignore",
+      stderr: "pipe",
     });
     expect(unrefCount).toBe(1);
+  });
+
+  it("surfaces stderr when the detached daemon exits before readiness", async () => {
+    await expect(
+      startDaemonDetached({
+        endpoint: "/tmp/agvsr.sock",
+        bunExec: "bun",
+        scriptPath: "/repo/src/cli/agvsr.ts",
+        connect: async () => {
+          throw new DaemonNotRunningError("/tmp/agvsr.sock");
+        },
+        spawn: (() => {
+          return {
+            exited: Promise.resolve(1),
+            stderr: new Response("team.yaml is invalid").body,
+            unref() {},
+          } as unknown as ReturnType<typeof Bun.spawn>;
+        }) as typeof Bun.spawn,
+        sleep: async () => {},
+        readyPollMs: 1,
+        readyTimeoutMs: 50,
+      }),
+    ).rejects.toThrow("team.yaml is invalid");
   });
 
   it("reuses the same detached spawn path for restart", () => {
