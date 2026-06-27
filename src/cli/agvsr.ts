@@ -14,9 +14,9 @@ import type { Job, Message, PingResult, PushFrame, Response, RoleSummary } from 
 const USAGE = `agvsr ${VERSION}
 
 Usage:
-  agvsr daemon                      Run the agvsrd daemon in the foreground
+  agvsr daemon [--team F]           Run the agvsrd daemon in the foreground
   agvsr daemon stop                 Stop the running daemon gracefully
-  agvsr daemon restart              Restart the daemon
+  agvsr daemon restart [--team F]   Restart the daemon (optionally with a new team file)
   agvsr ping                        Check the daemon is up
   agvsr job "<goal>" [--cwd D] [--id ID]  Submit a job (D is the target repo, default: cwd)
   agvsr status [job-id]             List jobs, or show one job with recent audit state
@@ -62,7 +62,12 @@ async function main(argv: string[]): Promise<void> {
 
   switch (cmd) {
     case "daemon": {
-      const subCmd = rest[0];
+      const { values: daemonOpts, positionals: daemonArgs } = parseArgs({
+        args: rest,
+        options: { team: { type: "string" } },
+        allowPositionals: true,
+      });
+      const subCmd = daemonArgs[0];
 
       if (subCmd === "stop") {
         await withClient(async (c) => {
@@ -78,7 +83,8 @@ async function main(argv: string[]): Promise<void> {
           console.log("daemon stopped, restarting...");
         });
         const [bunExec, scriptPath] = process.argv as [string, string, ...string[]];
-        const child = Bun.spawn([bunExec, scriptPath, "daemon"], {
+        const teamArgs = daemonOpts.team ? ["--team", daemonOpts.team] : [];
+        const child = Bun.spawn([bunExec, scriptPath, "daemon", ...teamArgs], {
           detached: true,
           stdin: "ignore",
           stdout: "ignore",
@@ -90,7 +96,7 @@ async function main(argv: string[]): Promise<void> {
       }
 
       const { startDaemon } = await import("../daemon/daemon.ts");
-      const daemon = await startDaemon();
+      const daemon = await startDaemon({ teamFile: daemonOpts.team });
       console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
       const shutdown = async () => {
         await daemon.close();

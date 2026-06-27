@@ -20,10 +20,14 @@ import {
 import { fireHook, type HookEvent } from "../hooks.ts";
 import type { Job, Message, PushFrame, Request, Response, RoleSummary } from "../protocol.ts";
 
-function resolveTeam(): TeamConfig | null {
-  const candidate = process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
+function resolveTeam(file?: string): TeamConfig | null {
+  const candidate = file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
   if (!existsSync(candidate)) return null;
   return loadTeam(candidate);
+}
+
+function effectiveTeamFile(file?: string): string {
+  return file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
 }
 
 const ok = (id: string, result: unknown): Response => ({ id, type: "response", ok: true, result });
@@ -60,6 +64,8 @@ export interface StartDaemonOptions {
   store?: Store;
   storeFile?: string;
   team?: TeamConfig | null;
+  /** Path to team.yaml; overrides AGVSR_TEAM env var and the ./team.yaml default. */
+  teamFile?: string;
   endpoint?: string;
   turnRunner?: TurnRunner;
   /** D17 fail-safe: mark stale running jobs interrupted when a daemon starts. */
@@ -195,7 +201,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   ensureConfigDir();
   const store = options.store ?? new Store(options.storeFile ?? storePath());
   const ownsStore = !options.store;
-  let team = options.team === undefined ? resolveTeam() : options.team;
+  const teamFile = effectiveTeamFile(options.teamFile);
+  let team = options.team === undefined ? resolveTeam(options.teamFile) : options.team;
   const endpoint = options.endpoint ?? ipcEndpoint();
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
@@ -824,9 +831,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       }
 
       case "reload": {
-        const teamPath = process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
         try {
-          const newTeam = loadTeam(teamPath);
+          const newTeam = loadTeam(teamFile);
           team = newTeam;
           if (!options.turnRunner) runner = defaultTurnRunner();
           const roles: RoleSummary[] = Object.entries(newTeam.roles).map(([name, r]) => ({
@@ -858,9 +864,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   return { endpoint, close };
 }
 
-// Run directly: `bun run src/daemon/daemon.ts`
+// Run directly: `bun run src/daemon/daemon.ts [--team path/to/team.yaml]`
 if (import.meta.main) {
-  const daemon = await startDaemon();
+  const { parseArgs } = await import("node:util");
+  const { values: mainArgs } = parseArgs({
+    args: process.argv.slice(2),
+    options: { team: { type: "string" } },
+    strict: false,
+  });
+  const daemon = await startDaemon({ teamFile: mainArgs.team as string | undefined });
   console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
   const shutdown = async () => {
     console.log("\nagvsrd shutting down");
