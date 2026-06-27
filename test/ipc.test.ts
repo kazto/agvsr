@@ -1383,3 +1383,265 @@ hooks:
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC-5: Timeout resolution (role config > env > default) and AC-4/AC-6 tests
+// ---------------------------------------------------------------------------
+
+describe("turn timeout resolution (AC-5, AC-6)", () => {
+  const mkBase = () => join(tmpdir(), `agvsr-timeout-res-${randomUUID()}`);
+
+  async function captureDispatch(
+    teamYaml: string,
+    env: Record<string, string>,
+  ): Promise<import("../src/daemon/daemon.ts").TurnDispatch> {
+    const base = mkBase();
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+
+    const saved: Record<string, string> = {};
+    for (const [k, v] of Object.entries(env)) {
+      saved[k] = process.env[k] ?? "";
+      process.env[k] = v;
+    }
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    let captured: import("../src/daemon/daemon.ts").TurnDispatch | null = null;
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(teamYaml),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        captured = dispatch;
+        return {
+          events: [{ kind: "result", ok: true, text: "ok" }],
+          outcome: { sessionId: null, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "timeout test",
+      cwd: repoLocal,
+    });
+    expect(created.ok).toBe(true);
+
+    for (let i = 0; i < 100 && !captured; i++) await Bun.sleep(5);
+
+    c.close();
+    await localDaemon.close();
+
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === "") delete process.env[k];
+      else process.env[k] = v;
+    }
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, repoLocal]) {
+      try {
+        rmSync(f, { recursive: true });
+      } catch {}
+    }
+
+    if (!captured) throw new Error("no dispatch received");
+    return captured;
+  }
+
+  it("uses defaults when role has no timeout config and no env vars", async () => {
+    const saved = {
+      AGVSR_TURN_HARD_TIMEOUT_MS: process.env.AGVSR_TURN_HARD_TIMEOUT_MS,
+      AGVSR_TURN_IDLE_TIMEOUT_MS: process.env.AGVSR_TURN_IDLE_TIMEOUT_MS,
+      AGVSR_TURN_TIMEOUT_MS: process.env.AGVSR_TURN_TIMEOUT_MS,
+    };
+    delete process.env.AGVSR_TURN_HARD_TIMEOUT_MS;
+    delete process.env.AGVSR_TURN_IDLE_TIMEOUT_MS;
+    delete process.env.AGVSR_TURN_TIMEOUT_MS;
+    try {
+      const d = await captureDispatch(
+        `roles:\n  supervisor: { adapter: claude-code, model: m }`,
+        {},
+      );
+      expect(d.hardTimeoutMs).toBe(60 * 60 * 1000);
+      expect(d.idleTimeoutMs).toBe(10 * 60 * 1000);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it("env AGVSR_TURN_HARD_TIMEOUT_MS overrides default hard", async () => {
+    const d = await captureDispatch(`roles:\n  supervisor: { adapter: claude-code, model: m }`, {
+      AGVSR_TURN_HARD_TIMEOUT_MS: "30000",
+      AGVSR_TURN_IDLE_TIMEOUT_MS: "",
+    });
+    expect(d.hardTimeoutMs).toBe(30000);
+  });
+
+  it("env AGVSR_TURN_IDLE_TIMEOUT_MS overrides default idle", async () => {
+    const d = await captureDispatch(`roles:\n  supervisor: { adapter: claude-code, model: m }`, {
+      AGVSR_TURN_IDLE_TIMEOUT_MS: "20000",
+      AGVSR_TURN_HARD_TIMEOUT_MS: "",
+    });
+    expect(d.idleTimeoutMs).toBe(20000);
+  });
+
+  it("role hard_timeout_ms wins over env", async () => {
+    const d = await captureDispatch(
+      `roles:\n  supervisor: { adapter: claude-code, model: m, hard_timeout_ms: 7200000 }`,
+      { AGVSR_TURN_HARD_TIMEOUT_MS: "3600000" },
+    );
+    expect(d.hardTimeoutMs).toBe(7200000);
+  });
+
+  it("role idle_timeout_ms wins over env", async () => {
+    const d = await captureDispatch(
+      `roles:\n  supervisor: { adapter: claude-code, model: m, idle_timeout_ms: 1200000 }`,
+      { AGVSR_TURN_IDLE_TIMEOUT_MS: "300000" },
+    );
+    expect(d.idleTimeoutMs).toBe(1200000);
+  });
+
+  it("idle is clamped to hard when idle > hard", async () => {
+    const d = await captureDispatch(
+      `roles:\n  supervisor: { adapter: claude-code, model: m, idle_timeout_ms: 3600000, hard_timeout_ms: 1200000 }`,
+      {},
+    );
+    expect(d.idleTimeoutMs).toBe(d.hardTimeoutMs);
+    expect(d.hardTimeoutMs).toBe(1200000);
+  });
+
+  it("AC-6: AGVSR_TURN_TIMEOUT_MS feeds hard fallback when new hard env absent", async () => {
+    const saved = process.env.AGVSR_TURN_HARD_TIMEOUT_MS;
+    delete process.env.AGVSR_TURN_HARD_TIMEOUT_MS;
+    try {
+      const d = await captureDispatch(`roles:\n  supervisor: { adapter: claude-code, model: m }`, {
+        AGVSR_TURN_TIMEOUT_MS: "45000",
+      });
+      expect(d.hardTimeoutMs).toBe(45000);
+    } finally {
+      if (saved === undefined) delete process.env.AGVSR_TURN_HARD_TIMEOUT_MS;
+      else process.env.AGVSR_TURN_HARD_TIMEOUT_MS = saved;
+      delete process.env.AGVSR_TURN_TIMEOUT_MS;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-4: daemon fails job with correct timeout kind in failure reason
+// ---------------------------------------------------------------------------
+
+describe("timeout failure reasons (AC-4)", () => {
+  it("reports idle timeout kind in failure message", async () => {
+    const base = join(tmpdir(), `agvsr-idle-fail-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(`roles:\n  supervisor: { adapter: claude-code, model: m }`),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async () => ({
+        events: [],
+        outcome: {
+          sessionId: null,
+          finalText: "",
+          exitCode: 1,
+          timedOut: true,
+          timeoutKind: "idle" as const,
+        },
+      }),
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "idle fail",
+      cwd: repoLocal,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    for (let i = 0; i < 100; i++) {
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      if (got.ok && got.result.job.status === "failed") break;
+      await Bun.sleep(5);
+    }
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    const failMsg = logs.result.messages.find((m) => m.kind === "failure");
+    expect(failMsg).toBeTruthy();
+    expect(failMsg!.body).toContain("no-progress timeout");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, repoLocal]) {
+      try {
+        rmSync(f, { recursive: true });
+      } catch {}
+    }
+  });
+
+  it("reports hard timeout kind in failure message", async () => {
+    const base = join(tmpdir(), `agvsr-hard-fail-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(`roles:\n  supervisor: { adapter: claude-code, model: m }`),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async () => ({
+        events: [],
+        outcome: {
+          sessionId: null,
+          finalText: "",
+          exitCode: 1,
+          timedOut: true,
+          timeoutKind: "hard" as const,
+        },
+      }),
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "hard fail",
+      cwd: repoLocal,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    for (let i = 0; i < 100; i++) {
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      if (got.ok && got.result.job.status === "failed") break;
+      await Bun.sleep(5);
+    }
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    const failMsg = logs.result.messages.find((m) => m.kind === "failure");
+    expect(failMsg).toBeTruthy();
+    expect(failMsg!.body).toContain("hard timeout");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, repoLocal]) {
+      try {
+        rmSync(f, { recursive: true });
+      } catch {}
+    }
+  });
+});

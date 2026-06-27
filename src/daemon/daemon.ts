@@ -67,6 +67,12 @@ export interface TurnDispatch {
   signal?: AbortSignal;
   /** Effective working directory for agent execution: job.worktree if set, else job.cwd. */
   effectiveCwd: string;
+  /** Resolved hard (wall-clock) timeout in ms. */
+  hardTimeoutMs: number;
+  /** Resolved idle (no-progress) timeout in ms, always <= hardTimeoutMs. */
+  idleTimeoutMs: number;
+  /** Called on each stdout line; lets the daemon track real progress time (Tier 2). */
+  onProgress?: () => void;
 }
 
 export type TurnRunner = (dispatch: TurnDispatch) => Promise<TurnResult>;
@@ -115,14 +121,34 @@ async function resolveUserPath(): Promise<string> {
   }
 }
 
-const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_MAX_WORKER_FAILURES = 3;
 
-function turnTimeoutMs(): number {
-  const raw = process.env.AGVSR_TURN_TIMEOUT_MS;
-  if (!raw) return DEFAULT_TURN_TIMEOUT_MS;
+/** Default idle (no-progress) timeout — mirrors the old 10 minute timeout feel. */
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+/** Default hard (wall-clock) timeout — safety cap for long but progressing turns. */
+const DEFAULT_HARD_TIMEOUT_MS = 60 * 60 * 1000;
+
+function parseTimeoutEnv(name: string): number | null {
+  const raw = process.env[name];
+  if (!raw) return null;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_TIMEOUT_MS;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function resolveTurnTimeouts(roleConfig: import("../config/team.ts").RoleConfig): {
+  hardMs: number;
+  idleMs: number;
+} {
+  const hardMs =
+    roleConfig.hard_timeout_ms ??
+    parseTimeoutEnv("AGVSR_TURN_HARD_TIMEOUT_MS") ??
+    parseTimeoutEnv("AGVSR_TURN_TIMEOUT_MS") ??
+    DEFAULT_HARD_TIMEOUT_MS;
+  const idleRaw =
+    roleConfig.idle_timeout_ms ??
+    parseTimeoutEnv("AGVSR_TURN_IDLE_TIMEOUT_MS") ??
+    DEFAULT_IDLE_TIMEOUT_MS;
+  return { hardMs, idleMs: Math.min(idleRaw, hardMs) };
 }
 
 function maxWorkerFailures(): number {
@@ -135,7 +161,7 @@ function maxWorkerFailures(): number {
 const DEFAULT_NO_PROGRESS_TURNS = 3;
 const DEFAULT_LOOP_REPEAT_TURNS = 3;
 const DEFAULT_MAX_LOOP_ESCALATIONS = 3;
-const DEFAULT_STALL_TIMEOUT_MS = DEFAULT_TURN_TIMEOUT_MS;
+const DEFAULT_STALL_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
 
 function noProgressTurns(): number {
   const raw = process.env.AGVSR_NO_PROGRESS_TURNS;
@@ -183,6 +209,9 @@ function defaultTurnRunner(): TurnRunner {
     systemPrompt,
     env,
     signal,
+    hardTimeoutMs,
+    idleTimeoutMs,
+    onProgress,
   }) => {
     const driver = driverFor(adapter as import("../config/team.ts").Adapter);
     return runTurn(
@@ -197,7 +226,7 @@ function defaultTurnRunner(): TurnRunner {
       },
       sessionId,
       message,
-      { timeoutMs: turnTimeoutMs(), signal },
+      { hardTimeoutMs, idleTimeoutMs, signal, onProgress },
     );
   };
 }
@@ -265,6 +294,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
   const stallNotified = new Set<string>();
+  // Turn-level timing maps keyed by "${jobId}:${role}" — exist only while in-flight.
+  const turnStartedAt = new Map<string, number>();
+  const turnHardMs = new Map<string, number>();
+  const lastProgressAt = new Map<string, number>();
   const stallIntervalMs = Math.max(50, Math.min(stallTimeoutMs(), 60_000));
   let stallWatchdog: ReturnType<typeof setInterval> | null = null;
   // AbortControllers for in-flight dispatchRole calls, keyed by job id.
@@ -386,6 +419,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     const roleConfig = jobTeam.roles[role];
     if (!roleConfig) throw new Error(`no role ${role}`);
 
+    const { hardMs, idleMs } = resolveTurnTimeouts(roleConfig);
+
     const messageCountBeforeTurn = store.listMessages(job.id).length;
     const sessionId = sessionFor(job.id, role);
     const effectiveCwd = job.worktree ?? job.cwd;
@@ -407,6 +442,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
     acSet.add(ac);
 
+    // Register turn start for status visibility; cleaned up in finally.
+    const key = `${job.id}:${role}`;
+    turnStartedAt.set(key, Date.now());
+    turnHardMs.set(key, hardMs);
+    lastProgressAt.set(key, Date.now());
+
     debug("dispatch start", { job: job.id, role, message: message.slice(0, 80) });
     let result: Awaited<ReturnType<TurnRunner>>;
     try {
@@ -420,6 +461,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         sessionId,
         systemPrompt,
         signal: ac.signal,
+        hardTimeoutMs: hardMs,
+        idleTimeoutMs: idleMs,
+        onProgress: () => lastProgressAt.set(key, Date.now()),
         env: {
           PATH: userPath,
           AGVSR_SOCK: endpoint,
@@ -432,6 +476,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     } finally {
       acSet.delete(ac);
       if (acSet.size === 0) jobKillControllers.delete(job.id);
+      turnStartedAt.delete(key);
+      turnHardMs.delete(key);
+      lastProgressAt.delete(key);
     }
     debug("dispatch done", { job: job.id, role, exitCode: result.outcome.exitCode });
 
@@ -506,7 +553,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
     if (result.outcome.exitCode !== 0) {
       if (role === SUPERVISOR || result.outcome.timedOut) {
-        const reason = `${role} turn failed${result.outcome.timedOut ? " by timeout" : ""}.`;
+        let reason: string;
+        if (result.outcome.timedOut) {
+          reason =
+            result.outcome.timeoutKind === "idle"
+              ? `${role} turn failed: no progress for ${idleMs}ms (no-progress timeout).`
+              : `${role} turn failed: exceeded hard timeout ${hardMs}ms.`;
+        } else {
+          reason = `${role} turn failed.`;
+        }
         store.setJobStatus(job.id, "failed");
         createMsg({
           job_id: job.id,
@@ -677,12 +732,43 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       .map((k) => k.slice(prefix.length));
     const last = store.listMessages(job.id).at(-1);
     const lastActivityAt = last?.created_at ?? job.updated_at;
-    const idleMs = lastActivityAt ? Date.now() - Date.parse(lastActivityAt) : null;
+    const activityIdleMs = lastActivityAt ? Date.now() - Date.parse(lastActivityAt) : null;
+
+    const now = Date.now();
+    const turnStartedAtRec: Record<string, string> = {};
+    const hardRemainingRec: Record<string, number> = {};
+    const lastProgressRec: Record<string, string> = {};
+    const idleSinceProgressRec: Record<string, number> = {};
+
+    for (const role of activeRoles) {
+      const k = `${job.id}:${role}`;
+      const started = turnStartedAt.get(k);
+      const hard = turnHardMs.get(k);
+      if (started !== undefined && hard !== undefined) {
+        turnStartedAtRec[role] = new Date(started).toISOString();
+        hardRemainingRec[role] = Math.max(0, started + hard - now);
+      }
+      const lastProg = lastProgressAt.get(k);
+      if (lastProg !== undefined) {
+        lastProgressRec[role] = new Date(lastProg).toISOString();
+        idleSinceProgressRec[role] = now - lastProg;
+      }
+    }
+
+    const hasTurnStarted = Object.keys(turnStartedAtRec).length > 0;
+    const hasLastProgress = Object.keys(lastProgressRec).length > 0;
+
     return {
       in_flight: activeRoles.length > 0,
       active_roles: activeRoles,
       last_activity_at: lastActivityAt,
-      idle_ms: idleMs,
+      idle_ms: activityIdleMs,
+      ...(hasTurnStarted
+        ? { turn_started_at: turnStartedAtRec, hard_remaining_ms: hardRemainingRec }
+        : {}),
+      ...(hasLastProgress
+        ? { last_progress_at: lastProgressRec, idle_since_progress_ms: idleSinceProgressRec }
+        : {}),
     };
   };
 

@@ -21,6 +21,10 @@ const RoleSchema = z.object({
   /** Append to the bundled default charter (D25, most common). */
   charter_append: z.string().optional(),
   instances: z.number().int().positive().default(1),
+  /** Absolute turn time limit in ms (overrides env/default). */
+  hard_timeout_ms: z.number().int().positive().optional(),
+  /** No-progress turn time limit in ms (overrides env/default). */
+  idle_timeout_ms: z.number().int().positive().optional(),
 });
 
 const HooksSchema = z
