@@ -984,22 +984,3 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   return { endpoint, close };
 }
-
-// Run directly: `bun run src/daemon/daemon.ts [--team path/to/team.yaml]`
-if (import.meta.main) {
-  const { parseArgs } = await import("node:util");
-  const { values: mainArgs } = parseArgs({
-    args: process.argv.slice(2),
-    options: { team: { type: "string" } },
-    strict: false,
-  });
-  const daemon = await startDaemon({ teamFile: mainArgs.team as string | undefined });
-  console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
-  const shutdown = async () => {
-    console.log("\nagvsrd shutting down");
-    await daemon.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-}

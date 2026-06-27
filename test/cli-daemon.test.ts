@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DaemonNotRunningError, type Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
 import { Store } from "../src/daemon/store.ts";
-import { restartDaemonDetached, startDaemonDetached } from "../src/cli/daemon.ts";
+import { restartDaemonDetached, startDaemonDetached } from "../src/cli/agvsr.ts";
 
 afterEach(() => {
   delete process.env.AGVSR_SOCK;
@@ -40,8 +40,8 @@ describe("daemon start helper", () => {
 
   it("spawns detached daemon once and waits for readiness", async () => {
     let connectCount = 0;
-    let spawnArgs: Array<string> | null = null;
-    let spawnOptions: Parameters<typeof Bun.spawn>[1] | null = null;
+    let spawnArgs: unknown = null;
+    let spawnOptions: unknown = null;
     let unrefCount = 0;
     const client = { close() {} } as unknown as Client;
 
@@ -58,7 +58,7 @@ describe("daemon start helper", () => {
       spawn: ((args, options) => {
         spawnArgs = args;
         spawnOptions = options;
-        return { unref: () => unrefCount++ } as ReturnType<typeof Bun.spawn>;
+        return { unref: () => unrefCount++ } as unknown as ReturnType<typeof Bun.spawn>;
       }) as typeof Bun.spawn,
       sleep: async () => {},
       readyPollMs: 1,
@@ -84,7 +84,7 @@ describe("daemon start helper", () => {
   });
 
   it("reuses the same detached spawn path for restart", () => {
-    let spawnArgs: Array<string> | null = null;
+    let spawnArgs: unknown = null;
     let unrefCount = 0;
 
     restartDaemonDetached({
@@ -93,7 +93,7 @@ describe("daemon start helper", () => {
       teamFile: "/tmp/team.yaml",
       spawn: ((args) => {
         spawnArgs = args;
-        return { unref: () => unrefCount++ } as ReturnType<typeof Bun.spawn>;
+        return { unref: () => unrefCount++ } as unknown as ReturnType<typeof Bun.spawn>;
       }) as typeof Bun.spawn,
     });
 
@@ -113,7 +113,12 @@ describe("daemon start CLI smoke", () => {
     const dir = mkdtempSync(join(tmpdir(), "agvsr-cli-daemon-"));
     const sock = join(dir, "agvsrd.sock");
     const db = join(dir, "store.sqlite");
-    const env = { ...process.env, AGVSR_SOCK: sock, AGVSR_STORE: db };
+    const env = {
+      ...process.env,
+      AGVSR_SOCK: sock,
+      AGVSR_STORE: db,
+      AGVSR_TEAM: join(dir, "missing-team.yaml"),
+    };
 
     try {
       const start1 = Bun.spawn(["bun", "run", "src/cli/agvsr.ts", "daemon", "start"], {
