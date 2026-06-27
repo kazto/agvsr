@@ -66,6 +66,19 @@ function formatRuntime(job: Job, rt: JobRuntime): string {
     : ` — no in-flight turn${idle} (possibly stalled)`;
 }
 
+/**
+ * Parse the --poll N argument for `agvsr watch`.
+ * Returns the clamped poll interval in ms, or throws RangeError for invalid input.
+ */
+export function parsePollMs(raw: string | undefined): number {
+  if (raw === undefined) return 2000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new RangeError(`--poll must be a positive finite number, got: ${raw}`);
+  }
+  return Math.max(500, n);
+}
+
 function formatMessageKind(kind: Message["kind"]): string {
   if (kind !== "note") return kind;
   return process.stdout.isTTY ? "\x1b[2m[note]\x1b[0m" : "[note]";
@@ -412,7 +425,13 @@ async function main(argv: string[]): Promise<void> {
         },
         allowPositionals: false,
       });
-      const pollMs = Math.max(500, Number(watchOpts.poll ?? "2000"));
+      let pollMs: number;
+      try {
+        pollMs = parsePollMs(watchOpts.poll);
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`);
+        process.exit(1);
+      }
       const showAll = watchOpts.all ?? false;
 
       await withClient(async (c) => {

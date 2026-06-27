@@ -5,6 +5,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
+import { parsePollMs } from "../src/cli/agvsr.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
 import type { Job, PushFrame } from "../src/protocol.ts";
 
@@ -236,5 +237,50 @@ describe("agvsr watch — cross-job message streaming", () => {
     expect(pushed.some((f) => f.data.body === "post-subscribe message")).toBe(true);
 
     c.close();
+  });
+});
+
+describe("parsePollMs — --poll argument validation", () => {
+  it("returns 2000 when no value is supplied", () => {
+    expect(parsePollMs(undefined)).toBe(2000);
+  });
+
+  it("accepts valid positive numbers and returns them as-is above the minimum", () => {
+    expect(parsePollMs("2000")).toBe(2000);
+    expect(parsePollMs("5000")).toBe(5000);
+    expect(parsePollMs("500")).toBe(500);
+  });
+
+  it("clamps values below 500 ms to 500", () => {
+    expect(parsePollMs("1")).toBe(500);
+    expect(parsePollMs("100")).toBe(500);
+    expect(parsePollMs("499")).toBe(500);
+  });
+
+  it("throws RangeError for non-numeric strings", () => {
+    expect(() => parsePollMs("abc")).toThrow(RangeError);
+    expect(() => parsePollMs("NaN")).toThrow(RangeError);
+    expect(() => parsePollMs("")).toThrow(RangeError);
+    expect(() => parsePollMs("2s")).toThrow(RangeError);
+  });
+
+  it("throws RangeError for zero and negative values", () => {
+    expect(() => parsePollMs("0")).toThrow(RangeError);
+    expect(() => parsePollMs("-1")).toThrow(RangeError);
+    expect(() => parsePollMs("-500")).toThrow(RangeError);
+  });
+
+  it("throws RangeError for Infinity", () => {
+    expect(() => parsePollMs("Infinity")).toThrow(RangeError);
+    expect(() => parsePollMs("-Infinity")).toThrow(RangeError);
+  });
+
+  it("error message names the bad value", () => {
+    try {
+      parsePollMs("bogus");
+      throw new Error("expected throw");
+    } catch (e) {
+      expect((e as Error).message).toContain("bogus");
+    }
   });
 });
