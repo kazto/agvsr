@@ -31,6 +31,8 @@ const HooksSchema = z
     on_job_failed: z.string().optional(),
     /** Shell command to run when supervisor sends a message to the user (D22c / D26). */
     on_supervisor_message: z.string().optional(),
+    /** Shell command to run when the idle watchdog detects a stalled running job. */
+    on_job_stalled: z.string().optional(),
   })
   .optional();
 

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS messages (
   job_id     TEXT NOT NULL,
   from_role  TEXT NOT NULL,
   to_role    TEXT NOT NULL,
-  kind       TEXT NOT NULL,            -- message | escalation | completion | failure (D24)
+  kind       TEXT NOT NULL,            -- message | escalation | completion | failure | note (D24/D5)
   body       TEXT NOT NULL,
   refs       TEXT,                     -- JSON array of workspace paths
   created_at TEXT NOT NULL,

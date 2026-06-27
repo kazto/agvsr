@@ -33,7 +33,7 @@ export interface JobRuntime {
   idle_ms: number | null;
 }
 
-export type MessageKind = "message" | "escalation" | "completion" | "failure";
+export type MessageKind = "message" | "escalation" | "completion" | "failure" | "note";
 
 export interface Message {
   id: string;

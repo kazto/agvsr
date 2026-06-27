@@ -132,6 +132,7 @@ function maxWorkerFailures(): number {
 const DEFAULT_NO_PROGRESS_TURNS = 3;
 const DEFAULT_LOOP_REPEAT_TURNS = 3;
 const DEFAULT_MAX_LOOP_ESCALATIONS = 3;
+const DEFAULT_STALL_TIMEOUT_MS = DEFAULT_TURN_TIMEOUT_MS;
 
 function noProgressTurns(): number {
   const raw = process.env.AGVSR_NO_PROGRESS_TURNS;
@@ -152,6 +153,13 @@ function maxLoopEscalations(): number {
   if (!raw) return DEFAULT_MAX_LOOP_ESCALATIONS;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_LOOP_ESCALATIONS;
+}
+
+function stallTimeoutMs(): number {
+  const raw = process.env.AGVSR_STALL_TIMEOUT_MS;
+  if (!raw) return DEFAULT_STALL_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_STALL_TIMEOUT_MS;
 }
 
 function toolUseFingerprint(events: TurnEvent[]): string {
@@ -243,6 +251,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const loopEscalationCounts = new Map<string, number>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
+  const stallNotified = new Set<string>();
+  const stallIntervalMs = Math.max(50, Math.min(stallTimeoutMs(), 60_000));
+  let stallWatchdog: ReturnType<typeof setInterval> | null = null;
   // AbortControllers for in-flight dispatchRole calls, keyed by job id.
   const jobKillControllers = new Map<string, Set<AbortController>>();
   // Per-job push subscribers registered via msg.watch.
@@ -427,7 +438,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         job_id: job.id,
         from_role: role,
         to_role: "daemon",
-        kind: "message",
+        kind: "note",
         body: finalText,
       });
     }
@@ -451,6 +462,30 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         body: reason,
       });
       hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
+      return;
+    }
+
+    if (
+      role !== SUPERVISOR &&
+      result.outcome.exitCode === 0 &&
+      statusAfterTurn === "running" &&
+      finalText &&
+      !routedByRole
+    ) {
+      resetFailure(job.id, role);
+      const body =
+        `${role} turn ended with assistant text but no agvsr tool call was recorded; ` +
+        "the text was saved to the audit log, but no work was routed. " +
+        "Please inspect the final text and decide whether to continue, redirect, or fail the job.\n\n" +
+        `Final text:\n${finalText}`;
+      createMsg({
+        job_id: job.id,
+        from_role: "daemon",
+        to_role: SUPERVISOR,
+        kind: "escalation",
+        body,
+      });
+      enqueueDispatch(job, SUPERVISOR, body);
       return;
     }
 
@@ -528,6 +563,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   const enqueueDispatch = (job: Job, role: string, message: string): void => {
     const key = `${job.id}:${role}`;
+    stallNotified.delete(job.id);
     const previous = inflight.get(key) ?? Promise.resolve();
     const next = previous
       .catch(() => {})
@@ -633,6 +669,26 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       last_activity_at: lastActivityAt,
       idle_ms: idleMs,
     };
+  };
+
+  const notifyStalledJobs = (): void => {
+    const threshold = stallTimeoutMs();
+    for (const job of store.listJobs()) {
+      if (job.status !== "running") {
+        stallNotified.delete(job.id);
+        continue;
+      }
+      const runtime = computeRuntime(job);
+      if (runtime.in_flight || runtime.idle_ms == null || runtime.idle_ms < threshold) continue;
+      if (stallNotified.has(job.id)) continue;
+      stallNotified.add(job.id);
+      hook("on_job_stalled", {
+        event: "job_stalled",
+        job_id: job.id,
+        goal: job.goal,
+        idle_ms: runtime.idle_ms,
+      });
+    }
   };
 
   const handle = (req: Request, push: PushFn): Response => {
@@ -910,9 +966,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   };
 
   const server = await serve(endpoint, handle);
+  stallWatchdog = setInterval(() => {
+    notifyStalledJobs();
+  }, stallIntervalMs);
 
   const close = async (): Promise<void> => {
     debug("closing");
+    if (stallWatchdog) {
+      clearInterval(stallWatchdog);
+      stallWatchdog = null;
+    }
     await Promise.allSettled(pendingDispatches);
     await server.close();
     if (ownsStore) store.close();

@@ -438,6 +438,102 @@ describe("CLI <-> daemon over local IPC", () => {
     }
   });
 
+  it("escalates worker no-route turns to the supervisor and re-dispatches instead of failing the job", async () => {
+    const base = join(tmpdir(), `agvsr-worker-noroute-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: supervisor-model }
+  implementation: { adapter: codex, model: worker-model }
+`),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: true, text: "worker text" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "worker text",
+              exitCode: 0,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: "supervisor ack" }],
+          outcome: {
+            sessionId: `${dispatch.role}-session`,
+            finalText: "",
+            exitCode: 0,
+          },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "worker no-route",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    expect(seen[0]!.role).toBe("supervisor");
+
+    const routed = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "please continue",
+    });
+    expect(routed.ok).toBe(true);
+
+    for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+      await Bun.sleep(5);
+    }
+
+    const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+    expect(got.ok && got.result.job.status).toBe("running");
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(logs.ok).toBe(true);
+    if (!logs.ok) throw new Error("msg.list failed");
+    expect(
+      logs.result.messages.some(
+        (m) =>
+          m.kind === "note" &&
+          m.from_role === "implementation" &&
+          m.to_role === "daemon" &&
+          m.body === "worker text",
+      ),
+    ).toBe(true);
+    expect(
+      logs.result.messages.some(
+        (m) =>
+          m.kind === "escalation" &&
+          m.from_role === "daemon" &&
+          m.to_role === "supervisor" &&
+          m.body.includes("Final text:"),
+      ),
+    ).toBe(true);
+    expect(seen.filter((d) => d.role === "supervisor").length).toBeGreaterThanOrEqual(2);
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("rejects an empty goal", async () => {
     const c = await Client.connect(sock);
     const res = await c.request("job.create", { goal: "  ", cwd: repo });
@@ -533,6 +629,118 @@ describe("CLI <-> daemon over local IPC", () => {
     expect(alreadyStopped.ok).toBe(false);
     if (!alreadyStopped.ok) expect(alreadyStopped.error.code).toBe("bad_request");
 
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
+  it("notifies once when a running job becomes stalled, then re-arms after new activity", async () => {
+    const base = join(tmpdir(), `agvsr-stall-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const fired: Array<{ event: string; job_id: string; idle_ms?: number }> = [];
+    const seen: TurnDispatch[] = [];
+    const oldStallTimeout = process.env.AGVSR_STALL_TIMEOUT_MS;
+    process.env.AGVSR_STALL_TIMEOUT_MS = "50";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: supervisor-model }
+hooks:
+  on_job_stalled: echo stalled
+`),
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: "" }],
+          outcome: {
+            sessionId: `${dispatch.role}-session`,
+            finalText: "",
+            exitCode: 0,
+          },
+        };
+      },
+      hookRunner: (_cmd, event) => {
+        fired.push(event as { event: string; job_id: string; idle_ms?: number });
+      },
+    });
+    const c = await Client.connect(sockLocal);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "stall me",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    for (let i = 0; i < 100 && seen.length < 1; i++) await Bun.sleep(5);
+    for (let i = 0; i < 100; i++) {
+      const rt = await c.request<{
+        job: Job;
+        runtime: { in_flight: boolean; idle_ms: number | null };
+      }>("job.get", { id: jobId });
+      if (rt.ok && !rt.result.runtime.in_flight) break;
+      await Bun.sleep(5);
+    }
+
+    const before = await c.request<{
+      job: Job;
+      runtime: { in_flight: boolean; idle_ms: number | null };
+    }>("job.get", { id: jobId });
+    expect(before.ok).toBe(true);
+    if (!before.ok) throw new Error("job.get failed");
+    const beforeMessages = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(beforeMessages.ok).toBe(true);
+    if (!beforeMessages.ok) throw new Error("msg.list failed");
+
+    for (let i = 0; i < 100 && fired.length < 1; i++) await Bun.sleep(5);
+    expect(fired.length).toBe(1);
+    expect(fired[0]!.event).toBe("job_stalled");
+    expect(fired[0]!.job_id).toBe(jobId);
+    expect(fired[0]!.idle_ms).toBeGreaterThanOrEqual(50);
+
+    const after = await c.request<{
+      job: Job;
+      runtime: { in_flight: boolean; idle_ms: number | null };
+    }>("job.get", { id: jobId });
+    expect(after.ok).toBe(true);
+    if (!after.ok) throw new Error("job.get failed");
+    expect(after.result.runtime.idle_ms!).toBeGreaterThanOrEqual(before.result.runtime.idle_ms!);
+    const afterMessages = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    expect(afterMessages.ok).toBe(true);
+    if (!afterMessages.ok) throw new Error("msg.list failed");
+    expect(afterMessages.result.messages.length).toBe(beforeMessages.result.messages.length);
+
+    await Bun.sleep(120);
+    expect(fired.length).toBe(1);
+
+    const retell = await c.request("job.tell", { job_id: jobId, body: "resume work" });
+    expect(retell.ok).toBe(true);
+    for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+      await Bun.sleep(5);
+    }
+
+    for (let i = 0; i < 100 && fired.length < 2; i++) await Bun.sleep(5);
+    expect(fired.length).toBe(2);
+    expect(fired[1]!.job_id).toBe(jobId);
+
+    const afterRetellMessages = await c.request<{ messages: Message[] }>("msg.list", {
+      job_id: jobId,
+    });
+    expect(afterRetellMessages.ok).toBe(true);
+    if (!afterRetellMessages.ok) throw new Error("msg.list failed");
+    expect(afterRetellMessages.result.messages.length).toBe(2);
+    expect(afterRetellMessages.result.messages.every((m) => m.kind === "message")).toBe(true);
+
+    if (oldStallTimeout === undefined) delete process.env.AGVSR_STALL_TIMEOUT_MS;
+    else process.env.AGVSR_STALL_TIMEOUT_MS = oldStallTimeout;
     c.close();
     await localDaemon.close();
     for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {

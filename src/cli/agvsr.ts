@@ -66,6 +66,11 @@ function formatRuntime(job: Job, rt: JobRuntime): string {
     : ` — no in-flight turn${idle} (possibly stalled)`;
 }
 
+function formatMessageKind(kind: Message["kind"]): string {
+  if (kind !== "note") return kind;
+  return process.stdout.isTTY ? "\x1b[2m[note]\x1b[0m" : "[note]";
+}
+
 function unwrap<T>(res: Response<T>): T {
   if (!res.ok) {
     console.error(`error [${res.error.code}]: ${res.error.message}`);
@@ -191,7 +196,9 @@ async function main(argv: string[]): Promise<void> {
           console.log(`messages: ${messages.length}`);
           if (last) {
             console.log(`last_message_at: ${last.created_at}`);
-            console.log(`last_message: ${last.kind} ${last.from_role} -> ${last.to_role}`);
+            console.log(
+              `last_message: ${formatMessageKind(last.kind)} ${last.from_role} -> ${last.to_role}`,
+            );
             console.log(last.body);
           } else {
             console.log("last_message: (none)");
@@ -223,7 +230,9 @@ async function main(argv: string[]): Promise<void> {
       }
       const print = (m: Message) => {
         const refs = m.refs ? ` refs=${m.refs}` : "";
-        console.log(`[${m.created_at}] ${m.kind} ${m.from_role} -> ${m.to_role}${refs}`);
+        console.log(
+          `[${m.created_at}] ${formatMessageKind(m.kind)} ${m.from_role} -> ${m.to_role}${refs}`,
+        );
         console.log(m.body);
       };
       await withClient(async (c) => {

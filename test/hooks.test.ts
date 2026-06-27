@@ -17,6 +17,7 @@ hooks:
   on_job_done: echo done
   on_job_failed: echo failed
   on_supervisor_message: echo msg
+  on_job_stalled: echo stalled
 `;
 
 function makeBase() {
@@ -206,6 +207,7 @@ describe("team.yaml hooks schema", () => {
     expect(team.hooks?.on_job_done).toBe("echo done");
     expect(team.hooks?.on_job_failed).toBe("echo failed");
     expect(team.hooks?.on_supervisor_message).toBe("echo msg");
+    expect(team.hooks?.on_job_stalled).toBe("echo stalled");
   });
 
   it("accepts a team with no hooks key", () => {

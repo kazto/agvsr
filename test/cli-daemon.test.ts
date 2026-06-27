@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DaemonNotRunningError, type Client } from "../src/ipc/transport.ts";
+import { parseTeam } from "../src/config/team.ts";
+import { Store } from "../src/daemon/store.ts";
 import { restartDaemonDetached, startDaemonDetached } from "../src/cli/daemon.ts";
 
 afterEach(() => {
@@ -185,6 +187,56 @@ describe("daemon start CLI smoke", () => {
         new Response(cleanup.stdout).text(),
         new Response(cleanup.stderr).text(),
       ]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("status CLI", () => {
+  it("renders note messages distinctly from regular message rows", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-cli-status-"));
+    const sock = join(dir, "agvsrd.sock");
+    const db = join(dir, "store.sqlite");
+    const store = new Store(db);
+    const job = store.createJob("show note", process.cwd(), "job-note");
+    store.createMessage({
+      job_id: job.id,
+      from_role: "implementation",
+      to_role: "daemon",
+      kind: "note",
+      body: "final audit text",
+    });
+    store.close();
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const daemon = await startDaemon({
+      endpoint: sock,
+      storeFile: db,
+      team: parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: fake-model }
+`),
+      interruptRunningJobsOnStart: false,
+    });
+
+    try {
+      const proc = Bun.spawn(["bun", "run", "src/cli/agvsr.ts", "status", job.id], {
+        cwd: process.cwd(),
+        env: { ...process.env, AGVSR_SOCK: sock, AGVSR_STORE: db },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out, err, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(code).toBe(0);
+      expect(err).toBe("");
+      expect(out).toContain("last_message: [note] implementation -> daemon");
+      expect(out).toContain("final audit text");
+    } finally {
+      await daemon.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
