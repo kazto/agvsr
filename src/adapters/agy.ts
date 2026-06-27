@@ -10,11 +10,20 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
-import type { AgentSpec, CliDriver, SessionProbe, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+import type {
+  AgentSpec,
+  CliDriver,
+  SessionProbe,
+  SpawnSpec,
+  TurnEvent,
+  TurnParser,
+} from "./types.ts";
 import { withCharterPreamble } from "./codex.ts";
 
 function conversationsDir(): string {
-  return process.env.AGVSR_AGY_CONV_DIR ?? join(homedir(), ".gemini", "antigravity-cli", "conversations");
+  return (
+    process.env.AGVSR_AGY_CONV_DIR ?? join(homedir(), ".gemini", "antigravity-cli", "conversations")
+  );
 }
 
 function listConversationIds(): string[] {

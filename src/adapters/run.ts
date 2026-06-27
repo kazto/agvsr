@@ -8,6 +8,7 @@ import type { AgentSpec, CliDriver, TurnEvent, TurnResult } from "./types.ts";
 
 export interface RunTurnOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export async function runTurn(
@@ -45,6 +46,15 @@ export async function runTurn(
       }, options.timeoutMs)
     : null;
 
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    try {
+      proc.kill();
+    } catch {}
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+
   const decoder = new TextDecoder();
   let buf = "";
   const consume = (line: string) => {
@@ -72,13 +82,18 @@ export async function runTurn(
   const exitCode = await proc.exited;
   await stderrDrain;
   if (timeout) clearTimeout(timeout);
+  options.signal?.removeEventListener("abort", onAbort);
 
   // Synthesize a result for adapters that don't emit one (agy), or when the watchdog killed the turn.
   if (!events.some((e) => e.kind === "result")) {
     events.push({
       kind: "result",
-      ok: exitCode === 0 && !timedOut,
-      text: timedOut ? `turn timed out after ${options.timeoutMs}ms` : parser.finalText(),
+      ok: exitCode === 0 && !timedOut && !aborted,
+      text: timedOut
+        ? `turn timed out after ${options.timeoutMs}ms`
+        : aborted
+          ? "turn killed by user request"
+          : parser.finalText(),
     });
   }
 

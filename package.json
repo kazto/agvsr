@@ -25,7 +25,7 @@
     "daemon": "bun run src/daemon/daemon.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run typecheck && bun test && oxlint src"
+    "prepublishOnly": "bunx oxfmt src && bun run typecheck && bun test && bunx oxlint src"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

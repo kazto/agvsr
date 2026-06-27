@@ -53,15 +53,16 @@ export class Store {
     this.db.exec(SCHEMA);
   }
 
-  createJob(goal: string, cwd: string): Job {
+  createJob(goal: string, cwd: string, id?: string): Job {
     const ts = now();
-    const id = randomUUID();
+    const jobId = id ?? randomUUID();
+    const branch = id ? `agvsr/${id}` : `agvsr/${jobId.slice(0, 8)}`;
     const job: Job = {
-      id,
+      id: jobId,
       goal,
       status: "running",
       cwd,
-      branch: `agvsr/${id.slice(0, 8)}`,
+      branch,
       created_at: ts,
       updated_at: ts,
     };
@@ -71,7 +72,7 @@ export class Store {
          VALUES ($id, $goal, $status, $cwd, $branch, $created_at, $updated_at)`,
       )
       .run({
-        $id: job.id,
+        $id: jobId,
         $goal: job.goal,
         $status: job.status,
         $cwd: job.cwd,

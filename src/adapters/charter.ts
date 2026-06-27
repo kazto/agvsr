@@ -71,7 +71,12 @@ function readRoleCharter(role: string, cfg: RoleConfig, dirs: CharterDirs): stri
 /**
  * Build the full system prompt for a role on a job: filled scaffold + role charter.
  */
-export function composeCharter(team: TeamConfig, role: string, ctx: Omit<CharterContext, "role" | "allowedTargets">, dirs: CharterDirs = {}): string {
+export function composeCharter(
+  team: TeamConfig,
+  role: string,
+  ctx: Omit<CharterContext, "role" | "allowedTargets">,
+  dirs: CharterDirs = {},
+): string {
   const cfg = team.roles[role];
   if (!cfg) throw new Error(`composeCharter: no role "${role}" in team`);
 

@@ -12,8 +12,7 @@ export interface HookEvent {
 }
 
 export function fireHook(cmd: string, event: HookEvent): void {
-  const shell =
-    process.platform === "win32" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
+  const shell = process.platform === "win32" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
   try {
     const proc = Bun.spawn(shell, {
       stdin: Buffer.from(JSON.stringify(event) + "\n"),

@@ -50,6 +50,8 @@ export interface TurnDispatch {
   sessionId: string | null;
   systemPrompt: string;
   env: Record<string, string>;
+  /** AbortSignal wired to job.kill — set to abort when the job is forcefully killed. */
+  signal?: AbortSignal;
 }
 
 export type TurnRunner = (dispatch: TurnDispatch) => Promise<TurnResult>;
@@ -146,7 +148,7 @@ function toolUseFingerprint(events: TurnEvent[]): string {
 }
 
 function defaultTurnRunner(): TurnRunner {
-  return async ({ role, adapter, model, job, message, sessionId, systemPrompt, env }) => {
+  return async ({ role, adapter, model, job, message, sessionId, systemPrompt, env, signal }) => {
     const driver = driverFor(adapter as import("../config/team.ts").Adapter);
     return runTurn(
       driver,
@@ -160,7 +162,7 @@ function defaultTurnRunner(): TurnRunner {
       },
       sessionId,
       message,
-      { timeoutMs: turnTimeoutMs() },
+      { timeoutMs: turnTimeoutMs(), signal },
     );
   };
 }
@@ -185,6 +187,10 @@ function isAllowed(team: TeamConfig, from: string, to: string): boolean {
   return allowedTargets(team, from).includes(to);
 }
 
+const debug = process.env.AGVSR_DEBUG
+  ? (...args: unknown[]) => console.error("[agvsrd]", new Date().toISOString(), ...args.map(String))
+  : () => {};
+
 export async function startDaemon(options: StartDaemonOptions = {}): Promise<Daemon> {
   ensureConfigDir();
   const store = options.store ?? new Store(options.storeFile ?? storePath());
@@ -194,6 +200,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
   const userPath = options.userPath ?? (await resolveUserPath());
+  debug("starting", { endpoint, pid: process.pid });
   // Always reads current `team` so hooks update immediately after reload.
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
@@ -221,8 +228,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const loopEscalationCounts = new Map<string, number>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
+  // AbortControllers for in-flight dispatchRole calls, keyed by job id.
+  const jobKillControllers = new Map<string, Set<AbortController>>();
   // Per-job push subscribers registered via msg.watch.
   const msgWatchers = new Map<string, Set<(frame: PushFrame) => boolean>>();
+  // Deferred close trigger for daemon.stop.
+  let doClose: () => Promise<void> = async () => {};
 
   const notifyWatchers = (msg: Message): void => {
     const set = msgWatchers.get(msg.job_id);
@@ -323,6 +334,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   const dispatchRole = async (job: Job, role: string, message: string): Promise<void> => {
     if (!runner) throw new Error("no team.yaml configured");
+
+    // Bail early if job is no longer running (killed or stopped while queued).
+    const statusAtStart = store.getJob(job.id)?.status;
+    if (statusAtStart !== "running") {
+      debug("dispatch skipped (job not running)", { job: job.id, role, status: statusAtStart });
+      return;
+    }
+
     const jobTeam = jobTeamSnapshots.get(job.id) ?? team;
     if (!jobTeam) throw new Error("no team.yaml configured");
     const roleConfig = jobTeam.roles[role];
@@ -338,25 +357,51 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           { jobId: job.id, cwd: job.cwd, branch: job.branch },
           { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
         );
-    const result = await runner({
-      role,
-      adapter: roleConfig.adapter,
-      model: roleConfig.model,
-      job,
-      message,
-      sessionId,
-      systemPrompt,
-      env: {
-        PATH: userPath,
-        AGVSR_SOCK: endpoint,
-        AGVSR_ROLE: role,
-        AGVSR_JOB_ID: job.id,
-        AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
-        AGVSR_JOB_BRANCH: job.branch ?? "",
-      },
-    });
+
+    // Register an AbortController so job.kill can terminate this turn.
+    const ac = new AbortController();
+    let acSet = jobKillControllers.get(job.id);
+    if (!acSet) {
+      acSet = new Set();
+      jobKillControllers.set(job.id, acSet);
+    }
+    acSet.add(ac);
+
+    debug("dispatch start", { job: job.id, role, message: message.slice(0, 80) });
+    let result: Awaited<ReturnType<TurnRunner>>;
+    try {
+      result = await runner({
+        role,
+        adapter: roleConfig.adapter,
+        model: roleConfig.model,
+        job,
+        message,
+        sessionId,
+        systemPrompt,
+        signal: ac.signal,
+        env: {
+          PATH: userPath,
+          AGVSR_SOCK: endpoint,
+          AGVSR_ROLE: role,
+          AGVSR_JOB_ID: job.id,
+          AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
+          AGVSR_JOB_BRANCH: job.branch ?? "",
+        },
+      });
+    } finally {
+      acSet.delete(ac);
+      if (acSet.size === 0) jobKillControllers.delete(job.id);
+    }
+    debug("dispatch done", { job: job.id, role, exitCode: result.outcome.exitCode });
 
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
+
+    // If the job was killed or stopped during the turn, skip further processing.
+    const statusMidTurn = store.getJob(job.id)?.status;
+    if (statusMidTurn !== "running") {
+      debug("dispatch post-kill, skipping result handling", { job: job.id, role });
+      return;
+    }
 
     const messagesFromTurn = store.listMessages(job.id).slice(messageCountBeforeTurn);
     const statusAfterTurn = store.getJob(job.id)?.status ?? job.status;
@@ -535,12 +580,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "job.create": {
         const noTeam = requireTeam(req.id);
         if (noTeam) return noTeam;
-        const { goal, cwd } = req.params;
+        const { goal, cwd, id: customId } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
+        if (customId !== undefined) {
+          if (!customId.trim()) return err(req.id, "bad_request", "job id must not be empty");
+          if (!/^[a-zA-Z0-9_-]+$/.test(customId))
+            return err(
+              req.id,
+              "bad_request",
+              "job id must contain only alphanumeric characters, hyphens, or underscores",
+            );
+          if (store.getJob(customId))
+            return err(req.id, "bad_request", `job id '${customId}' already exists`);
+        }
         const normalizedCwd = normalizeCwd(cwd);
         const invalidCwd = cwdError(normalizedCwd);
         if (invalidCwd) return err(req.id, "bad_request", invalidCwd);
-        const job = store.createJob(goal.trim(), normalizedCwd);
+        const job = store.createJob(goal.trim(), normalizedCwd, customId);
+        debug("job created", { job: job.id, goal: job.goal });
         if (team) jobTeamSnapshots.set(job.id, team);
         createMsg({
           job_id: job.id,
@@ -710,6 +767,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             "bad_request",
             `job ${req.params.job_id} is not running (status: ${job.status})`,
           );
+        debug("job stop", { job: job.id });
         store.setJobStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,
@@ -725,6 +783,44 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           reason: "Job stopped by user.",
         });
         return ok(req.id, { stopped: true });
+      }
+
+      case "job.kill": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        if (job.status !== "running")
+          return err(
+            req.id,
+            "bad_request",
+            `job ${req.params.job_id} is not running (status: ${job.status})`,
+          );
+        debug("job kill", { job: job.id });
+        store.setJobStatus(req.params.job_id, "interrupted");
+        createMsg({
+          job_id: req.params.job_id,
+          from_role: "user",
+          to_role: "user",
+          kind: "failure",
+          body: "Job killed by user.",
+        });
+        hook("on_job_failed", {
+          event: "job_failed",
+          job_id: job.id,
+          goal: job.goal,
+          reason: "Job killed by user.",
+        });
+        // Abort all in-flight dispatches for this job.
+        const controllers = jobKillControllers.get(req.params.job_id);
+        if (controllers) {
+          for (const ac of controllers) ac.abort();
+        }
+        return ok(req.id, { killed: true });
+      }
+
+      case "daemon.stop": {
+        debug("daemon.stop requested");
+        void Promise.resolve().then(() => doClose());
+        return ok(req.id, { stopping: true });
       }
 
       case "reload": {
@@ -752,10 +848,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const server = await serve(endpoint, handle);
 
   const close = async (): Promise<void> => {
+    debug("closing");
     await Promise.allSettled(pendingDispatches);
     await server.close();
     if (ownsStore) store.close();
   };
+  doClose = close;
 
   return { endpoint, close };
 }

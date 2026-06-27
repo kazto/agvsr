@@ -10,6 +10,8 @@ describe("Store", () => {
     expect(a.status).toBe("running");
     expect(a.cwd).toBe("/repo");
     expect(a.branch).toBe(`agvsr/${a.id.slice(0, 8)}`);
+    // UUID id: branch uses first 8 chars
+    expect(a.branch).toMatch(/^agvsr\/[0-9a-f]{8}$/);
 
     expect(store.getJob(a.id)).toMatchObject({ id: a.id, goal: "add health endpoint" });
     expect(store.getJob("nope")).toBeNull();
@@ -47,6 +49,17 @@ describe("Store", () => {
     expect(interrupted.map((j) => j.id)).toEqual([b.id]);
     expect(store.getJob(b.id)!.status).toBe("interrupted");
     expect(store.interruptRunningJobs()).toEqual([]);
+
+    store.close();
+  });
+
+  it("accepts a custom job id and uses it for the branch name", () => {
+    const store = new Store(":memory:");
+
+    const j = store.createJob("add login page", "/repo", "login-feature");
+    expect(j.id).toBe("login-feature");
+    expect(j.branch).toBe("agvsr/login-feature");
+    expect(store.getJob("login-feature")).toMatchObject({ id: "login-feature" });
 
     store.close();
   });

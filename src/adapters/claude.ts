@@ -9,8 +9,14 @@ import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./t
 
 // Hands-on tools the supervisor must never use directly (workers do the actual work).
 const SUPERVISOR_DISALLOWED = [
-  "Write", "Edit", "NotebookEdit", "Bash",
-  "CronCreate", "CronDelete", "PushNotification", "RemoteTrigger",
+  "Write",
+  "Edit",
+  "NotebookEdit",
+  "Bash",
+  "CronCreate",
+  "CronDelete",
+  "PushNotification",
+  "RemoteTrigger",
 ].join(",");
 
 interface ClaudeEvent {

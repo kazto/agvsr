@@ -34,7 +34,12 @@ export interface Message {
 /** Requests the client can send. Keep methods coarse and explicit. */
 export type Request =
   | { id: string; type: "request"; method: "ping"; params?: Record<string, never> }
-  | { id: string; type: "request"; method: "job.create"; params: { goal: string; cwd: string } }
+  | {
+      id: string;
+      type: "request";
+      method: "job.create";
+      params: { goal: string; cwd: string; id?: string };
+    }
   | { id: string; type: "request"; method: "job.list"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "job.get"; params: { id: string } }
   | { id: string; type: "request"; method: "team.get"; params?: Record<string, never> }
@@ -71,6 +76,8 @@ export type Request =
   | { id: string; type: "request"; method: "job.fail"; params: { job_id: string; reason: string } }
   | { id: string; type: "request"; method: "job.tell"; params: { job_id: string; body: string } }
   | { id: string; type: "request"; method: "job.stop"; params: { job_id: string } }
+  | { id: string; type: "request"; method: "job.kill"; params: { job_id: string } }
+  | { id: string; type: "request"; method: "daemon.stop"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 
 export type Method = Extract<Request, { type: "request" }>["method"];

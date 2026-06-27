@@ -15,12 +15,15 @@ const USAGE = `agvsr ${VERSION}
 
 Usage:
   agvsr daemon                      Run the agvsrd daemon in the foreground
+  agvsr daemon stop                 Stop the running daemon gracefully
+  agvsr daemon restart              Restart the daemon
   agvsr ping                        Check the daemon is up
-  agvsr job "<goal>" [--cwd D]      Submit a job (D is the target repo, default: cwd)
+  agvsr job "<goal>" [--cwd D] [--id ID]  Submit a job (D is the target repo, default: cwd)
   agvsr status [job-id]             List jobs, or show one job with recent audit state
   agvsr logs <job-id> [-f]          Show audit messages for a job
   agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
-  agvsr stop <job-id>               Stop a running job (mark failed)
+  agvsr stop <job-id>               Stop a running job gracefully (mark failed)
+  agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
 `;
@@ -59,6 +62,33 @@ async function main(argv: string[]): Promise<void> {
 
   switch (cmd) {
     case "daemon": {
+      const subCmd = rest[0];
+
+      if (subCmd === "stop") {
+        await withClient(async (c) => {
+          unwrap(await c.request("daemon.stop"));
+          console.log("daemon stopping");
+        });
+        return;
+      }
+
+      if (subCmd === "restart") {
+        await withClient(async (c) => {
+          unwrap(await c.request("daemon.stop"));
+          console.log("daemon stopped, restarting...");
+        });
+        const [bunExec, scriptPath] = process.argv as [string, string, ...string[]];
+        const child = Bun.spawn([bunExec, scriptPath, "daemon"], {
+          detached: true,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        child.unref();
+        console.log("daemon restarted");
+        return;
+      }
+
       const { startDaemon } = await import("../daemon/daemon.ts");
       const daemon = await startDaemon();
       console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
@@ -81,7 +111,7 @@ async function main(argv: string[]): Promise<void> {
     case "job": {
       const { values, positionals } = parseArgs({
         args: rest,
-        options: { cwd: { type: "string" } },
+        options: { cwd: { type: "string" }, id: { type: "string" } },
         allowPositionals: true,
       });
       const goal = positionals.join(" ").trim();
@@ -90,8 +120,10 @@ async function main(argv: string[]): Promise<void> {
         process.exit(1);
       }
       const cwd = normalizeCwd(values.cwd ?? process.cwd());
+      const params: { goal: string; cwd: string; id?: string } = { goal, cwd };
+      if (values.id) params.id = values.id;
       await withClient(async (c) => {
-        const { job } = unwrap(await c.request<{ job: Job }>("job.create", { goal, cwd }));
+        const { job } = unwrap(await c.request<{ job: Job }>("job.create", params));
         console.log(`job ${job.id} created (${job.status})`);
       });
       return;
@@ -207,6 +239,19 @@ async function main(argv: string[]): Promise<void> {
       await withClient(async (c) => {
         unwrap(await c.request("job.stop", { job_id: jobId }));
         console.log(`job ${jobId} stopped`);
+      });
+      return;
+    }
+
+    case "kill": {
+      const jobId = rest[0];
+      if (!jobId) {
+        console.error("usage: agvsr kill <job-id>");
+        process.exit(1);
+      }
+      await withClient(async (c) => {
+        unwrap(await c.request("job.kill", { job_id: jobId }));
+        console.log(`job ${jobId} killed`);
       });
       return;
     }
