@@ -3,12 +3,14 @@
  * `agvsr` — the thin CLI client (D6/D15). Connects to the daemon over local IPC
  * and issues one request. `agvsr daemon` runs the daemon itself in the foreground.
  */
+import { existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
+import type { Adapter } from "../config/team.ts";
 import type {
   Job,
   JobRuntime,
@@ -22,6 +24,7 @@ import type {
 const USAGE = `agvsr ${VERSION}
 
 Usage:
+  agvsr init [options]              Generate a team.yaml without hand editing
   agvsr daemon [--team F]           Run the agvsrd daemon in the foreground
   agvsr daemon start [--team F]     Start the daemon in the background
   agvsr daemon stop                 Stop the running daemon gracefully
@@ -460,6 +463,129 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "init": {
+      const { values: initOpts } = parseArgs({
+        args: rest,
+        options: {
+          output: { type: "string", short: "o" },
+          stdout: { type: "boolean" },
+          force: { type: "boolean", short: "f" },
+          roles: { type: "string" },
+          adapter: { type: "string" },
+          model: { type: "string" },
+          role: { type: "string", multiple: true },
+          "no-comments": { type: "boolean" },
+          help: { type: "boolean", short: "h" },
+        },
+        allowPositionals: false,
+        strict: true,
+      });
+
+      if (initOpts.help) {
+        console.log(`agvsr init — generate a team.yaml without hand editing
+
+Usage: agvsr init [options]
+
+  -o, --output <path>   Write to this file (default: ./team.yaml)
+      --stdout          Write to stdout instead of a file
+  -f, --force           Overwrite the output file if it already exists
+      --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
+      --adapter <a>     Default adapter for every role (default: claude-code)
+      --model <m>       Default model for every role
+      --role <spec>     Per-role override, repeatable. Form: name:adapter:model
+      --no-comments     Emit bare YAML without header/hooks comments
+  -h, --help            Show this help
+`);
+        return;
+      }
+
+      const { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, BUNDLED_CHARTER_ROLES, InitError } =
+        await import("../config/init.ts");
+
+      const VALID_ADAPTERS = ["claude-code", "codex", "agy"] as const;
+
+      const defaultAdapter = (initOpts.adapter ?? "claude-code") as Adapter;
+      if (!(VALID_ADAPTERS as readonly string[]).includes(defaultAdapter)) {
+        console.error(
+          `unknown adapter "${defaultAdapter}". Valid adapters: ${VALID_ADAPTERS.join(", ")}`,
+        );
+        process.exit(1);
+      }
+
+      const roleOverrides = new Map<string, { adapter?: Adapter; model?: string }>();
+      for (const rawSpec of initOpts.role ?? []) {
+        const parts = rawSpec.split(":");
+        if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+          console.error(`invalid --role spec "${rawSpec}": expected name:adapter:model`);
+          process.exit(1);
+        }
+        const [roleName, roleAdapter, roleModel] = parts as [string, string, string];
+        if (!(VALID_ADAPTERS as readonly string[]).includes(roleAdapter)) {
+          console.error(
+            `unknown adapter "${roleAdapter}" in --role "${rawSpec}". Valid adapters: ${VALID_ADAPTERS.join(", ")}`,
+          );
+          process.exit(1);
+        }
+        roleOverrides.set(roleName, { adapter: roleAdapter as Adapter, model: roleModel });
+      }
+
+      const roleNames = initOpts.roles
+        ? initOpts.roles
+            .split(",")
+            .map((r) => r.trim())
+            .filter(Boolean)
+        : [...DEFAULT_ROLES];
+
+      if (!roleNames.includes("supervisor")) {
+        process.stderr.write(
+          'notice: "supervisor" was not in --roles list; prepending it automatically\n',
+        );
+        roleNames.unshift("supervisor");
+      }
+
+      for (const r of roleNames) {
+        if (!BUNDLED_CHARTER_ROLES.has(r)) {
+          process.stderr.write(
+            `warning: role "${r}" has no bundled charter. Add "charter" or "charter_append" in team.yaml before running jobs.\n`,
+          );
+        }
+      }
+
+      const roles = resolveRoleSpecs({
+        roleNames,
+        defaultAdapter,
+        defaultModel: initOpts.model,
+        roleOverrides,
+      });
+
+      let yaml: string;
+      try {
+        yaml = buildTeamYaml({ roles, comments: !initOpts["no-comments"] });
+      } catch (err) {
+        if (err instanceof InitError) {
+          console.error(err.message);
+          process.exit(1);
+        }
+        throw err;
+      }
+
+      if (initOpts.stdout) {
+        process.stdout.write(yaml);
+        return;
+      }
+
+      const outputPath = resolve(initOpts.output ?? "team.yaml");
+
+      if (!initOpts.force && existsSync(outputPath)) {
+        console.error(`${outputPath} already exists; pass --force to overwrite`);
+        process.exit(1);
+      }
+
+      writeFileSync(outputPath, yaml, "utf8");
+      console.log(`wrote ${outputPath}`);
+      return;
+    }
 
     case undefined:
     case "-h":
