@@ -68,3 +68,64 @@ daemon + 薄い CLI）の使いやすさを上げるための施策案。実装�
 いずれも既存の構造（IPC push、`resolveUserPath`、branch カラム、detached spawn）を活かせるため
 追加コストは小さめ。最初の 1 つを実装するなら、効果と難易度のバランスから
 「daemon 自動起動 + `daemon start`」または「`agvsr init`」を推奨。
+
+---
+
+## 5. ジョブのストール検知・実行状態の可視化（観測性・最優先）
+
+### 背景（実地調査で判明した問題）
+ジョブ `2f80372d-97e2-4486-86bd-cc9cd1f6d493` が「動いているのか止まっているのか分からない」
+という症状を調査したところ、`running` 表示のまま約 35 分間ストールしていた。
+
+- 原因: 最後の implementation ターンが exit 0 で完了報告を「ターンの最終テキスト」として
+  書いたが、`agvsr_send(to="supervisor")` を呼ばずに終了した。
+- daemon はその最終テキストを `implementation → daemon` の監査専用メッセージとして保存する
+  だけで（`src/daemon/daemon.ts:417-425`）、どこにもルーティングしない。ワーカーは exit 0・
+  ループ兆候なしのため `resetFailure` するのみで、何もキューに積まれず supervisor は実装完了を
+  知らないまま静かに固まる。
+- 設計上の非対称: supervisor には「テキストだけで終わり agvsr ツール未呼び出しなら fail」という
+  ガードがある（`src/daemon/daemon.ts:427-447`）が、ワーカーには同等のガードが無い。
+- さらに `status` の `running` は「daemon が running と記録している」だけで「処理中」を意味せず、
+  `updated_at` も作成時のまま更新されないため、「実行中 / 入力待ち / ストール」の区別が CLI に
+  一切出ない。これが「分からなさ」の正体。
+
+実装は B → A → C の順で進める。
+
+### B. 実行状態を見える化する（最優先・低コスト）✅ 実装済み
+- daemon にジョブごとの「in-flight ディスパッチの有無」「最後にターンが回った時刻」を保持する。
+  `inflight` Map は既に存在するため参照するだけで実装できる。
+- `job.get` のレスポンスにこの実行状態を含め、`status` で `running` を実態とともに表示する。
+- これにより「running だが実際は止まっている」を人間が即座に判別できる。
+
+実装内容:
+- `src/protocol.ts`: `JobRuntime`（`in_flight` / `active_roles` / `last_activity_at` / `idle_ms`）を追加。
+- `src/daemon/daemon.ts`: `computeRuntime()` を追加し、`inflight` Map のキーから稼働中ロールを、
+  最新監査メッセージから `idle_ms` を算出。`job.get` が `{ job, runtime }` を返すようにした。
+- `src/cli/agvsr.ts`: `agvsr status <job-id>` の先頭行に実行状態を表示。
+  稼働中は `running — working: implementation, idle 12s`、
+  停止中は `running — no in-flight turn, idle 35m (possibly stalled)`。
+- `test/runtime.test.ts`: ゲート付き turnRunner でターン中 `in_flight=true` → 完了後
+  `in_flight=false` かつ `idle_ms` 設定を検証。
+- 検証: `bun test`（72 pass / 0 fail）、`bunx oxfmt`、`bunx oxlint`（exit 0）すべて通過。
+
+### A. ストールを検知して塞ぐ（再発防止）
+- **ワーカー版 no-route ガード**: ワーカーのターンが exit 0 かつ
+  `agvsr_send` / `agvsr_escalate` / `agvsr_complete` を一切呼ばずに終わった場合、daemon が
+  `worker → supervisor` の escalation を自動生成し、「ワーカーがルーティングせずに終了。最終
+  テキストを確認して継続判断を」と促す。supervisor 用ガードのワーカー版にあたる。
+- **アイドル watchdog**: in-flight ディスパッチが無く、最後の活動から N 分（例: ターン
+  タイムアウト相当）経過した `running` ジョブを `stalled` として検知し、ユーザーへ通知する
+  （既存 `on_supervisor_message` フック経路を流用可）。
+
+### C. 監査ログを区別する（仕上げ）
+- `→ daemon` の最終テキストは現在ふつうの `message` と同じ見た目で、送信された報告と区別が
+  つかない。これを `kind: "note"`（ルーティングされない独り言）として明示し、`logs` で
+  淡色 / タグ表示する。「これは送信された報告ではない」と人間がすぐ分かるようにする。
+
+### 優先順位
+| 優先 | 案 | 効果 / コスト |
+|---|---|---|
+| ★ 最優先 | B. 実行状態の可視化（`status` 拡張） | 低コストで即「分かる」 / 低 |
+| ◎ | A. ワーカー no-route ガード | 今回のストールを構造的に再発防止 / 中 |
+| ○ | A. アイドル watchdog | 取りこぼし検知の仕上げ / 中 |
+| ○ | C. 監査ログの区別（`kind: "note"`） | 誤読防止の仕上げ / 低 |

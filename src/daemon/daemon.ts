@@ -18,7 +18,15 @@ import {
   type TurnResult,
 } from "../adapters/index.ts";
 import { fireHook, type HookEvent } from "../hooks.ts";
-import type { Job, Message, PushFrame, Request, Response, RoleSummary } from "../protocol.ts";
+import type {
+  Job,
+  JobRuntime,
+  Message,
+  PushFrame,
+  Request,
+  Response,
+  RoleSummary,
+} from "../protocol.ts";
 
 function resolveTeam(file?: string): TeamConfig | null {
   const candidate = file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
@@ -605,6 +613,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     return err(id, "no_team", detail);
   };
 
+  /**
+   * Live execution state for a job (B): does it have a turn queued or running,
+   * and how long since the last audit activity. `inflight` holds a promise per
+   * `${jobId}:${role}` while a turn is queued or running and is pruned on
+   * completion, so its keys are the source of truth for "actively working".
+   */
+  const computeRuntime = (job: Job): JobRuntime => {
+    const prefix = `${job.id}:`;
+    const activeRoles = [...inflight.keys()]
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length));
+    const last = store.listMessages(job.id).at(-1);
+    const lastActivityAt = last?.created_at ?? job.updated_at;
+    const idleMs = lastActivityAt ? Date.now() - Date.parse(lastActivityAt) : null;
+    return {
+      in_flight: activeRoles.length > 0,
+      active_roles: activeRoles,
+      last_activity_at: lastActivityAt,
+      idle_ms: idleMs,
+    };
+  };
+
   const handle = (req: Request, push: PushFn): Response => {
     switch (req.method) {
       case "ping":
@@ -648,7 +678,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
       case "job.get": {
         const job = store.getJob(req.params.id);
-        return job ? ok(req.id, { job }) : err(req.id, "not_found", `no job ${req.params.id}`);
+        return job
+          ? ok(req.id, { job, runtime: computeRuntime(job) })
+          : err(req.id, "not_found", `no job ${req.params.id}`);
       }
 
       case "team.get": {

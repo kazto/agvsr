@@ -17,6 +17,22 @@ export interface Job {
   updated_at: string;
 }
 
+/**
+ * Live execution state of a job, computed at request time (not persisted).
+ * Lets a client distinguish "running and actively working" from "running but
+ * idle/stalled" — a distinction `status` alone cannot express.
+ */
+export interface JobRuntime {
+  /** True if at least one turn is queued or running for this job right now. */
+  in_flight: boolean;
+  /** Roles with a queued or running turn right now. */
+  active_roles: string[];
+  /** ISO timestamp of the most recent audit message, or null if none. */
+  last_activity_at: string | null;
+  /** Milliseconds since last_activity_at, computed when the response is built. */
+  idle_ms: number | null;
+}
+
 export type MessageKind = "message" | "escalation" | "completion" | "failure";
 
 export interface Message {

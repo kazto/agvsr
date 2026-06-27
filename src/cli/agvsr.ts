@@ -9,7 +9,15 @@ import { parseArgs } from "node:util";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
-import type { Job, Message, PingResult, PushFrame, Response, RoleSummary } from "../protocol.ts";
+import type {
+  Job,
+  JobRuntime,
+  Message,
+  PingResult,
+  PushFrame,
+  Response,
+  RoleSummary,
+} from "../protocol.ts";
 import { restartDaemonDetached, startDaemonDetached } from "./daemon.ts";
 
 const USAGE = `agvsr ${VERSION}
@@ -34,6 +42,28 @@ function normalizeCwd(input: string): string {
   const expanded =
     input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
   return resolve(expanded);
+}
+
+/** Compact human duration: 45s, 12m, 1h03m. */
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * Render live execution state next to a running job's status so the user can
+ * tell "actively working" from "idle/stalled". Empty for terminal statuses.
+ */
+function formatRuntime(job: Job, rt: JobRuntime): string {
+  if (job.status !== "running") return "";
+  const idle = rt.idle_ms != null ? `, idle ${formatDuration(rt.idle_ms)}` : "";
+  return rt.in_flight
+    ? ` — working: ${rt.active_roles.join(", ")}${idle}`
+    : ` — no in-flight turn${idle} (possibly stalled)`;
 }
 
 function unwrap<T>(res: Response<T>): T {
@@ -145,12 +175,14 @@ async function main(argv: string[]): Promise<void> {
       await withClient(async (c) => {
         const jobId = rest[0];
         if (jobId) {
-          const { job } = unwrap(await c.request<{ job: Job }>("job.get", { id: jobId }));
+          const { job, runtime } = unwrap(
+            await c.request<{ job: Job; runtime: JobRuntime }>("job.get", { id: jobId }),
+          );
           const { messages } = unwrap(
             await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId }),
           );
           const last = messages.at(-1);
-          console.log(`${job.id}  ${job.status}`);
+          console.log(`${job.id}  ${job.status}${formatRuntime(job, runtime)}`);
           console.log(`goal: ${job.goal}`);
           console.log(`cwd: ${job.cwd}`);
           console.log(`branch: ${job.branch ?? "(not set)"}`);
