@@ -35,6 +35,7 @@ Usage:
   agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
+  agvsr doctor [--team F] [--json]  Check adapter CLIs and auth; exit 0 if all pass
 `;
 
 function normalizeCwd(input: string): string {
@@ -460,6 +461,62 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "doctor": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          team: { type: "string" },
+          json: { type: "boolean" },
+        },
+        allowPositionals: false,
+      });
+
+      const [{ resolveTeamFile }, { runDoctor, defaultDeps, reportHasFailures }] =
+        await Promise.all([import("../config/team.ts"), import("../doctor.ts")]);
+
+      const teamFile = resolveTeamFile(values.team);
+      const report = await runDoctor(teamFile, defaultDeps());
+      const hasFails = reportHasFailures(report);
+
+      if (values.json) {
+        console.log(
+          JSON.stringify(
+            {
+              team_file: report.teamFile,
+              ok: !hasFails,
+              groups: report.groups,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const group of report.groups) {
+          console.log(group.title);
+          for (const check of group.checks) {
+            const marker = check.level === "ok" ? "✓" : check.level === "warn" ? "~" : "✗";
+            console.log(`  ${marker} ${check.label}: ${check.message}`);
+          }
+          console.log();
+        }
+
+        const allChecks = report.groups.flatMap((g) => g.checks);
+        const failCount = allChecks.filter((c) => c.level === "fail").length;
+        const warnCount = allChecks.filter((c) => c.level === "warn").length;
+        const warnSuffix =
+          warnCount > 0 ? `, ${warnCount} warning${warnCount !== 1 ? "s" : ""}` : "";
+
+        if (!hasFails) {
+          console.log(`all checks passed${warnSuffix}`);
+        } else {
+          console.log(`${failCount} failure${failCount !== 1 ? "s" : ""}${warnSuffix}`);
+        }
+      }
+
+      if (hasFails) process.exit(1);
+      return;
+    }
 
     case undefined:
     case "-h":
