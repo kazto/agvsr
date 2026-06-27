@@ -47,13 +47,24 @@ function startStub(
 }
 
 function mcpMessages(tool: string, args: Record<string, unknown>): string {
-  return [
-    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } } },
-    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: tool, arguments: args } },
-  ]
-    .map((m) => JSON.stringify(m))
-    .join("\n") + "\n";
+  return (
+    [
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "0" },
+        },
+      },
+      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: tool, arguments: args } },
+    ]
+      .map((m) => JSON.stringify(m))
+      .join("\n") + "\n"
+  );
 }
 
 /**
@@ -113,7 +124,12 @@ describe("agvsr-mcp shim", () => {
     }));
 
     try {
-      await callShim(sockPath, { AGVSR_ROLE: "implementation", AGVSR_JOB_ID: "job-1", AGVSR_ALLOWED: "supervisor" }, "agvsr_send", { to: "supervisor", body: "hello" });
+      await callShim(
+        sockPath,
+        { AGVSR_ROLE: "implementation", AGVSR_JOB_ID: "job-1", AGVSR_ALLOWED: "supervisor" },
+        "agvsr_send",
+        { to: "supervisor", body: "hello" },
+      );
 
       const relay = stub.received.find((r: any) => r.method === "msg.send") as any;
       expect(relay).toBeDefined();
@@ -123,7 +139,9 @@ describe("agvsr-mcp shim", () => {
       expect(relay.params.job_id).toBe("job-1");
     } finally {
       await stub.close();
-      try { unlinkSync(sockPath); } catch {}
+      try {
+        unlinkSync(sockPath);
+      } catch {}
     }
   });
 
@@ -138,7 +156,12 @@ describe("agvsr-mcp shim", () => {
     }));
 
     try {
-      await callShim(sockPath, { AGVSR_ROLE: "implementation", AGVSR_JOB_ID: "job-2" }, "agvsr_escalate", { reason: "blocked by permission check" });
+      await callShim(
+        sockPath,
+        { AGVSR_ROLE: "implementation", AGVSR_JOB_ID: "job-2" },
+        "agvsr_escalate",
+        { reason: "blocked by permission check" },
+      );
 
       const relay = stub.received.find((r: any) => r.method === "msg.escalate") as any;
       expect(relay).toBeDefined();
@@ -146,7 +169,9 @@ describe("agvsr-mcp shim", () => {
       expect(relay.params.from).toBe("implementation");
     } finally {
       await stub.close();
-      try { unlinkSync(sockPath); } catch {}
+      try {
+        unlinkSync(sockPath);
+      } catch {}
     }
   });
 
@@ -177,7 +202,9 @@ describe("agvsr-mcp shim", () => {
       expect(JSON.stringify(callResp)).toContain("rejected");
     } finally {
       await stub.close();
-      try { unlinkSync(sockPath); } catch {}
+      try {
+        unlinkSync(sockPath);
+      } catch {}
     }
   });
 
@@ -247,7 +274,9 @@ describe("agvsr-mcp shim", () => {
       expect(stub.received.some((r: any) => r.method === "msg.list")).toBe(true);
     } finally {
       await stub.close();
-      try { unlinkSync(sockPath); } catch {}
+      try {
+        unlinkSync(sockPath);
+      } catch {}
     }
   });
 
@@ -262,7 +291,12 @@ describe("agvsr-mcp shim", () => {
     }));
 
     try {
-      await callShim(sockPath, { AGVSR_ROLE: "supervisor", AGVSR_JOB_ID: "job-4" }, "agvsr_complete", { job_id: "job-4", result: "all done" });
+      await callShim(
+        sockPath,
+        { AGVSR_ROLE: "supervisor", AGVSR_JOB_ID: "job-4" },
+        "agvsr_complete",
+        { job_id: "job-4", result: "all done" },
+      );
 
       const relay = stub.received.find((r: any) => r.method === "job.complete") as any;
       expect(relay).toBeDefined();
@@ -270,7 +304,9 @@ describe("agvsr-mcp shim", () => {
       expect(relay.params.result).toBe("all done");
     } finally {
       await stub.close();
-      try { unlinkSync(sockPath); } catch {}
+      try {
+        unlinkSync(sockPath);
+      } catch {}
     }
   });
 });

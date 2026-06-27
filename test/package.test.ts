@@ -12,12 +12,7 @@ describe("package surface", () => {
   it("exposes only the intended runtime API names", async () => {
     const api = await import("../src/index.ts");
     expect(Object.keys(api).sort()).toEqual(
-      [
-        "TeamConfigError",
-        "VERSION",
-        "loadTeam",
-        "parseTeam",
-      ].sort(),
+      ["TeamConfigError", "VERSION", "loadTeam", "parseTeam"].sort(),
     );
   });
 
@@ -56,8 +51,6 @@ describe("package surface", () => {
     expect(files.has("examples/team.yaml")).toBe(true);
     expect(files.has("README.md")).toBe(true);
     expect([...files].some((path) => path.startsWith("test/"))).toBe(false);
-    expect([...files].some((path) => path.startsWith("docs/") && path !== "README.md")).toBe(
-      false,
-    );
+    expect([...files].some((path) => path.startsWith("docs/") && path !== "README.md")).toBe(false);
   });
 });
