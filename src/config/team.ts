@@ -7,6 +7,7 @@
  * Phase 2 (needs the adapters); here we validate structure only.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -83,6 +84,14 @@ export function parseTeam(text: string): TeamConfig {
     );
   }
   return team;
+}
+
+/**
+ * Resolve the team file path: explicit arg ?? $AGVSR_TEAM ?? <cwd>/team.yaml.
+ * Matches the daemon's team file resolution (D9).
+ */
+export function resolveTeamFile(explicit?: string): string {
+  return explicit ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
 }
 
 export function loadTeam(path: string): TeamConfig {

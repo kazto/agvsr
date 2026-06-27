@@ -20,7 +20,7 @@ daemon + 薄い CLI）の使いやすさを上げるための施策案。実装�
 - `test/init.test.ts` / `test/cli-init.test.ts`: ユニットテストと E2E テスト。
 - 対話ウィザードは同じ `buildTeamYaml` を呼ぶ薄いフロントエンドとして後から追加できる。
 
-### `agvsr doctor`
+### `agvsr doctor` ✅ 実装済み
 
 - `defaultTurnRunner` は `claude` / `codex` / `agy` バイナリを spawn するが、未インストール時は
   実ジョブを投げて初めて失敗する（`src/adapters/run.ts:36` の spawn エラー）。
@@ -108,7 +108,7 @@ daemon + 薄い CLI）の使いやすさを上げるための施策案。実装�
 | ★ 最優先 | `agvsr init`                     | 初回到達率が上がる / 低〜中                 |
 | ◎ ✅     | `agvsr watch` ダッシュボード     | 観測性が大幅改善・既存 push 機構を流用 / 中 |
 | ◎        | git worktree 隔離                | 並列化と安全性の構造的解決 / 中〜高         |
-| ○        | `doctor` / 短い job id           | 細かい詰まりを解消 / 低                     |
+| ○ ✅     | `doctor` / 短い job id           | 細かい詰まりを解消 / 低                     |
 
 いずれも既存の構造（IPC push、`resolveUserPath`、branch カラム、detached spawn）を活かせるため
 追加コストは小さめ。最初の 1 つを実装するなら、効果と難易度のバランスから

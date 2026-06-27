@@ -7,6 +7,13 @@ import { claudeDriver } from "./claude.ts";
 import { codexDriver } from "./codex.ts";
 import { agyDriver } from "./agy.ts";
 
+/** Maps each adapter id to the CLI binary name that must be on PATH. */
+export const ADAPTER_BIN: Record<Adapter, string> = {
+  "claude-code": "claude",
+  codex: "codex",
+  agy: "agy",
+};
+
 const DRIVERS: Record<Adapter, CliDriver> = {
   "claude-code": claudeDriver,
   codex: codexDriver,

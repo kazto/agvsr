@@ -42,3 +42,31 @@ export function ensureConfigDir(): string {
   mkdirSync(dir, { recursive: true });
   return dir;
 }
+
+/**
+ * Resolve the user's full login-shell PATH so agent subprocesses can find
+ * tools installed by mise, nvm, cargo, brew, etc. regardless of how the
+ * daemon was started. Falls back to process.env.PATH on any failure.
+ */
+export async function resolveUserPath(): Promise<string> {
+  const shell = process.env.SHELL;
+  if (!shell) return process.env.PATH ?? "";
+  const current = process.env.PATH ?? "";
+  try {
+    const proc = Bun.spawn([shell, "-lc", "printf '%s' \"$PATH\""], {
+      stdout: "pipe",
+      stderr: "ignore",
+      stdin: "ignore",
+    });
+    const text = await new Response(proc.stdout as ReadableStream).text();
+    await proc.exited;
+    const loginPath = text.trim();
+    // Merge: current PATH first (preserves test-injected dirs and exact startup env),
+    // then login PATH to pick up tools the startup shell might have missed.
+    if (!loginPath) return current;
+    if (!current) return loginPath;
+    return `${current}:${loginPath}`;
+  } catch {
+    return current;
+  }
+}
