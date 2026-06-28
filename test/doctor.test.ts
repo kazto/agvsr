@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDoctor, reportHasFailures, defaultDeps, type DoctorDeps } from "../src/doctor.ts";
@@ -28,8 +28,57 @@ function makeDeps(overrides: Partial<DoctorDeps> = {}): DoctorDeps {
     fileExists: (_path) => false,
     homeDir: () => "/home/testuser",
     readFile: (_path) => VALID_TEAM_SINGLE,
+    probeModel: async () => ({ exitCode: 0, stdout: "OK", stderr: "" }),
     ...overrides,
   };
+}
+
+function writeDummyBinary(dir: string, name: string, validModels: string[]): string {
+  const path = join(dir, name);
+  const script = `#!/bin/sh
+set -eu
+model=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--model" ] || [ "$prev" = "-m" ]; then
+    model="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$model" in
+${validModels.map((model) => `  ${model}) exit 0 ;;`).join("\n")}
+  *)
+    echo "unknown model: $model" >&2
+    exit 1
+    ;;
+esac
+`;
+  writeFileSync(path, script, "utf8");
+  chmodSync(path, 0o755);
+  return path;
+}
+
+async function runDoctorCli(
+  teamFile: string,
+  extraEnv: Record<string, string>,
+  extraArgs: string[] = [],
+) {
+  const cliPath = join(import.meta.dir, "../src/cli/agvsr.ts");
+  const proc = Bun.spawn(
+    [process.execPath, "run", cliPath, "doctor", "--team", teamFile, ...extraArgs],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ...extraEnv },
+    },
+  );
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, code };
 }
 
 // ── QA 1: team source precedence ─────────────────────────────────────────────
@@ -375,6 +424,93 @@ roles:
   });
 });
 
+// ── QA 7: model probing ─────────────────────────────────────────────────────
+
+describe("model probing", () => {
+  it("does not invoke probeModel unless probe mode is enabled", async () => {
+    let calls = 0;
+    const deps = makeDeps({
+      probeModel: async () => {
+        calls += 1;
+        return { exitCode: 0, stdout: "OK", stderr: "" };
+      },
+    });
+    await runDoctor("/team.yaml", deps);
+    expect(calls).toBe(0);
+  });
+
+  it("probes roles in team.yaml order when enabled", async () => {
+    const calls: Array<{ role: string; adapter: string; model: string }> = [];
+    const deps = makeDeps({
+      readFile: () => VALID_TEAM_ALL_ADAPTERS,
+      which: (bin) => `/usr/bin/${bin}`,
+      probeModel: async (spec) => {
+        calls.push({ role: spec.role, adapter: spec.adapter, model: spec.model });
+        return { exitCode: 0, stdout: "OK", stderr: "" };
+      },
+    });
+    await runDoctor("/team.yaml", deps, { probe: true });
+    expect(calls).toEqual([
+      { role: "supervisor", adapter: "claude-code", model: "claude-opus-4-8" },
+      { role: "worker1", adapter: "codex", model: "gpt-5-codex" },
+      { role: "worker2", adapter: "agy", model: "gemini-3-pro" },
+    ]);
+  });
+
+  it("adds a model probes group with ok checks when probes pass", async () => {
+    const deps = makeDeps({
+      readFile: () => VALID_TEAM_ALL_ADAPTERS,
+      which: (bin) => `/usr/bin/${bin}`,
+      probeModel: async () => ({ exitCode: 0, stdout: "OK", stderr: "" }),
+    });
+    const report = await runDoctor("/team.yaml", deps, { probe: true });
+    const probeGroup = report.groups.find((g) => g.title === "model probes");
+    expect(probeGroup?.checks.every((c) => c.level === "ok")).toBe(true);
+    expect(reportHasFailures(report)).toBe(false);
+  });
+
+  it("reports probe failures with remediation hints", async () => {
+    const deps = makeDeps({
+      readFile: () => VALID_TEAM_SINGLE,
+      which: (bin) => `/usr/bin/${bin}`,
+      probeModel: async () => ({ exitCode: 1, stdout: "", stderr: "unknown model" }),
+    });
+    const report = await runDoctor("/team.yaml", deps, { probe: true });
+    const probeGroup = report.groups.find((g) => g.title === "model probes");
+    const supervisorCheck = probeGroup?.checks.find((c) => c.label.startsWith("supervisor "));
+    expect(supervisorCheck?.level).toBe("fail");
+    expect(supervisorCheck?.message).toContain('team.yaml supervisor.model="claude-opus-4-8"');
+    expect(supervisorCheck?.message).toContain("login/API key");
+    expect(supervisorCheck?.message).toContain("PATH/install");
+    expect(supervisorCheck?.message).toContain("unknown model");
+    expect(reportHasFailures(report)).toBe(true);
+  });
+
+  it("skips probing when an adapter binary is missing", async () => {
+    let calls = 0;
+    const deps = makeDeps({
+      readFile: () => VALID_TEAM_ALL_ADAPTERS,
+      which: (bin) => (bin === "claude" ? null : `/usr/bin/${bin}`),
+      probeModel: async () => {
+        calls += 1;
+        return { exitCode: 0, stdout: "OK", stderr: "" };
+      },
+    });
+    const report = await runDoctor("/team.yaml", deps, { probe: true });
+    const binGroup = report.groups.find((g) => g.title === "adapter binaries");
+    const claudeBin = binGroup?.checks.find((c) => c.label === "claude");
+    expect(claudeBin?.level).toBe("fail");
+    const probeGroup = report.groups.find((g) => g.title === "model probes");
+    const supervisorCheck = probeGroup?.checks.find((c) => c.label.startsWith("supervisor "));
+    expect(supervisorCheck?.level).toBe("fail");
+    expect(supervisorCheck?.message).toContain(
+      "skipped probe because claude is not available in PATH",
+    );
+    expect(calls).toBe(2);
+    expect(reportHasFailures(report)).toBe(true);
+  });
+});
+
 // ── QA 7: aggregation ────────────────────────────────────────────────────────
 
 describe("aggregation (warn + fail → exit 1)", () => {
@@ -477,6 +613,7 @@ describe("read-only / daemon-independent", () => {
     expect(typeof deps.fileExists).toBe("function");
     expect(typeof deps.homeDir).toBe("function");
     expect(typeof deps.readFile).toBe("function");
+    expect(typeof deps.probeModel).toBe("function");
   });
 });
 
@@ -536,5 +673,48 @@ describe("CLI integration", () => {
     expect(stdout).toContain(teamFile);
     expect(stdout).toContain("adapter binaries");
     expect(stdout).toContain("auth");
+  });
+
+  it("--probe succeeds with a temporary dummy adapter binary on PATH", async () => {
+    const binDir = mkdtempSync(join(tmpdir(), "agvsr-doctor-bin-"));
+    const dummyBin = writeDummyBinary(binDir, "codex", ["gpt-5-codex"]);
+    const probeTeam = join(tmpDir, "probe-team.yaml");
+    writeFileSync(probeTeam, `roles:\n  supervisor: { adapter: codex, model: gpt-5-codex }\n`);
+    const { stdout, code } = await runDoctorCli(probeTeam, { PATH: binDir, SHELL: "" }, [
+      "--probe",
+    ]);
+    expect(code).toBe(0);
+    expect(stdout).toContain("model probes");
+    expect(stdout).toContain("✓");
+    expect(stdout).toContain(dummyBin);
+  });
+
+  it("--probe fails with a dummy adapter binary that rejects an unknown model", async () => {
+    const binDir = mkdtempSync(join(tmpdir(), "agvsr-doctor-bin-"));
+    writeDummyBinary(binDir, "codex", ["gpt-5-codex"]);
+    const probeTeam = join(tmpDir, "probe-team-invalid.yaml");
+    writeFileSync(probeTeam, `roles:\n  supervisor: { adapter: codex, model: invalid-model }\n`);
+    const { stdout, code } = await runDoctorCli(probeTeam, { PATH: binDir, SHELL: "" }, [
+      "--probe",
+    ]);
+    expect(code).toBe(1);
+    expect(stdout).toContain("✗");
+    expect(stdout).toContain("unknown model");
+    expect(stdout).toContain('team.yaml supervisor.model="invalid-model"');
+  });
+
+  it("--probe reports a missing adapter binary without spawning a probe", async () => {
+    const probeTeam = join(tmpDir, "probe-team-missing.yaml");
+    writeFileSync(
+      probeTeam,
+      `roles:\n  supervisor: { adapter: claude-code, model: claude-opus-4-8 }\n`,
+    );
+    const { stdout, code } = await runDoctorCli(probeTeam, { PATH: tmpDir, SHELL: "" }, [
+      "--probe",
+    ]);
+    expect(code).toBe(1);
+    expect(stdout).toContain("adapter binaries");
+    expect(stdout).toContain("model probes");
+    expect(stdout).toContain("skipped probe because claude is not available in PATH");
   });
 });
