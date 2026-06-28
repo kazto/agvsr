@@ -6,7 +6,9 @@ import { claudeDriver } from "../src/adapters/claude.ts";
 import { codexDriver } from "../src/adapters/codex.ts";
 import { agyDriver } from "../src/adapters/agy.ts";
 import { agyMcpConfig, codexMcpConfigArgs } from "../src/adapters/mcp.ts";
-import type { AgentSpec, TurnEvent } from "../src/adapters/types.ts";
+import { validateTeamModels } from "../src/adapters/validate.ts";
+import { parseTeam } from "../src/config/team.ts";
+import type { AgentSpec, CliDriver, TurnEvent } from "../src/adapters/types.ts";
 
 const spec = (adapter: AgentSpec["adapter"]): AgentSpec => ({
   role: "implementation",
@@ -71,6 +73,18 @@ describe("claude driver", () => {
     ]);
     expect(p.sessionId()).toBe("S1");
     expect(p.finalText()).toBe("hi ");
+  });
+
+  it("warns on obvious Claude shorthand model typos but not canonical IDs", () => {
+    expect(claudeDriver.validateModel?.("opus-4.8")).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining("claude-"),
+        hint: expect.stringContaining("claude-opus-4-8"),
+      }),
+    ]);
+    expect(claudeDriver.validateModel?.("claude-opus-4-8")).toEqual([]);
+    expect(claudeDriver.validateModel?.("claude-opus-4-8-20250514")).toEqual([]);
+    expect(claudeDriver.validateModel?.("any-string-no-probe")).toEqual([]);
   });
 });
 
@@ -160,5 +174,69 @@ describe("agy driver", () => {
     } finally {
       delete process.env.AGVSR_AGY_CONV_DIR;
     }
+  });
+});
+
+describe("validateTeamModels", () => {
+  it("returns only Claude findings for a mixed team", () => {
+    const team = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+  implementation: { adapter: codex, model: any-string-no-probe }
+  qa: { adapter: agy, model: gemini-3-pro }
+`);
+    expect(validateTeamModels(team)).toEqual([
+      expect.objectContaining({
+        role: "supervisor",
+        adapter: "claude-code",
+        model: "opus-4.8",
+        message: expect.stringContaining("Claude model IDs"),
+        hint: expect.stringContaining("claude-opus-4-8"),
+      }),
+    ]);
+  });
+
+  it("returns one finding per role", () => {
+    const team = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+  design: { adapter: claude-code, model: sonnet-4.6 }
+`);
+    expect(validateTeamModels(team)).toEqual([
+      expect.objectContaining({ role: "supervisor", adapter: "claude-code", model: "opus-4.8" }),
+      expect.objectContaining({ role: "design", adapter: "claude-code", model: "sonnet-4.6" }),
+    ]);
+  });
+
+  it("converts validator throws into warning findings", () => {
+    const mutableClaude = claudeDriver as CliDriver & {
+      validateModel?: (model: string) => { message: string; hint?: string }[];
+    };
+    const original = mutableClaude.validateModel;
+    mutableClaude.validateModel = () => {
+      throw new Error("boom");
+    };
+
+    try {
+      const team = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+`);
+      expect(validateTeamModels(team)).toEqual([
+        expect.objectContaining({
+          role: "supervisor",
+          adapter: "claude-code",
+          model: "opus-4.8",
+          message: expect.stringContaining("model validator threw: boom"),
+        }),
+      ]);
+    } finally {
+      mutableClaude.validateModel = original;
+    }
+  });
+
+  it("keeps adapters without validateModel as no-op", () => {
+    expect(codexDriver.validateModel).toBeUndefined();
+    expect(agyDriver.validateModel).toBeUndefined();
   });
 });

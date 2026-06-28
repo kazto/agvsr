@@ -1388,6 +1388,184 @@ hooks:
     c.close();
   });
 
+  it("starts, lazy-loads, and reloads with suspicious models without blocking", async () => {
+    const base = join(tmpdir(), `agvsr-model-warn-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const yamlPath = `${base}.team.yaml`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+
+    try {
+      const { startDaemon } = await import("../src/daemon/daemon.ts");
+      const started = await startDaemon({
+        endpoint: sockLocal,
+        storeFile: db,
+        team: parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+`),
+        interruptRunningJobsOnStart: false,
+        turnRunner: async () => ({
+          events: [{ kind: "result", ok: true, text: "ok" }],
+          outcome: { sessionId: "warn-session", finalText: "", exitCode: 0 },
+        }),
+      });
+
+      const c = await Client.connect(sockLocal);
+      const team = await c.request<{ roles: RoleSummary[] }>("team.get");
+      expect(team.ok).toBe(true);
+
+      const created = await c.request<{ job: Job }>("job.create", { goal: "warn me", cwd: repo });
+      expect(created.ok).toBe(true);
+
+      await started.close();
+      c.close();
+
+      const lazyDaemon = await startDaemon({
+        endpoint: `${sockLocal}-lazy`,
+        storeFile: `${db}-lazy`,
+        teamFile: yamlPath,
+        interruptRunningJobsOnStart: false,
+        turnRunner: async () => ({
+          events: [{ kind: "result", ok: true, text: "ok" }],
+          outcome: { sessionId: "lazy-session", finalText: "", exitCode: 0 },
+        }),
+      });
+
+      writeFileSync(
+        yamlPath,
+        `
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+`,
+      );
+
+      const lazyClient = await Client.connect(`${sockLocal}-lazy`);
+      const lazyCreated = await lazyClient.request<{ job: Job }>("job.create", {
+        goal: "lazy warn",
+        cwd: repoLocal,
+      });
+      expect(lazyCreated.ok).toBe(true);
+
+      writeFileSync(
+        yamlPath,
+        `
+roles:
+  supervisor: { adapter: claude-code, model: sonnet-4.6 }
+`,
+      );
+      const reloaded = await lazyClient.request<{ roles: RoleSummary[] }>("reload");
+      expect(reloaded.ok).toBe(true);
+      lazyClient.close();
+      await lazyDaemon.close();
+    } finally {
+      for (const f of [
+        sockLocal,
+        db,
+        `${db}-wal`,
+        `${db}-shm`,
+        `${sockLocal}-lazy`,
+        `${db}-lazy`,
+        `${db}-lazy-wal`,
+        `${db}-lazy-shm`,
+        yamlPath,
+        repoLocal,
+      ]) {
+        try {
+          rmSync(f, { recursive: true });
+        } catch {}
+      }
+    }
+  });
+
+  it("emits debug warnings when AGVSR_DEBUG is enabled", async () => {
+    const base = join(tmpdir(), `agvsr-model-debug-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const lazySock = `${sockLocal}-lazy`;
+    const lazyDb = `${db}-lazy`;
+    const yamlPath = `${base}.team.yaml`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+
+    const daemonPath = JSON.stringify(join(import.meta.dir, "../src/daemon/daemon.ts"));
+    const clientPath = JSON.stringify(join(import.meta.dir, "../src/ipc/transport.ts"));
+    const teamPath = JSON.stringify(join(import.meta.dir, "../src/config/team.ts"));
+    const script = `
+process.env.AGVSR_DEBUG = "1";
+const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { join } = await import("node:path");
+const { randomUUID } = await import("node:crypto");
+const { Client } = await import(${clientPath});
+const { parseTeam } = await import(${teamPath});
+const { startDaemon } = await import(${daemonPath});
+
+const base = join(tmpdir(), "agvsr-model-debug-" + randomUUID());
+const sockLocal = ${JSON.stringify(sockLocal)};
+const db = ${JSON.stringify(db)};
+const lazySock = ${JSON.stringify(lazySock)};
+const lazyDb = ${JSON.stringify(lazyDb)};
+const yamlPath = ${JSON.stringify(yamlPath)};
+const repoLocal = ${JSON.stringify(repoLocal)};
+mkdirSync(repoLocal, { recursive: true });
+
+const noopTurn = async () => ({
+  events: [{ kind: "result", ok: true, text: "ok" }],
+  outcome: { sessionId: "session", finalText: "", exitCode: 0 },
+});
+
+const daemon = await startDaemon({
+  endpoint: sockLocal,
+  storeFile: db,
+  team: parseTeam(\`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+\`),
+  interruptRunningJobsOnStart: false,
+  turnRunner: noopTurn,
+});
+const client = await Client.connect(sockLocal);
+const team = await client.request("team.get");
+if (!team.ok) throw new Error("team.get failed");
+await daemon.close();
+client.close();
+
+const lazyDaemon = await startDaemon({
+  endpoint: lazySock,
+  storeFile: lazyDb,
+  teamFile: yamlPath,
+  interruptRunningJobsOnStart: false,
+  turnRunner: noopTurn,
+});
+writeFileSync(yamlPath, \`
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+\`);
+const lazyClient = await Client.connect(lazySock);
+const created = await lazyClient.request("job.create", { goal: "lazy warn", cwd: repoLocal });
+if (!created.ok) throw new Error("job.create failed");
+writeFileSync(yamlPath, \`
+roles:
+  supervisor: { adapter: claude-code, model: sonnet-4.6 }
+\`);
+const reloaded = await lazyClient.request("reload");
+if (!reloaded.ok) throw new Error("reload failed");
+lazyClient.close();
+await lazyDaemon.close();
+rmSync(repoLocal, { recursive: true, force: true });
+rmSync(yamlPath, { force: true });
+`;
+
+    const proc = Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe" });
+    const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(code).toBe(0);
+    expect(stderr).toContain("team startup model warning");
+    expect(stderr).toContain("team lazy-load model warning");
+    expect(stderr).toContain("team reload model warning");
+  });
+
   it("reloads team.yaml at runtime and reflects new roles (D17)", async () => {
     const base = join(tmpdir(), `agvsr-reload-${randomUUID()}`);
     const sockLocal = `${base}.sock`;

@@ -3,8 +3,8 @@
  * name to an adapter (CLI), a model string, and optional charter customization.
  * v1 is one instance per role, static (D9).
  *
- * Model-string availability is validated against each adapter at startup in
- * Phase 2 (needs the adapters); here we validate structure only.
+ * Heuristic model warnings live in the adapter layer; here we validate
+ * structure only so future model IDs keep working.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

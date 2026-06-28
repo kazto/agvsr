@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseTeam, type Adapter, type TeamConfig } from "./config/team.ts";
 import { ADAPTER_BIN } from "./adapters/index.ts";
+import { validateTeamModels } from "./adapters/validate.ts";
 import { resolveUserPath } from "./paths.ts";
 
 export type CheckLevel = "ok" | "warn" | "fail";
@@ -145,6 +146,28 @@ export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<Doc
     message: `${roleCount} role${roleCount !== 1 ? "s" : ""} (${roleSummary})`,
   });
 
+  // ── section 2: model warnings ─────────────────────────────────────────────
+  const modelGroup: DoctorGroup = { title: "model warnings", checks: [] };
+  groups.push(modelGroup);
+  const modelFindings = validateTeamModels(team);
+  if (modelFindings.length === 0) {
+    modelGroup.checks.push({
+      label: "models",
+      level: "ok",
+      message: "no adapter warnings",
+    });
+  } else {
+    for (const finding of modelFindings) {
+      modelGroup.checks.push({
+        label: `${finding.role} model`,
+        level: "warn",
+        message: `${finding.adapter} ${finding.model}: ${finding.message}${
+          finding.hint ? ` Hint: ${finding.hint}` : ""
+        }`,
+      });
+    }
+  }
+
   // Build adapter → roles map (preserves insertion order = team.yaml order).
   const rolesByAdapter = new Map<Adapter, string[]>();
   for (const [name, role] of Object.entries(team.roles)) {
@@ -156,7 +179,7 @@ export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<Doc
     }
   }
 
-  // ── section 2: adapter binaries ───────────────────────────────────────────
+  // ── section 3: adapter binaries ───────────────────────────────────────────
   const binGroup: DoctorGroup = { title: "adapter binaries", checks: [] };
   groups.push(binGroup);
 
@@ -175,7 +198,7 @@ export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<Doc
     }
   }
 
-  // ── section 3: auth ───────────────────────────────────────────────────────
+  // ── section 4: auth ───────────────────────────────────────────────────────
   const authGroup: DoctorGroup = { title: "auth", checks: [] };
   groups.push(authGroup);
 

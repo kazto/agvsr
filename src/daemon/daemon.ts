@@ -18,6 +18,7 @@ import {
   type TurnEvent,
   type TurnResult,
 } from "../adapters/index.ts";
+import { validateTeamModels } from "../adapters/validate.ts";
 import { fireHook, type HookEvent } from "../hooks.ts";
 import type {
   Job,
@@ -295,6 +296,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const hookRun = options.hookRunner ?? fireHook;
   const userPath = options.userPath ?? (await resolveUserPath());
   debug("starting", { endpoint, pid: process.pid });
+
+  const emitTeamModelWarnings = (currentTeam: TeamConfig, source: string): void => {
+    for (const finding of validateTeamModels(currentTeam)) {
+      debug(
+        `team ${source} model warning: role=${finding.role} adapter=${finding.adapter} model=${finding.model} ${finding.message}${
+          finding.hint ? ` | hint=${finding.hint}` : ""
+        }`,
+      );
+    }
+  };
+
   // Always reads current `team` so hooks update immediately after reload.
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
@@ -335,6 +347,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const msgWatchers = new Map<string, Set<(frame: PushFrame) => boolean>>();
   // Deferred close trigger for daemon.stop.
   let doClose: () => Promise<void> = async () => {};
+
+  if (team) {
+    emitTeamModelWarnings(team, "startup");
+  }
 
   const notifyWatchers = (msg: Message): void => {
     const set = msgWatchers.get(msg.job_id);
@@ -749,6 +765,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       if (loaded) {
         team = loaded;
         if (!options.turnRunner) runner = defaultTurnRunner();
+        emitTeamModelWarnings(loaded, "lazy-load");
         debug("team lazy-loaded", { teamFile });
       }
     } catch (e) {
@@ -1118,6 +1135,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           const newTeam = loadTeam(teamFile);
           team = newTeam;
           if (!options.turnRunner) runner = defaultTurnRunner();
+          emitTeamModelWarnings(newTeam, "reload");
           const roles: RoleSummary[] = Object.entries(newTeam.roles).map(([name, r]) => ({
             name,
             adapter: r.adapter,
