@@ -338,6 +338,41 @@ describe("model shape validation", () => {
     const schemaCheck = report.groups[0]?.checks.find((c) => c.label === "schema");
     expect(schemaCheck?.level).toBe("ok");
   });
+
+  it("warns on obvious Claude shorthand typos without failing", async () => {
+    const deps = makeDeps({
+      which: (bin) => `/usr/bin/${bin}`,
+      readFile: () => `
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+`,
+    });
+    const report = await runDoctor("/team.yaml", deps);
+    const modelGroup = report.groups.find((g) => g.title === "model warnings");
+    expect(modelGroup?.checks.some((c) => c.level === "warn")).toBe(true);
+    expect(modelGroup?.checks.some((c) => c.message.includes("claude-opus-4-8"))).toBe(true);
+    expect(reportHasFailures(report)).toBe(false);
+  });
+
+  it("keeps JSON ok true when warnings are the only issue", async () => {
+    const deps = makeDeps({
+      which: (bin) => `/usr/bin/${bin}`,
+      readFile: () => `
+roles:
+  supervisor: { adapter: claude-code, model: opus-4.8 }
+`,
+    });
+    const report = await runDoctor("/team.yaml", deps);
+    expect(reportHasFailures(report)).toBe(false);
+    expect(report.teamFile).toBe("/team.yaml");
+    expect(!reportHasFailures(report)).toBe(true);
+    expect(report.groups.map((g) => g.title)).toEqual([
+      "team.yaml",
+      "model warnings",
+      "adapter binaries",
+      "auth",
+    ]);
+  });
 });
 
 // ── QA 7: aggregation ────────────────────────────────────────────────────────
@@ -368,7 +403,7 @@ describe("aggregation (warn + fail → exit 1)", () => {
     const levels = report.groups.flatMap((g) => g.checks.map((c) => c.level));
     expect(levels).toContain("fail");
     expect(levels).toContain("warn");
-    expect(report.groups.length).toBe(3);
+    expect(report.groups.length).toBe(4);
   });
 });
 
@@ -412,10 +447,15 @@ describe("JSON output parity", () => {
     expect(!reportHasFailures(report)).toBe(true);
   });
 
-  it("groups order matches: team.yaml → adapter binaries → auth", async () => {
+  it("groups order matches: team.yaml → model warnings → adapter binaries → auth", async () => {
     const deps = makeDeps({ which: (bin) => `/usr/bin/${bin}` });
     const report = await runDoctor("/team.yaml", deps);
-    expect(report.groups.map((g) => g.title)).toEqual(["team.yaml", "adapter binaries", "auth"]);
+    expect(report.groups.map((g) => g.title)).toEqual([
+      "team.yaml",
+      "model warnings",
+      "adapter binaries",
+      "auth",
+    ]);
   });
 });
 

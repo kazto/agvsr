@@ -29,6 +29,12 @@ export type TurnEvent =
   | { kind: "tool_use"; name: string; input: unknown }
   | { kind: "result"; ok: boolean; text?: string };
 
+/** Warning-only model validation emitted by adapter heuristics. */
+export interface ModelValidationWarning {
+  message: string;
+  hint?: string;
+}
+
 export interface TurnOutcome {
   /** The (possibly newly created) session id to resume next turn. */
   sessionId: string | null;
@@ -67,6 +73,8 @@ export interface TurnParser {
 /** Per-CLI driver: the only place adapter-specific knowledge lives. */
 export interface CliDriver {
   readonly adapter: Adapter;
+  /** Warning-only, heuristic model validation. Missing means no warnings. */
+  validateModel?(model: string): ModelValidationWarning[];
   /** Build the spawn for a turn. `sessionId === null` starts a new conversation. */
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec;
   /** Fresh parser for one turn's stdout. */

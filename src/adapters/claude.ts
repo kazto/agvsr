@@ -27,6 +27,24 @@ interface ClaudeEvent {
   result?: string;
 }
 
+const CLAUDE_SHORTHAND_MODEL = /^(opus|sonnet|haiku)-\d+(?:\.\d+)?$/i;
+
+function validateModel(model: string): { message: string; hint: string }[] {
+  const match = CLAUDE_SHORTHAND_MODEL.exec(model);
+  if (!match) return [];
+
+  const family = match[1]!.toLowerCase();
+  const version = model.slice(match[1]!.length + 1).replaceAll(".", "-");
+  const canonical = `claude-${family}-${version}`;
+  return [
+    {
+      message:
+        "Claude model IDs usually include the `claude-` prefix and hyphenated version numbers.",
+      hint: `Did you mean "${canonical}"?`,
+    },
+  ];
+}
+
 function createParser(): TurnParser {
   let session: string | null = null;
   let text = "";
@@ -72,6 +90,7 @@ function createParser(): TurnParser {
 
 export const claudeDriver: CliDriver = {
   adapter: "claude-code",
+  validateModel,
 
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
     const args = [
