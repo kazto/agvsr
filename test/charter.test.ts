@@ -113,4 +113,16 @@ describe("composeCharter (bundled charters)", () => {
     expect(normalized).toContain("approval_required");
     expect(normalized).toContain("If they ask for changes, route back to");
   });
+
+  it("tells qa that mocking the core is not validation", () => {
+    const prompt = composeCharter(team, "qa", {
+      jobId: "JOB-7",
+      cwd: "/work/repo",
+      branch: "agvsr/deadbeef",
+    });
+    const normalized = prompt.replace(/\s+/g, " ");
+    expect(normalized).toContain("Mocking the core is not validation");
+    expect(normalized).toContain("real smoke");
+    expect(normalized).toContain("State what is not covered");
+  });
 });
