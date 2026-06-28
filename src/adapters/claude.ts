@@ -95,7 +95,8 @@ export const claudeDriver: CliDriver = {
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
     const args = [
       "-p",
-      "--dangerously-skip-permissions",
+      "--permission-mode",
+      "auto",
       "--output-format",
       "stream-json",
       "--verbose",

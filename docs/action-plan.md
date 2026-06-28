@@ -100,6 +100,14 @@ daemon + 薄い CLI）の使いやすさを上げるための施策案。実装�
   (b) supervisor の「最後の merge は人間に」という方針が実体を持ち、
   (c) 役割間の workspace 競合（supervisor charter の Boundaries）も構造的に解消できる。
 
+### worker sandbox gate ✅ 実装済み
+
+- `src/adapters/codex.ts` は native `codex` の `workspace-write` sandbox を使い、`-C <spec.cwd>` と
+  workspace-write 用の設定を渡す。
+- `src/adapters/claude.ts` は `--dangerously-skip-permissions` をやめ、`--permission-mode auto` で
+  headless に動かす。
+- `test/adapters.test.ts` は `buildSpawn(...)` の実 argv/config を直接検査する。
+
 ## 優先順位
 
 | 優先     | 案                               | 効果 / コスト                               |

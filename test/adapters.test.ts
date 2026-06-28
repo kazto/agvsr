@@ -26,6 +26,11 @@ const spec = (adapter: AgentSpec["adapter"]): AgentSpec => ({
   },
 });
 
+const supervisorSpec = (): AgentSpec => ({
+  ...spec("claude-code"),
+  role: "supervisor",
+});
+
 const drain = (parser: { push(l: string): TurnEvent[] }, lines: string[]): TurnEvent[] =>
   lines.flatMap((l) => parser.push(l));
 
@@ -33,8 +38,11 @@ describe("claude driver", () => {
   it("builds a new-turn spawn (no --resume)", () => {
     const s = claudeDriver.buildSpawn(spec("claude-code"), null, "do it");
     expect(s.bin).toBe("claude");
+    expect(s.bin).not.toMatch(/docker|chroot|wrapper/i);
     expect(s.args).toContain("--append-system-prompt");
     expect(s.args).toContain("SYSTEM-PROMPT");
+    expect(s.args).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    expect(s.args).not.toContain("--dangerously-skip-permissions");
     expect(s.args).toEqual(
       expect.arrayContaining(["--output-format", "stream-json", "--model", "the-model"]),
     );
@@ -50,7 +58,22 @@ describe("claude driver", () => {
 
   it("resumes by session id", () => {
     const s = claudeDriver.buildSpawn(spec("claude-code"), "SESS", "again");
+    expect(s.bin).toBe("claude");
+    expect(s.bin).not.toMatch(/docker|chroot|wrapper/i);
     expect(s.args).toEqual(expect.arrayContaining(["--resume", "SESS"]));
+    expect(s.args).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    expect(s.args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("keeps the supervisor destructive deny list in place", () => {
+    const s = claudeDriver.buildSpawn(supervisorSpec(), null, "protect");
+    expect(s.bin).toBe("claude");
+    expect(s.args).toEqual(
+      expect.arrayContaining([
+        "--disallowed-tools",
+        "Write,Edit,NotebookEdit,Bash,CronCreate,CronDelete,PushNotification,RemoteTrigger",
+      ]),
+    );
   });
 
   it("parses init/assistant/result into events", () => {
@@ -93,7 +116,10 @@ describe("claude driver", () => {
 describe("codex driver", () => {
   it("prepends the charter on a new turn, resumes by thread id", () => {
     const fresh = codexDriver.buildSpawn(spec("codex"), null, "do it");
+    expect(fresh.bin).toBe("codex");
+    expect(fresh.bin).not.toMatch(/docker|chroot|wrapper/i);
     expect(fresh.args.slice(0, 2)).toEqual(["exec", "--json"]);
+    expect(fresh.args).toEqual(expect.arrayContaining(["-C", "/work/repo"]));
     expect(fresh.args).toEqual(
       expect.arrayContaining(codexMcpConfigArgs({ cwd: "/work/repo", env: spec("codex").env })),
     );
@@ -105,14 +131,23 @@ describe("codex driver", () => {
         "-c",
         'approval_policy="never"',
         "-c",
-        'sandbox_mode="danger-full-access"',
+        'sandbox_mode="workspace-write"',
+        "-c",
+        "sandbox_workspace_write.writable_roots=[]",
+        "-c",
+        "sandbox_workspace_write.network_access=false",
       ]),
     );
+    expect(fresh.args).not.toContain('sandbox_mode="danger-full-access"');
+    expect(fresh.args).not.toContain('sandbox_permissions=["workspace-write"]');
     expect(fresh.args.at(-1)).toContain("SYSTEM-PROMPT");
     expect(fresh.args.at(-1)).toContain("do it");
 
     const resumed = codexDriver.buildSpawn(spec("codex"), "T1", "more");
+    expect(resumed.bin).toBe("codex");
+    expect(resumed.bin).not.toMatch(/docker|chroot|wrapper/i);
     expect(resumed.args.slice(0, 3)).toEqual(["exec", "resume", "T1"]);
+    expect(resumed.args).toEqual(expect.arrayContaining(["-C", "/work/repo"]));
     expect(resumed.args).toEqual(
       expect.arrayContaining(codexMcpConfigArgs({ cwd: "/work/repo", env: spec("codex").env })),
     );
@@ -121,9 +156,15 @@ describe("codex driver", () => {
         "-c",
         'approval_policy="never"',
         "-c",
-        'sandbox_mode="danger-full-access"',
+        'sandbox_mode="workspace-write"',
+        "-c",
+        "sandbox_workspace_write.writable_roots=[]",
+        "-c",
+        "sandbox_workspace_write.network_access=false",
       ]),
     );
+    expect(resumed.args).not.toContain('sandbox_mode="danger-full-access"');
+    expect(resumed.args).not.toContain('sandbox_permissions=["workspace-write"]');
     expect(resumed.args).not.toContain("--sandbox"); // resume rejects it (S2)
   });
 
