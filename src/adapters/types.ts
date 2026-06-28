@@ -34,6 +34,8 @@ export interface TurnOutcome {
   sessionId: string | null;
   /** The agent's final assistant text for this turn. */
   finalText: string;
+  /** Bounded stderr tail kept for diagnostics/classification. */
+  stderrTail?: string;
   exitCode: number;
   /** True when the deterministic runtime watchdog killed the turn (D14). */
   timedOut?: boolean;

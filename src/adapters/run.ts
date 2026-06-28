@@ -6,6 +6,33 @@
  */
 import type { AgentSpec, CliDriver, TurnEvent, TurnResult } from "./types.ts";
 
+const STDERR_TAIL_CAP = 8192;
+
+function appendTailChunk(chunks: Uint8Array[], chunk: Uint8Array, cap: number): number {
+  if (chunk.length >= cap) {
+    chunks.length = 0;
+    chunks.push(chunk.slice(chunk.length - cap));
+    return cap;
+  }
+
+  chunks.push(chunk);
+  let bytes = chunks.reduce((sum, part) => sum + part.length, 0);
+  while (bytes > cap) {
+    const first = chunks[0];
+    if (!first) break;
+    const overflow = bytes - cap;
+    if (first.length <= overflow) {
+      chunks.shift();
+      bytes -= first.length;
+    } else {
+      chunks[0] = first.slice(first.length - overflow);
+      bytes -= overflow;
+    }
+  }
+
+  return bytes;
+}
+
 export interface RunTurnOptions {
   /** Absolute upper bound. Kill regardless of progress (safety cap). */
   hardTimeoutMs?: number;
@@ -98,11 +125,15 @@ export async function runTurn(
     if (trimmed) events.push(...parser.push(trimmed));
   };
 
+  const stderrChunks: Uint8Array[] = [];
+  let stderrBytes = 0;
+
   // Drain stderr concurrently to avoid the process blocking on a full stderr pipe.
   const stderrDrain = (async () => {
-    for await (const _ of proc.stderr as AsyncIterable<Uint8Array>) {
+    for await (const chunk of proc.stderr as AsyncIterable<Uint8Array>) {
       options.onProgress?.();
       resetIdle();
+      stderrBytes = appendTailChunk(stderrChunks, chunk, STDERR_TAIL_CAP);
     }
   })();
 
@@ -144,6 +175,17 @@ export async function runTurn(
     });
   }
 
+  let stderrTail: string | undefined;
+  if (stderrBytes > 0) {
+    const stderrTailBytes = new Uint8Array(stderrBytes);
+    let offset = 0;
+    for (const chunk of stderrChunks) {
+      stderrTailBytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    stderrTail = decoder.decode(stderrTailBytes);
+  }
+
   const sessionId2 =
     parser.sessionId() ??
     (driver.resolveSessionId && before ? driver.resolveSessionId(spec, before) : null);
@@ -153,6 +195,7 @@ export async function runTurn(
     outcome: {
       sessionId: sessionId2,
       finalText: parser.finalText(),
+      ...(stderrTail ? { stderrTail } : {}),
       exitCode,
       timedOut,
       ...(timeoutKind ? { timeoutKind } : {}),
