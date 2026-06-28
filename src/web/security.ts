@@ -19,10 +19,10 @@ export function loopbackHosts(): Set<string> {
   return new Set(LOOPBACK_HOSTS);
 }
 
-export function allowedOrigin(origin: string, hosts: Set<string>): boolean {
+export function allowedOrigin(origin: string, origins: Set<string>): boolean {
   try {
     const url = new URL(origin);
-    return hosts.has(normalizeHost(url.hostname));
+    return origins.has(url.origin);
   } catch {
     return false;
   }

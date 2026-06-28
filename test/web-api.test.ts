@@ -27,23 +27,35 @@ function socketPath(endpoint: string): string {
   return new URL(endpoint).pathname;
 }
 
-async function unixFetch(
+async function gatewayFetch(
   endpoint: string,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("host", "localhost");
-  return fetch(`http://localhost${path}`, {
+  const url = new URL(endpoint);
+  if (url.protocol === "unix:") {
+    return fetch(`http://localhost${path}`, {
+      ...init,
+      unix: socketPath(endpoint),
+      headers,
+    } as RequestInit & { unix: string });
+  }
+  return fetch(new URL(path, endpoint), {
     ...init,
-    unix: socketPath(endpoint),
     headers,
-  } as RequestInit & { unix: string });
+  });
 }
 
 function responseSetCookies(headers: Headers): string[] {
   const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
   return getSetCookie ? getSetCookie.call(headers) : [headers.get("set-cookie") ?? ""];
+}
+
+function browserOrigin(endpoint: string): string {
+  const url = new URL(endpoint);
+  return url.protocol === "unix:" ? "http://localhost" : url.origin;
 }
 
 function fakeClaudeScript(): string {
@@ -147,11 +159,12 @@ roles:
     try {
       daemon = await startDaemon({ endpoint: sock, storeFile: db, team });
       web = await startWebGateway({ daemonEndpoint: sock, storeFile: db });
+      const origin = browserOrigin(web.endpoint);
 
-      const login = await unixFetch(web.endpoint, "/api/session/login", {
+      const login = await gatewayFetch(web.endpoint, "/api/session/login", {
         method: "POST",
         headers: {
-          origin: "http://localhost",
+          origin,
           "x-csrf-token": web.startupToken,
           "content-type": "application/json",
         },
@@ -174,7 +187,7 @@ roles:
 
         await Bun.sleep(100);
 
-        const list = await unixFetch(web.endpoint, "/api/jobs", {
+        const list = await gatewayFetch(web.endpoint, "/api/jobs", {
           headers: {
             cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${loginBody.csrfToken}`,
           },
@@ -204,7 +217,7 @@ roles:
         expect(before.ok).toBe(true);
         const beforeReadAt = before.ok ? before.result.messages.map((m) => m.read_at) : [];
 
-        const detail = await unixFetch(web.endpoint, `/api/jobs/${jobId}`, {
+        const detail = await gatewayFetch(web.endpoint, `/api/jobs/${jobId}`, {
           headers: {
             cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${loginBody.csrfToken}`,
           },
@@ -222,7 +235,7 @@ roles:
           ["in_flight", "idle", "possibly_stalled", "terminal"].includes(detailBody.display_state),
         ).toBe(true);
 
-        const detailAgain = await unixFetch(web.endpoint, `/api/jobs/${jobId}`, {
+        const detailAgain = await gatewayFetch(web.endpoint, `/api/jobs/${jobId}`, {
           headers: {
             cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${loginBody.csrfToken}`,
           },

@@ -25,23 +25,35 @@ function socketPath(endpoint: string): string {
   return new URL(endpoint).pathname;
 }
 
-async function unixFetch(
+async function gatewayFetch(
   endpoint: string,
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("host", "localhost");
-  return fetch(`http://localhost${path}`, {
+  const url = new URL(endpoint);
+  if (url.protocol === "unix:") {
+    return fetch(`http://localhost${path}`, {
+      ...init,
+      unix: socketPath(endpoint),
+      headers,
+    } as RequestInit & { unix: string });
+  }
+  return fetch(new URL(path, endpoint), {
     ...init,
-    unix: socketPath(endpoint),
     headers,
-  } as RequestInit & { unix: string });
+  });
 }
 
 function responseSetCookies(headers: Headers): string[] {
   const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
   return getSetCookie ? getSetCookie.call(headers) : [headers.get("set-cookie") ?? ""];
+}
+
+function browserOrigin(endpoint: string): string {
+  const url = new URL(endpoint);
+  return url.protocol === "unix:" ? "http://localhost" : url.origin;
 }
 
 describe("web auth", () => {
@@ -70,10 +82,12 @@ describe("web auth", () => {
       expect(tables.map((row) => row.name)).toEqual(["web_bootstrap_tokens", "web_sessions"]);
       sqlite.close();
 
-      const badLogin = await unixFetch(web.endpoint, "/api/session/login", {
+      const origin = browserOrigin(web.endpoint);
+
+      const badLogin = await gatewayFetch(web.endpoint, "/api/session/login", {
         method: "POST",
         headers: {
-          origin: "http://localhost",
+          origin,
           "x-csrf-token": "wrong",
           "content-type": "application/json",
         },
@@ -81,11 +95,11 @@ describe("web auth", () => {
       });
       expect(badLogin.status).toBe(403);
 
-      const badOrigin = await unixFetch(web.endpoint, "/api/session/login", {
+      const badOrigin = await gatewayFetch(web.endpoint, "/api/session/login", {
         method: "POST",
         headers: {
           host: "localhost",
-          origin: "http://evil.example",
+          origin: "http://localhost:9999",
           "x-csrf-token": web.startupToken,
           "content-type": "application/json",
         },
@@ -93,10 +107,10 @@ describe("web auth", () => {
       });
       expect(badOrigin.status).toBe(403);
 
-      const login = await unixFetch(web.endpoint, "/api/session/login", {
+      const login = await gatewayFetch(web.endpoint, "/api/session/login", {
         method: "POST",
         headers: {
-          origin: "http://localhost",
+          origin,
           "x-csrf-token": web.startupToken,
           "content-type": "application/json",
         },
@@ -120,7 +134,7 @@ describe("web auth", () => {
         setCookie.match(/__Host-agvsr_csrf=([^;,\s]+)/)?.[1] ?? loginBody.csrfToken;
       expect(sessionCookie).toBeTruthy();
 
-      const session = await unixFetch(web.endpoint, "/api/session", {
+      const session = await gatewayFetch(web.endpoint, "/api/session", {
         headers: {
           cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${csrfCookie}`,
         },
@@ -132,10 +146,10 @@ describe("web auth", () => {
       expect(sessionBody.authenticated).toBe(true);
       expect(sessionBody.csrfToken).toBe(csrfCookie);
 
-      const logout = await unixFetch(web.endpoint, "/api/session/logout", {
+      const logout = await gatewayFetch(web.endpoint, "/api/session/logout", {
         method: "POST",
         headers: {
-          origin: "http://localhost",
+          origin,
           cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${csrfCookie}`,
           "x-csrf-token": csrfCookie,
           "content-type": "application/json",
@@ -144,7 +158,7 @@ describe("web auth", () => {
       });
       expect(logout.status).toBe(200);
 
-      const afterLogout = await unixFetch(web.endpoint, "/api/session", {
+      const afterLogout = await gatewayFetch(web.endpoint, "/api/session", {
         headers: {
           cookie: `__Host-agvsr_session=${sessionCookie}; __Host-agvsr_csrf=${csrfCookie}`,
         },

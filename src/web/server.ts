@@ -39,6 +39,19 @@ function parsePort(raw?: string | number): number | undefined {
   return n;
 }
 
+function loopbackOrigins(port?: number): Set<string> {
+  if (port === undefined) {
+    return new Set(["http://localhost", "http://127.0.0.1", "http://[::1]"]);
+  }
+  const p = String(port);
+  return new Set([`http://localhost:${p}`, `http://127.0.0.1:${p}`, `http://[::1]:${p}`]);
+}
+
+function originsForUrl(url: URL): Set<string> {
+  if (url.protocol === "unix:") return loopbackOrigins();
+  return loopbackOrigins(Number(url.port));
+}
+
 async function loadClientSource(path: string): Promise<string> {
   const transpiler = new Bun.Transpiler({ loader: "ts", target: "browser" });
   return transpiler.transformSync(await Bun.file(path).text());
@@ -64,7 +77,7 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
     startupToken,
     startupTokenHash,
     hostAllowlist: loopbackHosts(),
-    originAllowlist: loopbackHosts(),
+    originAllowlist: new Set(),
     assets: {
       appJs: clientSource,
       appCss: cssSource,
@@ -105,6 +118,7 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
       });
       endpoint = server.url.toString();
     }
+    ctx.originAllowlist = originsForUrl(server.url);
   } catch (err) {
     await daemon.close();
     authStore.close();

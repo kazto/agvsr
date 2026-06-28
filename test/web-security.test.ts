@@ -10,9 +10,15 @@ describe("web security helpers", () => {
     expect(allowedHost("127.0.0.1:8080", hosts)).toBe(true);
     expect(allowedHost("evil.example:3000", hosts)).toBe(false);
 
-    expect(allowedOrigin("http://localhost:3000", hosts)).toBe(true);
-    expect(allowedOrigin("http://127.0.0.1:8080", hosts)).toBe(true);
-    expect(allowedOrigin("http://evil.example", hosts)).toBe(false);
+    const origins = new Set([
+      "http://localhost:3000",
+      "http://127.0.0.1:8080",
+      "http://[::1]:8080",
+    ]);
+    expect(allowedOrigin("http://localhost:3000", origins)).toBe(true);
+    expect(allowedOrigin("http://127.0.0.1:8080", origins)).toBe(true);
+    expect(allowedOrigin("http://localhost:9999", origins)).toBe(false);
+    expect(allowedOrigin("http://evil.example", origins)).toBe(false);
   });
 
   it("emits hardening headers", () => {
