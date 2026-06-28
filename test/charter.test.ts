@@ -88,4 +88,17 @@ describe("composeCharter (bundled charters)", () => {
     expect(prompt).toContain("agvsr_complete");
     expect(prompt).toContain("Role: supervisor");
   });
+
+  it("requires the supervisor to state non-goals when delegating", () => {
+    const prompt = composeCharter(team, "supervisor", {
+      jobId: "JOB-7",
+      cwd: "/work/repo",
+      branch: "agvsr/deadbeef",
+    });
+    const normalized = prompt.replace(/\s+/g, " ");
+    expect(normalized).toContain("including its non-goals");
+    expect(normalized).toContain("out of scope");
+    expect(normalized).toContain("without human approval");
+    expect(normalized).toContain("smallest mechanism");
+  });
 });

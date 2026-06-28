@@ -82,6 +82,13 @@ ownership of it. Make the changes your role calls for, keep them focused, and re
 you touched (via `refs`). Do not assume another role's files are yours to rewrite;
 coordinate through the supervisor.
 
+**Never run destructive commands on the working tree.** Do not run `rm` / `rm -rf`,
+`git clean -f`, `git reset --hard`, `git checkout -- <path>`, or anything that deletes,
+discards, or reverts files you did not create — especially files outside the change your
+task called for, and never in a checkout other than this workspace. These actions are
+irreversible and have destroyed unrelated human work. If a clean state seems necessary,
+escalate (§5); do not clean it yourself.
+
 ## 7. When a job is done
 
 A job ends **only** when the supervisor accepts the result and declares completion. Until

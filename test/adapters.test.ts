@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { claudeDriver } from "../src/adapters/claude.ts";
 import { codexDriver } from "../src/adapters/codex.ts";
 import { agyDriver } from "../src/adapters/agy.ts";
+import { ADAPTER_BIN, driverFor } from "../src/adapters/index.ts";
 import { agyMcpConfig, codexMcpConfigArgs } from "../src/adapters/mcp.ts";
+import type { Adapter } from "../src/config/team.ts";
 import { validateTeamModels } from "../src/adapters/validate.ts";
 import { parseTeam } from "../src/config/team.ts";
 import type { AgentSpec, CliDriver, TurnEvent } from "../src/adapters/types.ts";
@@ -238,5 +240,48 @@ roles:
   it("keeps adapters without validateModel as no-op", () => {
     expect(codexDriver.validateModel).toBeUndefined();
     expect(agyDriver.validateModel).toBeUndefined();
+  });
+});
+
+// Tripwire: agents must be spawned directly as their own CLI, never wrapped in
+// another binary (docker, chroot, sandbox shims, etc.). If a future change wraps
+// the spawn in a different process, the spawn `bin` changes and this test fails,
+// surfacing the unexpected mechanism instead of letting it land silently.
+describe("spawn binary tripwire", () => {
+  const ADAPTERS: Adapter[] = ["claude-code", "codex", "agy"];
+
+  for (const adapter of ADAPTERS) {
+    const allowed = ADAPTER_BIN[adapter];
+
+    it(`${adapter} spawns its own CLI (${allowed}) on a fresh turn`, () => {
+      const s = driverFor(adapter).buildSpawn(spec(adapter), null, "do it");
+      expect(s.bin).toBe(allowed);
+    });
+
+    it(`${adapter} spawns its own CLI (${allowed}) on resume`, () => {
+      const s = driverFor(adapter).buildSpawn(spec(adapter), "session-1", "do it");
+      expect(s.bin).toBe(allowed);
+    });
+  }
+
+  it("never spawns a wrapper binary (docker/chroot/sh/env)", () => {
+    const forbidden = new Set([
+      "docker",
+      "podman",
+      "chroot",
+      "sh",
+      "bash",
+      "env",
+      "sudo",
+      "nsenter",
+    ]);
+    const allowed = new Set(Object.values(ADAPTER_BIN));
+    for (const adapter of ADAPTERS) {
+      for (const sessionId of [null, "session-1"]) {
+        const s = driverFor(adapter).buildSpawn(spec(adapter), sessionId, "do it");
+        expect(forbidden.has(s.bin)).toBe(false);
+        expect(allowed.has(s.bin)).toBe(true);
+      }
+    }
   });
 });
