@@ -36,6 +36,27 @@ function fakeDriver(opts: { sessionId: string | null; resolve?: string }): CliDr
   };
 }
 
+function stderrDriver(opts: {
+  sessionId: string | null;
+  stderr: string;
+  stdout: string;
+}): CliDriver {
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({
+      bin: "bun",
+      args: [
+        "-e",
+        [
+          opts.stderr ? `process.stderr.write(${JSON.stringify(opts.stderr)});` : "",
+          opts.stdout ? `process.stdout.write(${JSON.stringify(opts.stdout)});` : "",
+        ].join("\n"),
+      ],
+    }),
+    createParser: () => textParser(opts.sessionId),
+  };
+}
+
 /** Driver that emits N lines, each after delayMs, then exits. */
 function timedLinesDriver(delayMs: number, lines: number): CliDriver {
   const script = `
@@ -113,6 +134,33 @@ describe("runTurn", () => {
       "go",
     );
     expect(outcome.sessionId).toBe("RESOLVED");
+  });
+
+  it("omits stderrTail when stderr is empty", async () => {
+    const { outcome } = await runTurn(
+      stderrDriver({ sessionId: null, stderr: "", stdout: "alpha\n" }),
+      spec,
+      null,
+      "go",
+    );
+    expect(outcome.stderrTail).toBeUndefined();
+  });
+
+  it("retains only the bounded stderr tail", async () => {
+    const { outcome } = await runTurn(
+      stderrDriver({
+        sessionId: null,
+        stderr: `HEAD_START|${"a".repeat(9000)}|TAIL_MARKER`,
+        stdout: "alpha\n",
+      }),
+      spec,
+      null,
+      "go",
+    );
+    expect(outcome.stderrTail).toBeDefined();
+    expect(outcome.stderrTail!.length).toBeLessThanOrEqual(8192);
+    expect(outcome.stderrTail!).toContain("TAIL_MARKER");
+    expect(outcome.stderrTail!).not.toContain("HEAD_START");
   });
 
   it("kills a turn that exceeds the hard timeout (legacy timeoutMs)", async () => {

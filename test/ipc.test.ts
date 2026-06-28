@@ -254,6 +254,252 @@ describe("CLI <-> daemon over local IPC", () => {
     }
   });
 
+  it("immediately escalates a worker model/config error from stderrTail without retrying", async () => {
+    const base = join(tmpdir(), `agvsr-model-stderr-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const saved = process.env.AGVSR_MAX_WORKER_FAILURES;
+    process.env.AGVSR_MAX_WORKER_FAILURES = "1";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "model problem" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "model problem",
+              stderrTail: "issue with the selected model: gpt-5-codex",
+              exitCode: 1,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "stderrTail config error",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      const sent = await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "run the job",
+      });
+      expect(sent.ok).toBe(true);
+      for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+        await Bun.sleep(5);
+      }
+
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      expect(got.ok && got.result.job.status).toBe("running");
+      expect(seen.filter((d) => d.role === "implementation").length).toBe(1);
+      expect(seen.filter((d) => d.role === "supervisor").length).toBe(2);
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const escalation = logs.result.messages.find(
+        (m) => m.kind === "escalation" && m.from_role === "daemon" && m.to_role === "supervisor",
+      );
+      expect(escalation).toBeTruthy();
+      expect(escalation!.body).toContain("設定エラーの可能性");
+      expect(escalation!.body).toContain("implementation.model=gpt-5-codex");
+      expect(escalation!.body).toContain("role=implementation");
+      expect(escalation!.body).toContain("adapter=codex");
+      expect(escalation!.body).toContain("issue with the selected model");
+
+      c.close();
+    } finally {
+      if (saved === undefined) delete process.env.AGVSR_MAX_WORKER_FAILURES;
+      else process.env.AGVSR_MAX_WORKER_FAILURES = saved;
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
+  it("immediately escalates a worker model/config error from finalText without retrying", async () => {
+    const base = join(tmpdir(), `agvsr-model-final-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const saved = process.env.AGVSR_MAX_WORKER_FAILURES;
+    process.env.AGVSR_MAX_WORKER_FAILURES = "1";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "unknown model: gpt-5-codex" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "unknown model: gpt-5-codex",
+              exitCode: 1,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "finalText config error",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "run the job",
+      });
+      for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+        await Bun.sleep(5);
+      }
+
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      expect(got.ok && got.result.job.status).toBe("running");
+      expect(seen.filter((d) => d.role === "implementation").length).toBe(1);
+      expect(seen.filter((d) => d.role === "supervisor").length).toBe(2);
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const escalation = logs.result.messages.find(
+        (m) => m.kind === "escalation" && m.from_role === "daemon" && m.to_role === "supervisor",
+      );
+      expect(escalation).toBeTruthy();
+      expect(escalation!.body).toContain("設定エラーの可能性");
+      expect(escalation!.body).toContain("unknown model");
+
+      c.close();
+    } finally {
+      if (saved === undefined) delete process.env.AGVSR_MAX_WORKER_FAILURES;
+      else process.env.AGVSR_MAX_WORKER_FAILURES = saved;
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
+  it("keeps generic worker failures on the normal failure-count path at threshold 1", async () => {
+    const base = join(tmpdir(), `agvsr-generic-fail-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const saved = process.env.AGVSR_MAX_WORKER_FAILURES;
+    process.env.AGVSR_MAX_WORKER_FAILURES = "1";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "temporary network failure" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "temporary network failure",
+              exitCode: 1,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "generic failure",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "run the job",
+      });
+      for (let i = 0; i < 100; i++) {
+        const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+        if (got.ok && got.result.job.status === "failed") break;
+        await Bun.sleep(5);
+      }
+
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      expect(got.ok && got.result.job.status).toBe("failed");
+      expect(seen.filter((d) => d.role === "implementation").length).toBe(1);
+      expect(seen.filter((d) => d.role === "supervisor").length).toBe(1);
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      expect(
+        logs.result.messages.some(
+          (m) => m.kind === "failure" && m.to_role === "user" && m.body.includes("threshold 1"),
+        ),
+      ).toBe(true);
+
+      c.close();
+    } finally {
+      if (saved === undefined) delete process.env.AGVSR_MAX_WORKER_FAILURES;
+      else process.env.AGVSR_MAX_WORKER_FAILURES = saved;
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
   it("interrupts stale running jobs on daemon start", async () => {
     const base = join(tmpdir(), `agvsr-interrupt-test-${randomUUID()}`);
     const sockLocal = `${base}.sock`;

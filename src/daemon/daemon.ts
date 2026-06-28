@@ -28,6 +28,7 @@ import type {
   Response,
   RoleSummary,
 } from "../protocol.ts";
+import type { Adapter } from "../config/team.ts";
 
 function resolveTeam(file?: string): TeamConfig | null {
   const candidate = file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
@@ -128,6 +129,59 @@ function maxWorkerFailures(): number {
   if (!raw) return DEFAULT_MAX_WORKER_FAILURES;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_WORKER_FAILURES;
+}
+
+const CONFIG_ERROR_PATTERNS: Record<Adapter, RegExp[]> = {
+  "claude-code": [
+    /issue with the selected model/i,
+    /model .* not found/i,
+    /unknown model/i,
+    /invalid model/i,
+    /unsupported model/i,
+    /not a valid model/i,
+    /model is not supported/i,
+  ],
+  codex: [
+    /issue with the selected model/i,
+    /model .* not found/i,
+    /unknown model/i,
+    /invalid model/i,
+    /unsupported model/i,
+    /not a valid model/i,
+    /model is not supported/i,
+  ],
+  agy: [
+    /issue with the selected model/i,
+    /model .* not found/i,
+    /unknown model/i,
+    /invalid model/i,
+    /unsupported model/i,
+    /not a valid model/i,
+    /model is not supported/i,
+  ],
+};
+
+function tailText(text: string, maxBytes: number): string {
+  if (!text) return "";
+  return text.length <= maxBytes ? text : text.slice(text.length - maxBytes);
+}
+
+function isConfigError(adapter: Adapter, text: string): boolean {
+  return CONFIG_ERROR_PATTERNS[adapter].some((pattern) => pattern.test(text));
+}
+
+function configErrorEscalation(
+  role: string,
+  adapter: Adapter,
+  model: string,
+  diagnostics: string,
+): string {
+  const bounded = tailText(diagnostics, 2048);
+  return [
+    `設定エラーの可能性: team.yaml の ${role}.model=${model} を確認`,
+    `role=${role} adapter=${adapter} model=${model}`,
+    bounded ? `diagnostics:\n${bounded}` : "diagnostics: (empty)",
+  ].join("\n\n");
 }
 
 const DEFAULT_NO_PROGRESS_TURNS = 3;
@@ -544,6 +598,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         });
         hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
       } else {
+        const diagnostics = [result.outcome.stderrTail, finalText].filter(Boolean).join("\n");
+        if (diagnostics && isConfigError(roleConfig.adapter, diagnostics)) {
+          const body = configErrorEscalation(
+            role,
+            roleConfig.adapter,
+            roleConfig.model,
+            diagnostics,
+          );
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: SUPERVISOR,
+            kind: "escalation",
+            body,
+          });
+          enqueueDispatch(job, SUPERVISOR, body);
+          return;
+        }
         const failures = incrementFailure(job.id, role);
         const threshold = maxWorkerFailures();
         if (failures >= threshold) {
