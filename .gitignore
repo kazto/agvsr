@@ -5,6 +5,7 @@ dist/
 .DS_Store
 
 # local runtime / data
+team.yaml
 *.sqlite
 *.sqlite-*
 *.db
