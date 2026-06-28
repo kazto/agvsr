@@ -221,6 +221,46 @@ function stallTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_STALL_TIMEOUT_MS;
 }
 
+// Design-approval gate (D-gate): once a design has been handed to the supervisor, block the
+// supervisor → implementation handoff until the human approves. Structural backstop for the
+// charter rule; applies to all jobs. Disable with AGVSR_DESIGN_GATE in {0,off,false,no}.
+const APPROVAL_RE = /\b(approve|approved|approval granted|go ahead|proceed|ship it|lgtm)\b/i;
+const REJECTION_RE = /\b(not approved|do not proceed|don'?t proceed|hold|stop|reject|rejected)\b/i;
+
+function designGateEnabled(): boolean {
+  const raw = process.env.AGVSR_DESIGN_GATE;
+  return !raw || !/^(0|off|false|no)$/i.test(raw.trim());
+}
+
+function isImplementationRole(role: string): boolean {
+  return role === "implementation" || role.startsWith("implementation");
+}
+
+/** Latest design → supervisor handoff for the job, or null if design was skipped. */
+function lastDesignHandoff(messages: Message[]): Message | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.from_role === "design" && m.to_role === SUPERVISOR) return m;
+  }
+  return null;
+}
+
+/**
+ * Decide approval from the most recent human (user → supervisor) reply after the design
+ * handoff: approved iff it reads as approval and not as rejection. A later "stop"/"reject"
+ * overrides an earlier "approved"; no reply at all means not yet approved.
+ */
+function approvedAfter(messages: Message[], sinceCreatedAt: string): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.created_at <= sinceCreatedAt) break;
+    if (m.from_role === "user" && m.to_role === SUPERVISOR) {
+      return APPROVAL_RE.test(m.body) && !REJECTION_RE.test(m.body);
+    }
+  }
+  return false;
+}
+
 function toolUseFingerprint(events: TurnEvent[]): string {
   return events
     .filter((e): e is Extract<TurnEvent, { kind: "tool_use" }> => e.kind === "tool_use")
@@ -955,6 +995,33 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const routingTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!isAllowed(routingTeam, from, to))
           return err(req.id, "forbidden", `${from} may not send to ${to}`);
+        // Design-approval gate: hold supervisor → implementation until the human approves
+        // the design. Only engages once a design handoff exists (jobs that skip design are
+        // unaffected). The blocked handoff is not recorded or dispatched.
+        if (designGateEnabled() && from === SUPERVISOR && isImplementationRole(to)) {
+          const history = store.listMessages(job_id);
+          const design = lastDesignHandoff(history);
+          if (design && !approvedAfter(history, design.created_at)) {
+            const note = createMsg({
+              job_id,
+              from_role: "daemon",
+              to_role: "user",
+              kind: "escalation",
+              body:
+                `Design approval required before implementation.\n` +
+                `The supervisor is trying to hand work to "${to}", but the current design ` +
+                `has not been approved by you. Review it, then reply to approve:\n` +
+                `  agvsr tell ${job_id} "approved"\n` +
+                `or reply with the changes you want instead.`,
+            });
+            hook("on_supervisor_message", { event: "supervisor_message", job_id, body: note.body });
+            return err(
+              req.id,
+              "approval_required",
+              "human design approval required before implementation",
+            );
+          }
+        }
         const msg = createMsg({
           job_id,
           from_role: from,
@@ -981,14 +1048,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           return err(req.id, "bad_request", "escalation reason must not be empty");
         const escalationTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!escalationTeam.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
+        // Worker escalations go to the supervisor; a supervisor escalation goes to the human
+        // (routing it back to itself would be a no-op self-loop). This is the approval/blocker
+        // channel the design-approval flow relies on.
+        const escalateTo = from === SUPERVISOR ? "user" : SUPERVISOR;
         const msg = createMsg({
           job_id,
           from_role: from,
-          to_role: SUPERVISOR,
+          to_role: escalateTo,
           kind: "escalation",
           body: reason,
         });
-        enqueueDispatch(job, SUPERVISOR, `Escalation from ${from}:\n\n${reason}`);
+        if (escalateTo === SUPERVISOR) {
+          enqueueDispatch(job, SUPERVISOR, `Escalation from ${from}:\n\n${reason}`);
+        } else {
+          hook("on_supervisor_message", { event: "supervisor_message", job_id, body: reason });
+        }
         return ok(req.id, { queued: true, message: msg });
       }
 

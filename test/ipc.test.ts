@@ -191,6 +191,123 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("gates supervisor->implementation until the human approves the design", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "gate me", cwd: repo });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1); // initial supervisor turn
+
+    // design hands its result to the supervisor -> the gate now engages.
+    await Bun.sleep(2);
+    const design = await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design: introduce a new dependency",
+    });
+    expect(design.ok).toBe(true);
+
+    // supervisor tries to start implementation -> rejected, nothing dispatched/recorded.
+    await Bun.sleep(2);
+    const blocked = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "go implement",
+    });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error.code).toBe("approval_required");
+
+    const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+    const msgs = logs.ok ? logs.result.messages : [];
+    expect(
+      msgs.some(
+        (m) => m.from_role === "daemon" && m.to_role === "user" && /approval/i.test(m.body),
+      ),
+    ).toBe(true);
+    expect(msgs.some((m) => m.body === "go implement")).toBe(false);
+    c.close();
+  });
+
+  it("unblocks implementation after approval and re-gates on a newer design", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "approve me", cwd: repo });
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1);
+
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design v1",
+    });
+
+    // human approves via job.tell.
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "approved, go ahead" });
+
+    // supervisor -> implementation now proceeds and dispatches.
+    await Bun.sleep(2);
+    const beforeImpl = dispatches.length;
+    const go = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "implement v1",
+    });
+    expect(go.ok).toBe(true);
+    await waitForDispatches(beforeImpl + 1);
+    expect(dispatches.at(-1)!.role).toBe("implementation");
+
+    // a newer design handoff resets the requirement -> gated again.
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design v2 (revised)",
+    });
+    await Bun.sleep(2);
+    const reblocked = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "implement v2",
+    });
+    expect(reblocked.ok).toBe(false);
+    if (!reblocked.ok) expect(reblocked.error.code).toBe("approval_required");
+    c.close();
+  });
+
+  it("routes a supervisor escalation to the human, not back to itself", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "sup escalate",
+      cwd: repo,
+    });
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1);
+
+    const res = await c.request<{ queued: true; message: Message }>("msg.escalate", {
+      from: "supervisor",
+      job_id: jobId,
+      reason: "need a human decision on scope",
+    });
+    expect(res.ok).toBe(true);
+    expect(res.ok && res.result.message.to_role).toBe("user");
+    // it reached the human, so no agent turn was dispatched for it.
+    await Bun.sleep(20);
+    expect(dispatches.some((d) => d.message.includes("need a human decision on scope"))).toBe(
+      false,
+    );
+    c.close();
+  });
+
   it("routes non-timeout worker failures to supervisor instead of failing the job", async () => {
     const base = join(tmpdir(), `agvsr-tier1-test-${randomUUID()}`);
     const sockLocal = `${base}.sock`;

@@ -101,4 +101,16 @@ describe("composeCharter (bundled charters)", () => {
     expect(normalized).toContain("without human approval");
     expect(normalized).toContain("smallest mechanism");
   });
+
+  it("requires human design approval before implementation", () => {
+    const prompt = composeCharter(team, "supervisor", {
+      jobId: "JOB-7",
+      cwd: "/work/repo",
+      branch: "agvsr/deadbeef",
+    });
+    const normalized = prompt.replace(/\s+/g, " ");
+    expect(normalized).toContain("design human-approved before implementation");
+    expect(normalized).toContain("approval_required");
+    expect(normalized).toContain("If they ask for changes, route back to");
+  });
 });
