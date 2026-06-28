@@ -39,7 +39,7 @@ Usage:
   agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
-  agvsr doctor [--team F] [--json]  Check adapter CLIs and auth; exit 0 if all pass
+  agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
 `;
 
 function normalizeCwd(input: string): string {
@@ -712,6 +712,7 @@ Usage: agvsr init [options]
         options: {
           team: { type: "string" },
           json: { type: "boolean" },
+          probe: { type: "boolean" },
         },
         allowPositionals: false,
       });
@@ -720,7 +721,7 @@ Usage: agvsr init [options]
         await Promise.all([import("../config/team.ts"), import("../doctor.ts")]);
 
       const teamFile = resolveTeamFile(values.team);
-      const report = await runDoctor(teamFile, defaultDeps());
+      const report = await runDoctor(teamFile, defaultDeps(), { probe: values.probe ?? false });
       const hasFails = reportHasFailures(report);
 
       if (values.json) {

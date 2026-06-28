@@ -1,11 +1,12 @@
 /**
  * agvsr doctor — pre-flight inspection core (D2 permanent-countermeasures §(b)).
- * Daemon-independent and read-only: no IPC, no spawning adapters.
+ * Daemon-independent and read-only by default: no IPC, no spawning adapters unless
+ * the opt-in probe mode is requested.
  * All I/O is injectable for deterministic testing.
  */
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import { parseTeam, type Adapter, type TeamConfig } from "./config/team.ts";
 import { ADAPTER_BIN } from "./adapters/index.ts";
 import { resolveUserPath } from "./paths.ts";
@@ -45,6 +46,28 @@ export interface DoctorDeps {
   homeDir(): string;
   /** Read text content of the team file. Throws on error. */
   readFile(path: string): string;
+  /** Probe a role's adapter/model pair with a minimal prompt. */
+  probeModel(spec: DoctorProbeSpec): Promise<DoctorProbeOutcome>;
+}
+
+export interface DoctorProbeSpec {
+  role: string;
+  adapter: Adapter;
+  model: string;
+  bin: string;
+  cwd: string;
+  path: string;
+  prompt: string;
+}
+
+export interface DoctorProbeOutcome {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface DoctorOptions {
+  probe?: boolean;
 }
 
 function realWhich(bin: string, pathStr: string): string | null {
@@ -69,7 +92,87 @@ export function defaultDeps(): DoctorDeps {
     fileExists: existsSync,
     homeDir: homedir,
     readFile: (path) => readFileSync(path, "utf8"),
+    probeModel: realProbeModel,
   };
+}
+
+const PROBE_PROMPT = "Reply with exactly OK.";
+const PROBE_TIMEOUT_MS = 15_000;
+const PROBE_CAPTURE_LIMIT = 4_096;
+
+function trimForMessage(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 200) return trimmed;
+  return `${trimmed.slice(0, 197)}...`;
+}
+
+function probeArgs(adapter: Adapter, model: string, prompt: string): string[] {
+  if (adapter === "claude-code") {
+    return ["-p", "--model", model, prompt];
+  }
+  if (adapter === "codex") {
+    return ["exec", "--json", "--skip-git-repo-check", "-m", model, prompt];
+  }
+  return ["-p", "--model", model, prompt];
+}
+
+async function readLimited(
+  stream: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<string> {
+  if (!stream) return "";
+  const decoder = new TextDecoder();
+  let out = "";
+  for await (const chunk of stream as AsyncIterable<Uint8Array>) {
+    if (out.length >= limit) continue;
+    const next = decoder.decode(chunk, { stream: true });
+    out += next;
+    if (out.length > limit) {
+      out = out.slice(0, limit);
+    }
+  }
+  if (out.length < limit) {
+    out += decoder.decode();
+    if (out.length > limit) out = out.slice(0, limit);
+  }
+  return out;
+}
+
+async function realProbeModel(spec: DoctorProbeSpec): Promise<DoctorProbeOutcome> {
+  const proc = Bun.spawn([spec.bin, ...probeArgs(spec.adapter, spec.model, spec.prompt)], {
+    cwd: spec.cwd,
+    env: { ...process.env, PATH: spec.path },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timeoutMessage: string | null = null;
+  timer = setTimeout(() => {
+    timeoutMessage = `probe timed out after ${PROBE_TIMEOUT_MS}ms`;
+    try {
+      proc.kill();
+    } catch {}
+  }, PROBE_TIMEOUT_MS);
+
+  const stdout = readLimited(proc.stdout, PROBE_CAPTURE_LIMIT);
+  const stderr = readLimited(proc.stderr, PROBE_CAPTURE_LIMIT);
+
+  try {
+    const exitCode = await proc.exited;
+    const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+    const mergedStderr = timeoutMessage
+      ? [stderrText, timeoutMessage].filter(Boolean).join("\n")
+      : stderrText;
+    return {
+      exitCode,
+      stdout: stdoutText,
+      stderr: mergedStderr,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function checkAuth(adapter: Adapter, deps: DoctorDeps): DoctorCheck {
@@ -118,7 +221,26 @@ function checkAuth(adapter: Adapter, deps: DoctorDeps): DoctorCheck {
   return { label, level: "warn", message: "auth check not implemented for this adapter" };
 }
 
-export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<DoctorReport> {
+function probeLabel(role: string, roleConfig: TeamConfig["roles"][string]): string {
+  return `${role} (${roleConfig.adapter} ${roleConfig.model})`;
+}
+
+function probeFailureMessage(
+  role: string,
+  adapter: Adapter,
+  model: string,
+  bin: string,
+  detail: string,
+): string {
+  const hint = `check team.yaml ${role}.model=${JSON.stringify(model)}, ${adapter} login/API key, and PATH/install ${bin}`;
+  return detail ? `${detail}; ${hint}` : hint;
+}
+
+export async function runDoctor(
+  teamFile: string,
+  deps: DoctorDeps,
+  options: DoctorOptions = {},
+): Promise<DoctorReport> {
   const groups: DoctorGroup[] = [];
 
   // ── section 1: team.yaml ──────────────────────────────────────────────────
@@ -161,9 +283,11 @@ export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<Doc
   groups.push(binGroup);
 
   const pathStr = await deps.loginPath();
+  const binaryPaths = new Map<Adapter, string | null>();
   for (const [adapter, roles] of rolesByAdapter) {
     const bin = ADAPTER_BIN[adapter];
     const found = deps.which(bin, pathStr);
+    binaryPaths.set(adapter, found);
     if (found) {
       binGroup.checks.push({ label: bin, level: "ok", message: found });
     } else {
@@ -181,6 +305,67 @@ export async function runDoctor(teamFile: string, deps: DoctorDeps): Promise<Doc
 
   for (const adapter of rolesByAdapter.keys()) {
     authGroup.checks.push(checkAuth(adapter, deps));
+  }
+
+  if (options.probe) {
+    const probeGroup: DoctorGroup = { title: "model probes", checks: [] };
+    groups.push(probeGroup);
+
+    for (const [role, roleConfig] of Object.entries(team.roles)) {
+      const bin = ADAPTER_BIN[roleConfig.adapter];
+      const found = binaryPaths.get(roleConfig.adapter) ?? null;
+      const label = probeLabel(role, roleConfig);
+
+      if (!found) {
+        probeGroup.checks.push({
+          label,
+          level: "fail",
+          message: probeFailureMessage(
+            role,
+            roleConfig.adapter,
+            roleConfig.model,
+            bin,
+            `skipped probe because ${bin} is not available in PATH`,
+          ),
+        });
+        continue;
+      }
+
+      const outcome = await deps.probeModel({
+        role,
+        adapter: roleConfig.adapter,
+        model: roleConfig.model,
+        bin: found,
+        cwd: dirname(teamFile),
+        path: pathStr,
+        prompt: PROBE_PROMPT,
+      });
+      if (outcome.exitCode === 0) {
+        probeGroup.checks.push({
+          label,
+          level: "ok",
+          message: `probe exited 0 via ${found}`,
+        });
+        continue;
+      }
+
+      const detail = [trimForMessage(outcome.stderr), trimForMessage(outcome.stdout)]
+        .filter(Boolean)
+        .join(" | ");
+      probeGroup.checks.push({
+        label,
+        level: "fail",
+        message: probeFailureMessage(
+          role,
+          roleConfig.adapter,
+          roleConfig.model,
+          bin,
+          detail
+            ? `probe exited ${outcome.exitCode}: ${detail}`
+            : `probe exited ${outcome.exitCode}`,
+        ),
+      });
+    }
   }
 
   return { teamFile, groups };
