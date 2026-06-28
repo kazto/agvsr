@@ -275,7 +275,7 @@ describe("CLI <-> daemon over local IPC", () => {
             outcome: {
               sessionId: "impl-session",
               finalText: "model problem",
-              stderrTail: "issue with the selected model: gpt-5-codex",
+              stderrTail: "invalid/unsupported model: gpt-5-codex",
               exitCode: 1,
             },
           };
@@ -324,7 +324,7 @@ describe("CLI <-> daemon over local IPC", () => {
       expect(escalation!.body).toContain("implementation.model=gpt-5-codex");
       expect(escalation!.body).toContain("role=implementation");
       expect(escalation!.body).toContain("adapter=codex");
-      expect(escalation!.body).toContain("issue with the selected model");
+      expect(escalation!.body).toContain("invalid/unsupported model");
 
       c.close();
     } finally {
