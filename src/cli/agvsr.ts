@@ -39,6 +39,7 @@ Usage:
   agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
+  agvsr web [--host H] [--port N] [--socket P]  Run the local web gateway
   agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
 `;
 
@@ -582,6 +583,49 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "web": {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          host: { type: "string" },
+          port: { type: "string" },
+          socket: { type: "string" },
+          help: { type: "boolean", short: "h" },
+        },
+        allowPositionals: false,
+        strict: true,
+      });
+
+      if (values.help) {
+        console.log(`agvsr web — start the read-only local web gateway
+
+Usage: agvsr web [options]
+
+  --host <host>     TCP bind host (loopback only; default: 127.0.0.1)
+  --port <port>     TCP bind port (default: random free port)
+  --socket <path>   Unix socket path (default on POSIX: ${process.env.AGVSR_WEB_SOCK ?? "configDir()/web.sock"})
+  -h, --help        Show this help
+`);
+        return;
+      }
+
+      const { startWebGateway } = await import("../web/server.ts");
+      const web = await startWebGateway({
+        host: values.host,
+        port: values.port ? Number(values.port) : undefined,
+        socket: values.socket,
+      });
+      console.log(`agvsr web listening on ${web.endpoint}`);
+      console.log(`startup token: ${web.startupToken}`);
+      const shutdown = async () => {
+        await web.close();
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+      return;
+    }
 
     case "init": {
       const { values: initOpts } = parseArgs({
