@@ -54,17 +54,28 @@ describe("fillScaffold", () => {
 });
 
 describe("composeCharter (bundled charters)", () => {
-  it("composes scaffold + role charter with context filled", () => {
+  it("composes scaffold + role charter with the hardened communication rules", () => {
     const prompt = composeCharter(team, "qa", {
       jobId: "JOB-7",
       cwd: "/work/repo",
       branch: "agvsr/deadbeef",
     });
+    const normalized = prompt.replace(/\s+/g, " ");
     expect(prompt).toContain("agvsr Operating Protocol"); // scaffold layer
     expect(prompt).toContain("Role: qa"); // role charter layer
     expect(prompt).toContain("/work/repo"); // cwd substituted
     expect(prompt).toContain("agvsr/deadbeef"); // branch substituted
     expect(prompt).toContain("to: supervisor"); // qa's only allowed target (D10)
+    expect(normalized).toContain("Information only moves when you call an agvsr MCP tool");
+    expect(normalized).toContain("direct MCP tool call");
+    expect(normalized).toContain("not a shell command");
+    expect(normalized).toContain("running `agvsr send ...` in a shell delivers nothing");
+    expect(normalized).toContain("agvsr_send");
+    expect(normalized).toContain("MCP tools already available in the current turn");
+    expect(normalized).toContain("agvsr ...");
+    expect(normalized).toContain("agmsg ...");
+    expect(normalized).toContain("silently discarded");
+    expect(normalized).toContain("The only valid send path is MCP tool invocation");
     expect(prompt).not.toContain("{{"); // no leftover placeholders
   });
 
