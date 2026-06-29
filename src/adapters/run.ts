@@ -40,7 +40,7 @@ export interface RunTurnOptions {
   idleTimeoutMs?: number;
   /** Backward compat: treated as hard fallback when hardTimeoutMs absent. */
   timeoutMs?: number;
-  /** Called on each stdout line arrival (Tier 2 progress tracking for daemon). */
+  /** Called on each real stdout chunk arrival (Tier 2 progress tracking for daemon). */
   onProgress?: () => void;
   signal?: AbortSignal;
 }
@@ -138,20 +138,17 @@ export async function runTurn(
   })();
 
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
+    options.onProgress?.();
     resetIdle();
     buf += decoder.decode(chunk, { stream: true });
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
       consume(buf.slice(0, nl));
-      options.onProgress?.();
-      resetIdle();
       buf = buf.slice(nl + 1);
     }
   }
   if (buf) {
     consume(buf); // trailing line without newline (e.g. agy)
-    options.onProgress?.();
-    resetIdle();
   }
 
   const exitCode = await proc.exited;

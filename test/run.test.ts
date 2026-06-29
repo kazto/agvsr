@@ -102,6 +102,23 @@ function infiniteProgressDriver(intervalMs: number): CliDriver {
   };
 }
 
+/** Driver that emits stdout chunks without newlines, then finishes with one newline. */
+function chunkedProgressDriver(chunkDelayMs: number): CliDriver {
+  const script = `
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+    process.stdout.write("alpha");
+    await delay(${chunkDelayMs});
+    process.stdout.write("beta");
+    await delay(${chunkDelayMs});
+    process.stdout.write("\\n");
+  `;
+  return {
+    adapter: "claude-code",
+    buildSpawn: () => ({ bin: "bun", args: ["-e", script] }),
+    createParser: () => textParser(null),
+  };
+}
+
 function slowDriver(): CliDriver {
   return {
     adapter: "claude-code",
@@ -231,13 +248,16 @@ describe("runTurn", () => {
   });
 
   describe("AC-1 (onProgress callback)", () => {
-    it("calls onProgress on each stdout line", async () => {
+    it("calls onProgress for stdout chunks and keeps idle timeouts alive while output continues", async () => {
       let progressCount = 0;
-      await runTurn(fakeDriver({ sessionId: null }), spec, null, "go", {
+      const { outcome } = await runTurn(chunkedProgressDriver(60), spec, null, "go", {
+        idleTimeoutMs: 250,
+        hardTimeoutMs: 1000,
         onProgress: () => progressCount++,
       });
-      // fakeDriver emits "alpha\n" and "beta\n"
-      expect(progressCount).toBe(2);
+      expect(outcome.timedOut).toBeFalsy();
+      expect(outcome.exitCode).toBe(0);
+      expect(progressCount).toBeGreaterThanOrEqual(2);
     });
   });
 

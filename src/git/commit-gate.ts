@@ -30,6 +30,10 @@ function gitStatus(worktree: string): { ok: boolean; stdout: string; stderr: str
   };
 }
 
+function countPorcelainEntries(stdout: string): number {
+  return stdout.split("\n").filter((line) => line.trim().length > 0).length;
+}
+
 export interface CommitGateResult {
   ok: true;
 }
@@ -70,4 +74,17 @@ export function checkJobCommitGate(job: Pick<Job, "id" | "worktree">): CommitGat
   }
 
   return { ok: true };
+}
+
+export function recoverableDirtyWorktreeNote(job: Pick<Job, "branch" | "worktree">): string | null {
+  if (!job.worktree) return null;
+
+  const status = gitStatus(job.worktree);
+  if (!status.ok || !status.stdout) return null;
+
+  const changedFileCount = countPorcelainEntries(status.stdout);
+  if (changedFileCount <= 0) return null;
+
+  const branch = job.branch ?? "(unknown)";
+  return `未コミットの作業が worktree に残存: ${job.worktree}, 変更ファイル数 ${changedFileCount}, ブランチ ${branch}。git でコミットして回収可`;
 }
