@@ -49,7 +49,7 @@ function normalizeCwd(input: string): string {
 }
 
 /** Compact human duration: 45s, 12m, 1h03m. */
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -62,7 +62,7 @@ function formatDuration(ms: number): string {
  * Render live execution state next to a running job's status so the user can
  * tell "actively working" from "idle/stalled". Empty for terminal statuses.
  */
-function formatRuntime(job: Job, rt: JobRuntime): string {
+export function formatRuntime(job: Job, rt: JobRuntime): string {
   if (job.status !== "running") return "";
   const idle = rt.idle_ms != null ? `, idle ${formatDuration(rt.idle_ms)}` : "";
   if (!rt.in_flight) {
@@ -116,6 +116,16 @@ export function renderWatchMessage(
   if (opts.withDelimiter) lines.push(dim("---"));
   lines.push(header, m.body, "");
   return lines.join("\n");
+}
+
+// Build the `agvsr watch` worker-liveness line, reusing `formatRuntime` so the
+// wording matches `agvsr status`. Pure so it can be unit-tested in-process.
+export function formatWatchHeartbeatLine(
+  job: Job,
+  runtime: JobRuntime,
+  shortId: (id: string) => string,
+): string {
+  return `~ heartbeat [${shortId(job.id)}] ${job.status}${formatRuntime(job, runtime)}`;
 }
 
 function unwrap<T>(res: Response<T>): T {
@@ -487,6 +497,16 @@ async function main(argv: string[]): Promise<void> {
           printedMsg = true;
         };
 
+        const printHeartbeat = async (job: Job): Promise<void> => {
+          const getRes = await c.request<{ job: Job; runtime: JobRuntime }>("job.get", {
+            id: job.id,
+          });
+          if (!getRes.ok) return;
+          console.log(
+            dim(formatWatchHeartbeatLine(getRes.result.job, getRes.result.runtime, shortId)),
+          );
+        };
+
         c.onPush = (frame: PushFrame): void => {
           if (frame.event !== "msg.new") return;
           const m = frame.data;
@@ -518,6 +538,7 @@ async function main(argv: string[]): Promise<void> {
           if (!listRes.ok) return;
           for (const job of listRes.result.jobs) {
             if (!showAll && job.status !== "running") continue;
+            await printHeartbeat(job);
             await subscribeToJob(job);
           }
         };

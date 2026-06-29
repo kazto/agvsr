@@ -5,9 +5,14 @@ import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
-import { parsePollMs, renderWatchMessage } from "../src/cli/agvsr.ts";
+import {
+  formatRuntime,
+  formatWatchHeartbeatLine,
+  parsePollMs,
+  renderWatchMessage,
+} from "../src/cli/agvsr.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
-import type { Job, Message, PushFrame } from "../src/protocol.ts";
+import type { Job, JobRuntime, Message, PushFrame } from "../src/protocol.ts";
 
 const TEAM = parseTeam(`
 roles:
@@ -371,5 +376,126 @@ describe("parsePollMs — --poll argument validation", () => {
     } catch (e) {
       expect((e as Error).message).toContain("bogus");
     }
+  });
+});
+
+describe("formatRuntime — status-consistent wording", () => {
+  it("matches the status formatter output for running jobs", () => {
+    const job = {
+      id: "job-1",
+      goal: "heartbeat",
+      status: "running",
+      cwd: "/repo",
+      branch: null,
+      worktree: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    } as Job;
+    const runtime = {
+      in_flight: true,
+      active_roles: ["supervisor"],
+      last_activity_at: "2026-01-01T00:00:00.000Z",
+      idle_ms: 4000,
+      hard_remaining_ms: { supervisor: 5000 },
+      idle_since_progress_ms: { supervisor: 2000 },
+    } as JobRuntime;
+
+    expect(formatRuntime(job, runtime)).toBe(
+      " — working: supervisor, budget 5s left, last progress 2s ago, idle 4s",
+    );
+  });
+
+  it("returns an empty suffix for terminal jobs", () => {
+    const job = {
+      id: "job-2",
+      goal: "done",
+      status: "done",
+      cwd: "/repo",
+      branch: null,
+      worktree: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    } as Job;
+    const runtime = {
+      in_flight: false,
+      active_roles: [],
+      last_activity_at: null,
+      idle_ms: null,
+    } as JobRuntime;
+
+    expect(formatRuntime(job, runtime)).toBe("");
+  });
+});
+
+describe("formatWatchHeartbeatLine — worker liveness rendering", () => {
+  const shortId = (id: string): string => id.slice(0, 8);
+
+  it("renders a working heartbeat that reuses the status wording", () => {
+    const job = {
+      id: "1234567890abcdef",
+      goal: "heartbeat",
+      status: "running",
+      cwd: "/repo",
+      branch: null,
+      worktree: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    } as Job;
+    const runtime = {
+      in_flight: true,
+      active_roles: ["supervisor"],
+      last_activity_at: "2026-01-01T00:00:00.000Z",
+      idle_ms: 2000,
+      hard_remaining_ms: { supervisor: 5000 },
+      idle_since_progress_ms: { supervisor: 0 },
+    } as JobRuntime;
+
+    expect(formatWatchHeartbeatLine(job, runtime, shortId)).toBe(
+      "~ heartbeat [12345678] running — working: supervisor, budget 5s left, last progress 0s ago, idle 2s",
+    );
+  });
+
+  it("renders a possibly-stalled heartbeat for a job with no in-flight turn", () => {
+    const job = {
+      id: "1234567890abcdef",
+      goal: "heartbeat",
+      status: "running",
+      cwd: "/repo",
+      branch: null,
+      worktree: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    } as Job;
+    const runtime = {
+      in_flight: false,
+      active_roles: [],
+      last_activity_at: null,
+      idle_ms: 1_380_000,
+    } as JobRuntime;
+
+    expect(formatWatchHeartbeatLine(job, runtime, shortId)).toBe(
+      "~ heartbeat [12345678] running — no in-flight turn, idle 23m (possibly stalled)",
+    );
+  });
+
+  it("renders a bare status line for terminal jobs (no runtime suffix)", () => {
+    const job = {
+      id: "1234567890abcdef",
+      goal: "done",
+      status: "done",
+      cwd: "/repo",
+      branch: null,
+      worktree: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    } as Job;
+    const runtime = {
+      in_flight: false,
+      active_roles: [],
+      last_activity_at: null,
+      idle_ms: null,
+    } as JobRuntime;
+
+    expect(formatWatchHeartbeatLine(job, runtime, shortId)).toBe("~ heartbeat [12345678] done");
   });
 });
