@@ -31,6 +31,13 @@ export function ipcEndpoint(): string {
   return join(runtime, "agvsrd.sock");
 }
 
+/** Web gateway socket path (Phase 1 prefers unix sockets when available). */
+export function webSocketPath(): string {
+  if (process.env.AGVSR_WEB_SOCK) return process.env.AGVSR_WEB_SOCK;
+  if (isWindows) return `\\\\.\\pipe\\agvsr-web-${userInfo().username}`;
+  return join(configDir(), "web.sock");
+}
+
 /** Directory for per-job git worktrees: configDir()/worktrees. */
 export function worktreesDir(): string {
   return join(configDir(), "worktrees");
