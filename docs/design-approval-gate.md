@@ -46,6 +46,29 @@ this regardless of whether the supervisor remembers to.
   the user.
 - `test/charter.test.ts`: asserts the supervisor charter carries the approval wording.
 
+## Operations: jobs waiting for approval look stalled
+
+A gated job parks after design/QA with **no in-flight turn** until the human replies. In
+`agvsr status <job>` this shows as `running — no in-flight turn, idle 12h+ (possibly
+stalled)`, which is indistinguishable at a glance from a genuine stall. It is **not** a
+crash or hang — the supervisor sent its design summary and is waiting for approval.
+
+To tell the two apart, look at the job's last message:
+
+- last message is `supervisor → user` (a design summary / approval request) → **waiting for
+  approval**, not stalled. Unblock with:
+
+  ```
+  agvsr tell <job-id> "approved"
+  ```
+
+  (or send requested design changes instead; the supervisor routes back to design).
+- last message is a mid-turn worker note with no recent progress → investigate as a real
+  stall.
+
+Seen in practice: two jobs sat `possibly stalled` for 12h+ purely because no approval reply
+had been sent; a single `agvsr tell` resumed implementation immediately.
+
 ## Known limitations
 
 - `created_at` is millisecond-precision ISO; events within the same millisecond have
