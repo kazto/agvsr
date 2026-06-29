@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -724,22 +724,34 @@ describe("CLI <-> daemon over local IPC", () => {
   });
 
   it("normalizes tilde cwd and rejects nonexistent cwd on job.create", async () => {
-    const c = await Client.connect(sock);
-    const homeRelative = await c.request<{ job: Job }>("job.create", {
-      goal: "home cwd",
-      cwd: "~/src/agvsr",
-    });
-    expect(homeRelative.ok).toBe(true);
-    if (!homeRelative.ok) throw new Error("job.create failed");
-    expect(homeRelative.result.job.cwd).toBe(join(homedir(), "src", "agvsr"));
+    const savedHome = process.env.HOME;
+    const fakeHome = join(tmpdir(), `agvsr-home-${randomUUID()}`);
+    const homeRepo = join(fakeHome, "src", "agvsr");
+    mkdirSync(homeRepo, { recursive: true });
+    process.env.HOME = fakeHome;
 
-    const missing = await c.request("job.create", {
-      goal: "bad cwd",
-      cwd: "~/definitely-missing-agvsr-cwd",
-    });
-    expect(missing.ok).toBe(false);
-    if (!missing.ok) expect(missing.error.message).toContain("cwd does not exist");
-    c.close();
+    const c = await Client.connect(sock);
+    try {
+      const homeRelative = await c.request<{ job: Job }>("job.create", {
+        goal: "home cwd",
+        cwd: "~/src/agvsr",
+      });
+      expect(homeRelative.ok).toBe(true);
+      if (!homeRelative.ok) throw new Error("job.create failed");
+      expect(homeRelative.result.job.cwd).toBe(homeRepo);
+
+      const missing = await c.request("job.create", {
+        goal: "bad cwd",
+        cwd: "~/definitely-missing-agvsr-cwd",
+      });
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) expect(missing.error.message).toContain("cwd does not exist");
+    } finally {
+      c.close();
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   it("fails a supervisor turn that ends with text but no agvsr tool call", async () => {

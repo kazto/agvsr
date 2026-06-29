@@ -140,6 +140,7 @@ describe("web cli smoke", () => {
     const binDir = join(dir, "bin");
     const sock = join(dir, "agvsrd.sock");
     const db = join(dir, "store.sqlite");
+    const repo = join(dir, "repo");
     const fakeClaude = join(binDir, "claude");
     const oldPath = process.env.PATH ?? "";
     const oldTimeout = process.env.AGVSR_TURN_TIMEOUT_MS;
@@ -147,6 +148,7 @@ describe("web cli smoke", () => {
     const oldStore = process.env.AGVSR_STORE;
     const oldSock = process.env.AGVSR_SOCK;
     mkdirSync(binDir);
+    mkdirSync(repo);
     writeFileSync(fakeClaude, fakeClaudeScript());
     chmodSync(fakeClaude, 0o755);
 
@@ -202,7 +204,7 @@ roles:
         try {
           const created = await client.request<{ job: Job }>("job.create", {
             goal: "web cli smoke",
-            cwd: process.cwd(),
+            cwd: repo,
           });
           expect(created.ok).toBe(true);
           const jobId = created.ok ? created.result.job.id : "";

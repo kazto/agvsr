@@ -89,10 +89,12 @@ describe("agvsr E2E", () => {
     const binDir = join(dir, "bin");
     const sock = join(dir, "agvsrd.sock");
     const db = join(dir, "store.sqlite");
+    const repo = join(dir, "repo");
     const oldPath = process.env.PATH ?? "";
     const oldTimeout = process.env.AGVSR_TURN_TIMEOUT_MS;
 
     mkdirSync(binDir);
+    mkdirSync(repo);
     const fakeClaude = join(binDir, "claude");
     writeFileSync(fakeClaude, fakeClaudeScript());
     chmodSync(fakeClaude, 0o755);
@@ -113,7 +115,7 @@ describe("agvsr E2E", () => {
     try {
       const created = await c.request<{ job: Job }>("job.create", {
         goal: "complete via fake claude MCP",
-        cwd: process.cwd(),
+        cwd: repo,
       });
       expect(created.ok).toBe(true);
       const id = created.ok ? created.result.job.id : "";

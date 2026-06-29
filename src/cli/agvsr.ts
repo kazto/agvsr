@@ -44,8 +44,9 @@ Usage:
 `;
 
 function normalizeCwd(input: string): string {
+  const home = process.env.HOME ?? homedir();
   const expanded =
-    input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
+    input === "~" ? home : input.startsWith("~/") ? join(home, input.slice(2)) : input;
   return resolve(expanded);
 }
 

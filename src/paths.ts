@@ -40,7 +40,7 @@ export function webSocketPath(): string {
 
 /** Directory for per-job git worktrees: configDir()/worktrees. */
 export function worktreesDir(): string {
-  return join(configDir(), "worktrees");
+  return process.env.AGVSR_WORKTREES ?? join(configDir(), "worktrees");
 }
 
 /** Ensure the config dir exists; returns it. */
