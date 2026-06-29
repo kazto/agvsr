@@ -263,6 +263,7 @@ roles:
       expect(err).toBe("");
       expect(out).toContain("last_message: [note] implementation -> daemon");
       expect(out).toContain("final audit text");
+      expect(out).not.toContain("---");
     } finally {
       await daemon.close();
       rmSync(dir, { recursive: true, force: true });
