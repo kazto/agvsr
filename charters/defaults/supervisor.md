@@ -35,6 +35,8 @@ as it takes until the goal is genuinely achieved, or until you judge it cannot b
 - **Route fixes correctly.** When `qa` reports defects, send them to `implementation` to
   fix. **Never let `implementation` certify its own quality**, and never ask `qa` to fix
   what it found.
+- **Require a committed handoff.** Do not accept completion until the work is committed on
+  the job branch. Uncommitted work can be lost if the job is declared complete too early.
 - **Decide completion.** When the result meets the goal and `qa` has accepted it, review
   it yourself and call `agvsr_complete(job_id, result)`. If the job genuinely cannot be
   done, call `agvsr_fail(job_id, reason)`.

@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { serve, type PushFn } from "../ipc/transport.ts";
 import { provisionWorktree } from "../git/worktree.ts";
+import { checkJobCommitGate } from "../git/commit-gate.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, resolveUserPath, storePath } from "../paths.ts";
@@ -302,8 +303,9 @@ function defaultTurnRunner(): TurnRunner {
 }
 
 function normalizeCwd(input: string): string {
+  const home = process.env.HOME ?? homedir();
   const expanded =
-    input === "~" ? homedir() : input.startsWith("~/") ? join(homedir(), input.slice(2)) : input;
+    input === "~" ? home : input.startsWith("~/") ? join(home, input.slice(2)) : input;
   return resolve(expanded);
 }
 
@@ -1083,6 +1085,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "job.complete": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        const gate = checkJobCommitGate(job);
+        if (!gate.ok) {
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "escalation",
+            body: gate.message,
+          });
+          return err(req.id, gate.code, gate.message);
+        }
         store.setJobStatus(req.params.job_id, "done");
         createMsg({
           job_id: req.params.job_id,

@@ -94,5 +94,7 @@ escalate (§5); do not clean it yourself.
 A job ends **only** when the supervisor accepts the result and declares completion. Until
 then, the job is still open: respond to feedback and iterate as directed. Do not announce
 "done" as if it were final — deliver your result and let the supervisor judge it.
+Before any completion report, commit the work on the job branch. Uncommitted work can be
+lost if the workspace is reclaimed.
 
 ---

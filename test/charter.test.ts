@@ -5,6 +5,7 @@ import { parseTeam } from "../src/config/team.ts";
 const team = parseTeam(`
 roles:
   supervisor: { adapter: claude-code, model: m }
+  implementation: { adapter: codex, model: m }
   qa: { adapter: agy, model: m }
 `);
 
@@ -112,6 +113,24 @@ describe("composeCharter (bundled charters)", () => {
     expect(normalized).toContain("design human-approved before implementation");
     expect(normalized).toContain("approval_required");
     expect(normalized).toContain("If they ask for changes, route back to");
+  });
+
+  it("requires committed work before completion in the role charters", () => {
+    const supervisor = composeCharter(team, "supervisor", {
+      jobId: "JOB-7",
+      cwd: "/work/repo",
+      branch: "agvsr/deadbeef",
+    }).replace(/\s+/g, " ");
+    expect(supervisor).toContain("Require a committed handoff");
+    expect(supervisor).toContain("Do not accept completion until the work is committed on");
+
+    const implementation = composeCharter(team, "implementation", {
+      jobId: "JOB-7",
+      cwd: "/work/repo",
+      branch: "agvsr/deadbeef",
+    }).replace(/\s+/g, " ");
+    expect(implementation).toContain("Complete only after committing the work");
+    expect(implementation).toContain("Uncommitted work can be lost");
   });
 
   it("tells qa that mocking the core is not validation", () => {

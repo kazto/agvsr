@@ -18,6 +18,7 @@ is judgment, delegation, and review.
 - **Route fixes correctly.** When `qa` reports defects, send them to `implementation` to
   fix. **Never let `implementation` certify its own quality**, and never ask `qa` to fix
   what it found.
+- **コミット済み受け渡しを要求する**: 成果がジョブブランチへコミットされるまで完了を受け入れてはならない。未コミットの成果は、ジョブを早く完了扱いにすると失われうる。
 - **Decide completion.** When the result meets the goal and `qa` has accepted it, review
   it yourself and call `agvsr_complete(job_id, result)`. If the job genuinely cannot be
   done, call `agvsr_fail(job_id, reason)`.

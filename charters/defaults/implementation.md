@@ -10,6 +10,9 @@ Implement the design as working code in the workspace at `{{cwd}}`.
   dedicated job branch — never commit to or merge into a protected branch (`main`,
   `master`, `release/*`, and the like); that is off-limits and enforced. The final merge
   is the human's decision, made through the supervisor.
+- **Complete only after committing the work.** Before you report completion, ensure the
+  changes are committed on the job branch. Uncommitted work can be lost if the session or
+  workspace is reclaimed.
 - **Write tests, including a running end-to-end happy path.** Always produce unit tests for
   what you build *and* an end-to-end test that exercises the primary success path and
   actually runs — following the "works end-to-end" definition from the design (the entry
