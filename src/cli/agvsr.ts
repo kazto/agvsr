@@ -99,6 +99,25 @@ function formatMessageKind(kind: Message["kind"]): string {
   return process.stdout.isTTY ? "\x1b[2m[note]\x1b[0m" : "[note]";
 }
 
+// Render a single `agvsr watch` message item. `withDelimiter` inserts the dim
+// `---` separator that goes before every message after the first. Kept as a
+// pure function so the delimiter behaviour can be unit-tested without spawning
+// a live watch subprocess.
+export function renderWatchMessage(
+  jobId: string,
+  m: Message,
+  opts: { withDelimiter: boolean; tty?: boolean },
+): string {
+  const dim = (s: string): string => (opts.tty ? `\x1b[2m${s}\x1b[0m` : s);
+  const ts = new Date(m.created_at).toLocaleTimeString("en-US", { hour12: false });
+  const refs = m.refs ? ` refs=${m.refs}` : "";
+  const header = `[${jobId.slice(0, 8)}] ${ts}  ${formatMessageKind(m.kind)} ${m.from_role} -> ${m.to_role}${refs}`;
+  const lines: string[] = [];
+  if (opts.withDelimiter) lines.push(dim("---"));
+  lines.push(header, m.body, "");
+  return lines.join("\n");
+}
+
 function unwrap<T>(res: Response<T>): T {
   if (!res.ok) {
     console.error(`error [${res.error.code}]: ${res.error.message}`);
@@ -452,19 +471,20 @@ async function main(argv: string[]): Promise<void> {
       await withClient(async (c) => {
         const watchedJobs = new Set<string>();
         const seen = new Set<string>();
+        let printedMsg = false;
 
         const shortId = (id: string): string => id.slice(0, 8);
 
         const dim = (s: string): string => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 
         const printMsg = (jobId: string, m: Message): void => {
-          const ts = new Date(m.created_at).toLocaleTimeString("en-US", { hour12: false });
-          const refs = m.refs ? ` refs=${m.refs}` : "";
           console.log(
-            `[${shortId(jobId)}] ${ts}  ${formatMessageKind(m.kind)} ${m.from_role} -> ${m.to_role}${refs}`,
+            renderWatchMessage(jobId, m, {
+              withDelimiter: printedMsg,
+              tty: Boolean(process.stdout.isTTY),
+            }),
           );
-          console.log(m.body);
-          console.log();
+          printedMsg = true;
         };
 
         c.onPush = (frame: PushFrame): void => {

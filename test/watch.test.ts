@@ -5,9 +5,9 @@ import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
-import { parsePollMs } from "../src/cli/agvsr.ts";
+import { parsePollMs, renderWatchMessage } from "../src/cli/agvsr.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
-import type { Job, PushFrame } from "../src/protocol.ts";
+import type { Job, Message, PushFrame } from "../src/protocol.ts";
 
 const TEAM = parseTeam(`
 roles:
@@ -237,6 +237,95 @@ describe("agvsr watch — cross-job message streaming", () => {
     expect(pushed.some((f) => f.data.body === "post-subscribe message")).toBe(true);
 
     c.close();
+  });
+});
+
+describe("agvsr watch — delimiter rendering", () => {
+  const jobId = "1234567890abcdef";
+  const shortId = jobId.slice(0, 8);
+
+  const mkMsg = (over: Partial<Message> = {}): Message => ({
+    id: randomUUID(),
+    job_id: jobId,
+    from_role: "supervisor",
+    to_role: "implementation",
+    kind: "message",
+    body: "hello",
+    refs: null,
+    created_at: "2026-06-29T01:00:00.000Z",
+    read_at: null,
+    ...over,
+  });
+
+  // Mirror the watch case: a `printedMsg` flag drives the delimiter so a single
+  // `---` appears before every message after the first, across both the backfill
+  // (msg.list) and live (msg.new) paths that share `renderWatchMessage`.
+  const renderStream = (msgs: Message[], tty = false): string => {
+    let printedMsg = false;
+    const out: string[] = [];
+    for (const m of msgs) {
+      out.push(renderWatchMessage(m.job_id, m, { withDelimiter: printedMsg, tty }));
+      printedMsg = true;
+    }
+    return out.join("\n");
+  };
+
+  it("emits no delimiter before the first message", () => {
+    const rendered = renderWatchMessage(jobId, mkMsg({ body: "first" }), { withDelimiter: false });
+    const lines = rendered.split("\n");
+    expect(lines[0]).toContain(`[${shortId}]`);
+    expect(lines[0]).toContain("message supervisor -> implementation");
+    expect(lines[1]).toBe("first");
+    expect(lines[2]).toBe("");
+    expect(rendered).not.toContain("---");
+  });
+
+  it("inserts exactly one delimiter between consecutive messages (backfill + live)", () => {
+    const rendered = renderStream([
+      mkMsg({ body: "backfill-1" }),
+      mkMsg({ body: "backfill-2" }),
+      mkMsg({ body: "live-1" }),
+    ]);
+    const lines = rendered.split("\n");
+
+    // Two delimiters: before backfill-2 and before live-1, never before backfill-1.
+    expect(lines.filter((l) => l === "---")).toHaveLength(2);
+
+    const i1 = lines.indexOf("backfill-1");
+    const i2 = lines.indexOf("backfill-2");
+    const i3 = lines.indexOf("live-1");
+    expect(i1).toBeGreaterThan(-1);
+    expect(i2).toBeGreaterThan(i1);
+    expect(i3).toBeGreaterThan(i2);
+
+    // Delimiter sits two lines above each subsequent body (---, header, body).
+    expect(lines[i2 - 2]).toBe("---");
+    expect(lines[i3 - 2]).toBe("---");
+    expect(lines[i1 - 1] ?? "").not.toBe("---");
+  });
+
+  it("preserves header, refs, and trailing blank-line formatting", () => {
+    const rendered = renderWatchMessage(
+      jobId,
+      mkMsg({ body: "with refs", refs: "src/cli/agvsr.ts" }),
+      {
+        withDelimiter: true,
+      },
+    );
+    const lines = rendered.split("\n");
+    expect(lines[0]).toBe("---");
+    expect(lines[1]).toContain(`[${shortId}]`);
+    expect(lines[1]).toContain("message supervisor -> implementation");
+    expect(lines[1]).toContain("refs=src/cli/agvsr.ts");
+    expect(lines[2]).toBe("with refs");
+    expect(lines[3]).toBe("");
+  });
+
+  it("dims the delimiter only when stdout is a TTY", () => {
+    const plain = renderWatchMessage(jobId, mkMsg(), { withDelimiter: true, tty: false });
+    const tty = renderWatchMessage(jobId, mkMsg(), { withDelimiter: true, tty: true });
+    expect(plain.split("\n")[0]).toBe("---");
+    expect(tty.split("\n")[0]).toBe("\x1b[2m---\x1b[0m");
   });
 });
 
