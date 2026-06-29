@@ -182,4 +182,15 @@ describe("commit gate", () => {
     expect(done.ok).toBe(true);
     c.close();
   });
+
+  it("reports commit_check_failed when the worktree is not a git repository", () => {
+    const notARepo = join(base, "not-a-repo");
+    mkdirSync(notARepo, { recursive: true });
+
+    const gate = checkJobCommitGate({ id: "job-no-git", worktree: notARepo });
+    expect(gate.ok).toBe(false);
+    if (gate.ok) throw new Error("expected the gate to block");
+    expect(gate.code).toBe("commit_check_failed");
+    expect(gate.message).toContain(notARepo);
+  });
 });
