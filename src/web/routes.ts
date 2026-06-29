@@ -32,6 +32,16 @@ export interface WebRouteContext {
   };
 }
 
+export function hasAuthenticatedSession(
+  ctx: Pick<WebRouteContext, "authStore">,
+  cookies: Map<string, string>,
+): boolean {
+  const sessionToken = cookies.get(SESSION_COOKIE);
+  if (!sessionToken) return false;
+  const sessionHash = hashToken(sessionToken);
+  return ctx.authStore.getSession(sessionHash) !== null;
+}
+
 function json(body: unknown, init?: ResponseInit): Response {
   const headers = new Headers(getSecurityHeaders());
   if (init?.headers) {
@@ -86,15 +96,12 @@ async function detailForJob(ctx: WebRouteContext, id: string): Promise<JobDetail
 }
 
 function sessionView(ctx: WebRouteContext, cookies: Map<string, string>): Response {
-  const sessionToken = cookies.get(SESSION_COOKIE);
-  if (!sessionToken) {
+  if (!hasAuthenticatedSession(ctx, cookies)) {
     return json({ authenticated: false });
   }
+  const sessionToken = cookies.get(SESSION_COOKIE)!;
   const sessionHash = hashToken(sessionToken);
-  const session = ctx.authStore.getSession(sessionHash);
-  if (!session) {
-    return json({ authenticated: false });
-  }
+  const session = ctx.authStore.getSession(sessionHash)!;
   ctx.authStore.touchSession(sessionHash);
   const fresh = ctx.authStore.getSession(sessionHash) ?? session;
   const csrfToken = cookies.get(CSRF_COOKIE);
@@ -260,9 +267,7 @@ export async function handleWebRequest(ctx: WebRouteContext, request: Request): 
   }
 
   if (pathname === "/api/jobs" && request.method === "GET") {
-    const sessionToken = cookies.get(SESSION_COOKIE);
-    const sessionHash = sessionToken ? hashToken(sessionToken) : null;
-    if (!sessionHash || !ctx.authStore.getSession(sessionHash)) {
+    if (!hasAuthenticatedSession(ctx, cookies)) {
       return json({ error: "unauthorized" }, { status: 401, headers: getSecurityHeaders() });
     }
     const jobs = await jobsWithRuntime(ctx);
@@ -270,9 +275,7 @@ export async function handleWebRequest(ctx: WebRouteContext, request: Request): 
   }
 
   if (pathname.startsWith("/api/jobs/") && request.method === "GET") {
-    const sessionToken = cookies.get(SESSION_COOKIE);
-    const sessionHash = sessionToken ? hashToken(sessionToken) : null;
-    if (!sessionHash || !ctx.authStore.getSession(sessionHash)) {
+    if (!hasAuthenticatedSession(ctx, cookies)) {
       return json({ error: "unauthorized" }, { status: 401, headers: getSecurityHeaders() });
     }
     const id = decodeURIComponent(pathname.slice("/api/jobs/".length));

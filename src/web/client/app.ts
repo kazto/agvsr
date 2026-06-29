@@ -29,6 +29,7 @@ type JobSummary = {
 type JobDetail = JobSummary & {
   messages: Array<{
     id: string;
+    job_id: string;
     from_role: string;
     to_role: string;
     kind: string;
@@ -38,7 +39,14 @@ type JobDetail = JobSummary & {
   }>;
 };
 
+type StreamFrame = {
+  event: "msg.new";
+  data: JobDetail["messages"][number];
+};
+
 const POLL_MS = 2000;
+const STREAM_RECONNECT_MIN_MS = 500;
+const STREAM_RECONNECT_MAX_MS = 8000;
 
 export function startPolling(fn: () => void | Promise<void>, ms = POLL_MS): () => void {
   void fn();
@@ -73,7 +81,13 @@ function renderMessage(container: HTMLElement, message: JobDetail["messages"][nu
   container.append(item);
 }
 
-function renderJobDetail(container: HTMLElement, detail: JobDetail): void {
+interface DetailState {
+  jobId: string;
+  messagesEl: HTMLElement;
+  seenMessageIds: Set<string>;
+}
+
+function renderJobDetail(container: HTMLElement, detail: JobDetail): DetailState {
   const section = document.createElement("section");
   section.className = "detail";
   section.append(
@@ -91,9 +105,16 @@ function renderJobDetail(container: HTMLElement, detail: JobDetail): void {
   );
   const messages = document.createElement("div");
   messages.className = "messages";
+  const seenMessageIds = new Set<string>();
   for (const message of detail.messages) renderMessage(messages, message);
+  for (const message of detail.messages) seenMessageIds.add(message.id);
   section.append(messages);
   container.replaceChildren(section);
+  return {
+    jobId: detail.job.id,
+    messagesEl: messages,
+    seenMessageIds,
+  };
 }
 
 function renderJobs(
@@ -120,6 +141,10 @@ function renderJobs(
 export function mountApp(root: HTMLElement): void {
   let csrfToken = "";
   let currentJobId: string | null = null;
+  let detailState: DetailState | null = null;
+  let streamSocket: WebSocket | null = null;
+  let reconnectTimer: number | null = null;
+  let reconnectDelayMs = STREAM_RECONNECT_MIN_MS;
   const shell = document.createElement("div");
   shell.className = "shell";
   const banner = document.createElement("header");
@@ -168,6 +193,9 @@ export function mountApp(root: HTMLElement): void {
     const session = (await api("/api/session", { headers: {} })) as SessionResponse;
     if (!session.authenticated) {
       csrfToken = "";
+      currentJobId = null;
+      detailState = null;
+      closeStream();
       banner.replaceChildren(
         textEl("div", "agvsr web", "brand"),
         textEl("div", "read-only monitoring", "muted"),
@@ -183,9 +211,93 @@ export function mountApp(root: HTMLElement): void {
     content.replaceChildren(sidebar, detail);
   }
 
+  function clearReconnectTimer(): void {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function closeStream(): void {
+    clearReconnectTimer();
+    reconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+    if (streamSocket && streamSocket.readyState < WebSocket.CLOSING) {
+      streamSocket.close();
+    }
+    streamSocket = null;
+  }
+
+  function scheduleStreamReconnect(jobId: string): void {
+    if (currentJobId !== jobId || streamSocket !== null || reconnectTimer !== null) return;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      if (currentJobId === jobId && streamSocket === null) {
+        void openStream(jobId);
+      }
+    }, reconnectDelayMs);
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, STREAM_RECONNECT_MAX_MS);
+  }
+
+  function streamUrl(jobId: string): URL {
+    const url = new URL(`/api/jobs/${encodeURIComponent(jobId)}/stream`, window.location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url;
+  }
+
+  function appendStreamFrame(frame: StreamFrame): void {
+    if (!detailState || detailState.jobId !== currentJobId) return;
+    if (frame.event !== "msg.new") return;
+    if (frame.data.job_id !== currentJobId) return;
+    if (detailState.seenMessageIds.has(frame.data.id)) return;
+    detailState.seenMessageIds.add(frame.data.id);
+    renderMessage(detailState.messagesEl, frame.data);
+  }
+
+  function openStream(jobId: string): void {
+    closeStream();
+    if (!currentJobId || currentJobId !== jobId) return;
+    const socket = new WebSocket(streamUrl(jobId).toString());
+    streamSocket = socket;
+
+    socket.addEventListener("open", () => {
+      if (streamSocket !== socket) return;
+      reconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+    });
+    socket.addEventListener("message", (event) => {
+      if (streamSocket !== socket) return;
+      if (typeof event.data !== "string") return;
+      let frame: StreamFrame | null = null;
+      try {
+        frame = JSON.parse(event.data) as StreamFrame;
+      } catch {
+        return;
+      }
+      appendStreamFrame(frame);
+    });
+    socket.addEventListener("close", () => {
+      if (streamSocket !== socket) return;
+      streamSocket = null;
+      if (currentJobId === jobId) {
+        scheduleStreamReconnect(jobId);
+      }
+    });
+    socket.addEventListener("error", () => {
+      if (streamSocket === socket) {
+        // close will schedule reconnect.
+      }
+    });
+  }
+
+  function ensureStream(jobId: string): void {
+    if (currentJobId !== jobId) return;
+    if (streamSocket !== null || reconnectTimer !== null) return;
+    openStream(jobId);
+  }
+
   async function refreshJobs(): Promise<void> {
     const res = (await api("/api/jobs", { headers: {} })) as { jobs: JobSummary[] };
     renderJobs(sidebar, res.jobs, (id) => {
+      if (currentJobId !== id) closeStream();
       currentJobId = id;
       void refreshDetail(id);
     });
@@ -197,7 +309,9 @@ export function mountApp(root: HTMLElement): void {
 
   async function refreshDetail(id: string): Promise<void> {
     const res = (await api(`/api/jobs/${encodeURIComponent(id)}`, { headers: {} })) as JobDetail;
-    renderJobDetail(detail, res);
+    if (currentJobId !== id) return;
+    detailState = renderJobDetail(detail, res);
+    ensureStream(id);
   }
 
   loginForm.addEventListener("submit", async (event: SubmitEvent) => {
@@ -216,6 +330,7 @@ export function mountApp(root: HTMLElement): void {
       await refreshJobs();
     } catch {
       csrfToken = "";
+      closeStream();
       banner.replaceChildren(textEl("div", "login failed", "error"));
     }
   });
