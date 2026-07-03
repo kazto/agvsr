@@ -2,7 +2,7 @@
 
 ## lint, format
 
-use `oxlint`, `oxfmt`.
+use `bunx oxlint`, `bunx oxfmt`.
 
 ## test
 
@@ -24,3 +24,8 @@ These rules apply in every context.
   `git clean -nd`, then wait for approval of the exact paths.
 - These rules are a backstop. The real guarantee is **isolation**: do your work inside your
   job's own worktree, never in the user's main checkout.
+
+## task completion
+
+When completing a task, be sure to run `git commit` before marking it as complete.
+
