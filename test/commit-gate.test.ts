@@ -8,7 +8,7 @@ import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
 import type { Daemon, TurnDispatch } from "../src/daemon/daemon.ts";
 import type { Job, Message } from "../src/protocol.ts";
-import { checkJobCommitGate } from "../src/git/commit-gate.ts";
+import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../src/git/commit-gate.ts";
 
 const TEAM = parseTeam(`
 roles:
@@ -108,6 +108,12 @@ describe("commit gate", () => {
     if (!job.worktree) throw new Error("missing worktree");
     writeFileSync(join(job.worktree, "tracked.txt"), "modified");
 
+    const note = recoverableDirtyWorktreeNote(job);
+    expect(note).toContain(job.worktree);
+    expect(note).toContain("変更ファイル数 1");
+    expect(note).toContain(`ブランチ ${job.branch}`);
+    expect(note).toContain("git でコミットして回収可");
+
     const blocked = await c.request("job.complete", { job_id: job.id, result: "done" });
     expect(blocked.ok).toBe(false);
     if (!blocked.ok) expect(blocked.error.code).toBe("commit_required");
@@ -177,9 +183,23 @@ describe("commit gate", () => {
     const status = git(job.worktree, ["status", "--porcelain=v1", "--untracked-files=normal"]);
     expect(status.stdout).toBe("");
     expect(checkJobCommitGate(job).ok).toBe(true);
+    expect(recoverableDirtyWorktreeNote(job)).toBeNull();
 
     const done = await c.request("job.complete", { job_id: job.id, result: "done" });
     expect(done.ok).toBe(true);
+    c.close();
+  });
+
+  it("does not report a recovery note for a clean worktree or a missing worktree", async () => {
+    const repo = makeRepo(join(base, "clean"));
+    const { c, job } = await createJob(repo);
+    expect(job.worktree).not.toBeNull();
+    if (!job.worktree) throw new Error("missing worktree");
+
+    expect(checkJobCommitGate(job).ok).toBe(true);
+    expect(recoverableDirtyWorktreeNote(job)).toBeNull();
+    expect(recoverableDirtyWorktreeNote({ branch: "agvsr/no", worktree: null })).toBeNull();
+
     c.close();
   });
 

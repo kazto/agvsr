@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { serve, type PushFn } from "../ipc/transport.ts";
 import { provisionWorktree } from "../git/worktree.ts";
-import { checkJobCommitGate } from "../git/commit-gate.ts";
+import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../git/commit-gate.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, resolveUserPath, storePath } from "../paths.ts";
@@ -74,7 +74,7 @@ export interface TurnDispatch {
   hardTimeoutMs: number;
   /** Resolved idle (no-progress) timeout in ms, always <= hardTimeoutMs. */
   idleTimeoutMs: number;
-  /** Called on each stdout line; lets the daemon track real progress time (Tier 2). */
+  /** Called on each real stdout chunk; lets the daemon track real progress time (Tier 2). */
   onProgress?: () => void;
 }
 
@@ -187,6 +187,11 @@ function configErrorEscalation(
     `role=${role} adapter=${adapter} model=${model}`,
     bounded ? `diagnostics:\n${bounded}` : "diagnostics: (empty)",
   ].join("\n\n");
+}
+
+function appendRecoverableDirtyWorktreeNote(job: Job, reason: string): string {
+  const note = recoverableDirtyWorktreeNote(job);
+  return note ? `${reason}\n${note}` : reason;
 }
 
 const DEFAULT_NO_PROGRESS_TURNS = 3;
@@ -649,6 +654,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         } else {
           reason = `${role} turn failed.`;
         }
+        reason = appendRecoverableDirtyWorktreeNote(job, reason);
         store.setJobStatus(job.id, "failed");
         createMsg({
           job_id: job.id,
@@ -680,7 +686,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const failures = incrementFailure(job.id, role);
         const threshold = maxWorkerFailures();
         if (failures >= threshold) {
-          const reason = `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
+          const reason = appendRecoverableDirtyWorktreeNote(
+            job,
+            `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+          );
           store.setJobStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
@@ -710,7 +719,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         loopEscalationCounts.set(job.id, escalations);
         const maxLoop = maxLoopEscalations();
         if (escalations >= maxLoop) {
-          const reason = `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`;
+          const reason = appendRecoverableDirtyWorktreeNote(
+            job,
+            `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`,
+          );
           store.setJobStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
@@ -746,25 +758,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       .catch((e) => {
         const message = (e as Error).message;
         if (role === SUPERVISOR) {
+          const reason = appendRecoverableDirtyWorktreeNote(job, message);
           store.setJobStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
             from_role: "daemon",
             to_role: "user",
             kind: "failure",
-            body: message,
+            body: reason,
           });
           hook("on_job_failed", {
             event: "job_failed",
             job_id: job.id,
             goal: job.goal,
-            reason: message,
+            reason,
           });
         } else {
           const failures = incrementFailure(job.id, role);
           const threshold = maxWorkerFailures();
           if (failures >= threshold) {
-            const reason = `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`;
+            const reason = appendRecoverableDirtyWorktreeNote(
+              job,
+              `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+            );
             store.setJobStatus(job.id, "failed");
             createMsg({
               job_id: job.id,
@@ -1116,19 +1132,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "job.fail": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        const reason = appendRecoverableDirtyWorktreeNote(job, req.params.reason);
         store.setJobStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,
           from_role: SUPERVISOR,
           to_role: "user",
           kind: "failure",
-          body: req.params.reason,
+          body: reason,
         });
         hook("on_job_failed", {
           event: "job_failed",
           job_id: job.id,
           goal: job.goal,
-          reason: req.params.reason,
+          reason,
         });
         return ok(req.id, { failed: true });
       }

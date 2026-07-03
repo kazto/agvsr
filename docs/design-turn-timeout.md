@@ -134,6 +134,9 @@ roles:
     hard_timeout_ms: 5400000 # 絶対上限 90 分
 ```
 
+`team.yaml` での `hard_timeout_ms` / `idle_timeout_ms` はこの役割だけに効く上書きで、長い実装
+ターンと短い監督ターンを分けたいときに使う。
+
 ### 優先順位（daemon で解決）
 
 `dispatchRole` は `roleConfig`（`daemon.ts:386-387`）を持つので、ここで実効値を 1 箇所で
