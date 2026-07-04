@@ -38,6 +38,26 @@ function resolveTeam(file?: string): TeamConfig | null {
   return loadTeam(candidate);
 }
 
+/**
+ * Per-job team resolution (D-multiproject): one daemon serves every project
+ * on the machine, but each job's target repo may carry its own `team.yaml`
+ * (written by `agvsr init`). If it does, that project's roles/adapters/models
+ * are used for this job — captured once into `jobTeamSnapshots` at creation,
+ * the same freeze-on-create mechanism D17 already uses so `agvsr reload`
+ * doesn't change an in-flight job's config. Falls back to null (caller uses
+ * the daemon's global default team) when the job's cwd has no team.yaml of
+ * its own. Does NOT consult `$AGVSR_TEAM` — that variable is a daemon-startup
+ * default, not something that can vary per concurrently-running job.
+ * Throws TeamConfigError if the job's own team.yaml exists but is invalid,
+ * so a typo in one project's config never silently falls back to running
+ * that job under a different project's team.
+ */
+function resolveJobTeam(jobCwd: string): TeamConfig | null {
+  const candidate = join(jobCwd, "team.yaml");
+  if (!existsSync(candidate)) return null;
+  return loadTeam(candidate);
+}
+
 function effectiveTeamFile(file?: string): string {
   return file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
 }
@@ -920,8 +940,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         return ok(req.id, { pong: true, version: VERSION });
 
       case "job.create": {
-        const noTeam = requireTeam(req.id);
-        if (noTeam) return noTeam;
         const { goal, cwd, id: customId } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
         if (customId !== undefined) {
@@ -938,6 +956,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const normalizedCwd = normalizeCwd(cwd);
         const invalidCwd = cwdError(normalizedCwd);
         if (invalidCwd) return err(req.id, "bad_request", invalidCwd);
+
+        // Prefer this job's own project team.yaml (if its target repo has one)
+        // over the daemon's global default, so one long-running daemon serves
+        // multiple projects with different roles/adapters/models correctly.
+        let jobTeam: TeamConfig;
+        try {
+          const perJobTeam = resolveJobTeam(normalizedCwd);
+          if (perJobTeam) {
+            jobTeam = perJobTeam;
+          } else {
+            const noTeam = requireTeam(req.id);
+            if (noTeam) return noTeam;
+            jobTeam = team!;
+          }
+        } catch (e) {
+          return err(
+            req.id,
+            "invalid_team",
+            `invalid team.yaml in ${normalizedCwd}: ${(e as Error).message}`,
+          );
+        }
+
         const job = store.createJob(goal.trim(), normalizedCwd, customId);
 
         // Provision git worktree for isolation. Fails the job immediately if the
@@ -961,7 +1001,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         }
 
         debug("job created", { job: job.id, goal: job.goal, worktree: job.worktree });
-        if (team) jobTeamSnapshots.set(job.id, team);
+        jobTeamSnapshots.set(job.id, jobTeam);
         createMsg({
           job_id: job.id,
           from_role: "user",

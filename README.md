@@ -133,8 +133,13 @@ Per-role fields:
 | `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default    |
 | `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default |
 
-The team must define a `supervisor` role. The team file is resolved as: explicit
-`--team` flag → `$AGVSR_TEAM` → `./team.yaml`.
+The team must define a `supervisor` role. The daemon's default team file is
+resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml` (relative
+to wherever the daemon was started). One daemon serves every project on the
+machine, but each job resolves its own team from `<job-target-repo>/team.yaml`
+first if that repo has one, before falling back to the daemon's default — so
+a single always-running daemon correctly serves multiple projects with
+different roles/adapters/models, as long as each has run `agvsr init`.
 
 ### `agvsr init` options
 
@@ -176,10 +181,10 @@ mechanism; invoke the skill there with `$agvsr` or browse via `/skills`
 instead. Use `--skill-target` to add Gemini or Codex targets, or `--no-skill`
 to skip installation entirely.
 
-The `/agvsr` command only bootstraps the daemon for the current project (runs
-`agvsr doctor`, starts it with `--team ./team.yaml` if needed, and warns if
-the daemon is already serving a different project's config) — actual job
-submission, approvals, and monitoring are covered by the skill.
+The `/agvsr` command only bootstraps the daemon (confirms this project has
+its own `team.yaml`, runs `agvsr doctor`, and starts the daemon if it isn't
+running yet) — actual job submission, approvals, and monitoring are covered
+by the skill.
 
 ## Command reference
 

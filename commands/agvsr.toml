@@ -1,27 +1,27 @@
-description = "Ensure the agvsr daemon is running for this project with the right team.yaml, then hand off to the agvsr skill for submitting and managing jobs."
+description = "Ensure the agvsr daemon is running, then hand off to the agvsr skill for submitting and managing jobs in this project."
 prompt = """
-Bootstrap `agvsr` for this project. This command only gets the daemon up and
-correctly configured — once it reports ready, use the `agvsr` skill for
-submitting jobs, approvals, monitoring, and cleanup.
+Bootstrap `agvsr` for this project. This command only gets the daemon up —
+once it reports ready, use the `agvsr` skill for submitting jobs, approvals,
+monitoring, and cleanup.
 
-1. Run `agvsr ping`.
-   - If it responds `pong`, the daemon is already running. Run `agvsr team`
-     and compare its roles/adapters/models against this project's
-     `./team.yaml`. agvsr runs one global daemon per machine and only reads
-     `team.yaml` once at start (or on `agvsr reload`), so a mismatch almost
-     always means the daemon is currently serving a *different* project. Tell
-     the user plainly and ask whether to run `agvsr reload --team ./team.yaml`
-     (this repoints every project sharing this daemon at this config) or leave
-     it alone if that's intentional.
-   - If `agvsr team` matches `./team.yaml`, or the daemon isn't running yet,
-     continue.
-2. If the daemon is not running:
-   - Confirm `./team.yaml` exists. If it doesn't, tell the user to run
-     `agvsr init` first — do not generate it yourself — and stop here.
-   - Run `agvsr doctor`. If it reports failures, show them to the user and
-     stop; do not start the daemon on top of a broken adapter/auth setup.
-   - Run `agvsr daemon start --team ./team.yaml`. Always pass `--team`
-     explicitly rather than relying on cwd-implicit resolution.
-3. Once the daemon is confirmed running with this project's config, tell the
-   user it's ready.
+Background: agvsr runs one daemon per machine, but `job.create` resolves each
+job's own `team.yaml` from its target repo first (if that repo has one)
+before falling back to whatever `team.yaml` the daemon was started with. So
+an already-running daemon almost always works correctly for a new project
+too, as long as that project has its own `team.yaml`.
+
+1. Confirm `./team.yaml` exists for this project. If it doesn't, tell the
+   user to run `agvsr init` first — do not generate it yourself — and stop
+   here. Without a project-local `team.yaml`, jobs submitted from this
+   directory would silently fall back to the daemon's global default config,
+   which may belong to a different project entirely.
+2. Run `agvsr ping`.
+   - If it responds `pong`, the daemon is already running — skip to step 4.
+   - Otherwise continue to step 3.
+3. Run `agvsr doctor --team ./team.yaml`. If it reports failures, show them
+   to the user and stop; do not start the daemon on top of a broken
+   adapter/auth setup. Otherwise run `agvsr daemon start --team ./team.yaml`
+   (this only needs to happen once per machine — later projects with their
+   own `team.yaml` don't need to restart the daemon).
+4. Tell the user it's ready.
 """
