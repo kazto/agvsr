@@ -3,9 +3,9 @@
  * `agvsr` — the thin CLI client (D6/D15). Connects to the daemon over local IPC
  * and issues one request. `agvsr daemon` runs the daemon itself in the foreground.
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
@@ -676,6 +676,8 @@ Usage: agvsr web [options]
           output: { type: "string", short: "o" },
           stdout: { type: "boolean" },
           force: { type: "boolean", short: "f" },
+          "no-skill": { type: "boolean" },
+          "skill-target": { type: "string", multiple: true },
           roles: { type: "string" },
           adapter: { type: "string" },
           model: { type: "string" },
@@ -695,6 +697,9 @@ Usage: agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
+      --no-skill        Skip bundled skill installation
+      --skill-target    Skill target(s): claude, gemini, codex
+                        Repeatable or comma-separated. Default: claude
       --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
       --model <m>       Default model for every role
@@ -705,8 +710,16 @@ Usage: agvsr init [options]
         return;
       }
 
-      const { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, BUNDLED_CHARTER_ROLES, InitError } =
-        await import("../config/init.ts");
+      const {
+        buildTeamYaml,
+        resolveRoleSpecs,
+        DEFAULT_ROLES,
+        BUNDLED_CHARTER_ROLES,
+        InitError,
+        parseSkillTargets,
+        resolveSkillTargetPath,
+        readBundledSkillSource,
+      } = await import("../config/init.ts");
 
       const VALID_ADAPTERS = ["claude-code", "codex", "agy"] as const;
 
@@ -781,13 +794,43 @@ Usage: agvsr init [options]
       }
 
       const outputPath = resolve(initOpts.output ?? "team.yaml");
+      const installSkills = !initOpts["no-skill"];
+      const rawSkillTargets = initOpts["skill-target"];
+      const skillTargets = installSkills
+        ? parseSkillTargets(
+            rawSkillTargets === undefined
+              ? undefined
+              : Array.isArray(rawSkillTargets)
+                ? rawSkillTargets
+                : [rawSkillTargets],
+          )
+        : [];
+      const targetDir = dirname(outputPath);
+      const skillContents = installSkills ? readBundledSkillSource() : "";
+      const skillDestinations = skillTargets.map((target) => ({
+        target,
+        path: resolveSkillTargetPath(target, targetDir),
+      }));
+      const intendedPaths = [outputPath, ...skillDestinations.map((dest) => dest.path)];
 
-      if (!initOpts.force && existsSync(outputPath)) {
-        console.error(`${outputPath} already exists; pass --force to overwrite`);
-        process.exit(1);
+      if (!initOpts.force) {
+        const existing = intendedPaths.find((path) => existsSync(path));
+        if (existing) {
+          console.error(`${existing} already exists; pass --force to overwrite`);
+          process.exit(1);
+        }
       }
 
+      mkdirSync(dirname(outputPath), { recursive: true });
       writeFileSync(outputPath, yaml, "utf8");
+
+      if (installSkills) {
+        for (const { path } of skillDestinations) {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, skillContents, "utf8");
+        }
+      }
+
       console.log(`wrote ${outputPath}`);
       return;
     }

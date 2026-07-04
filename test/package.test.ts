@@ -38,7 +38,14 @@ describe("package surface", () => {
     }>;
     if (!pack) throw new Error("npm pack did not return any metadata");
     const files = new Set(pack.files.map((f) => f.path));
-    const allowedPrefixes = ["package.json", "README.md", "src/", "charters/", "examples/"];
+    const allowedPrefixes = [
+      "package.json",
+      "README.md",
+      "src/",
+      "charters/",
+      "examples/",
+      "skills/",
+    ];
     const isAllowed = (path: string): boolean =>
       allowedPrefixes.some((prefix) => path === prefix || path.startsWith(prefix));
 
@@ -49,6 +56,7 @@ describe("package surface", () => {
     expect(files.has("src/cli/agvsr.ts")).toBe(true);
     expect(files.has("charters/scaffold.md")).toBe(true);
     expect(files.has("examples/team.yaml")).toBe(true);
+    expect(files.has("skills/agvsr/SKILL.md")).toBe(true);
     expect(files.has("README.md")).toBe(true);
     expect([...files].some((path) => path.startsWith("test/"))).toBe(false);
     expect([...files].some((path) => path.startsWith("docs/") && path !== "README.md")).toBe(false);

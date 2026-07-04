@@ -123,15 +123,15 @@ roles:
 
 Per-role fields:
 
-| Field            | Description                                                       |
-| ---------------- | ----------------------------------------------------------------- |
-| `adapter`        | One of `claude-code`, `codex`, `agy` (required)                   |
-| `model`          | Raw per-CLI model string (required)                              |
-| `charter`        | Replace the bundled default charter wholesale                    |
-| `charter_append` | Append project rules to the bundled default charter             |
-| `instances`      | Number of instances of this role (default `1`)                  |
-| `hard_timeout_ms`| Absolute per-turn time limit, overriding the env/default        |
-| `idle_timeout_ms`| No-progress per-turn time limit, overriding the env/default     |
+| Field             | Description                                                 |
+| ----------------- | ----------------------------------------------------------- |
+| `adapter`         | One of `claude-code`, `codex`, `agy` (required)             |
+| `model`           | Raw per-CLI model string (required)                         |
+| `charter`         | Replace the bundled default charter wholesale               |
+| `charter_append`  | Append project rules to the bundled default charter         |
+| `instances`       | Number of instances of this role (default `1`)              |
+| `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default    |
+| `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default |
 
 The team must define a `supervisor` role. The team file is resolved as: explicit
 `--team` flag → `$AGVSR_TEAM` → `./team.yaml`.
@@ -144,6 +144,9 @@ agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
+      --no-skill        Skip bundled skill installation
+      --skill-target    Skill target(s): claude, gemini, codex
+                        Repeatable or comma-separated. Default: claude
       --roles <list>    Comma-separated role names
                         (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
@@ -162,26 +165,30 @@ agvsr init \
   --role qa:agy:gemini-3-pro
 ```
 
+By default, `agvsr init` also installs the bundled `agvsr` skill for Claude
+under the generated project directory. Use `--skill-target` to add Gemini or
+Codex targets, or `--no-skill` to skip skill installation entirely.
+
 ## Command reference
 
-| Command | Description |
-| ------- | ----------- |
-| `agvsr init [options]` | Generate a `team.yaml` |
-| `agvsr daemon [--team F]` | Run the daemon in the foreground |
-| `agvsr daemon start [--team F]` | Start the daemon in the background |
-| `agvsr daemon stop` | Stop the running daemon gracefully |
-| `agvsr daemon restart [--team F]` | Restart the daemon (optionally with a new team file) |
-| `agvsr ping` | Check the daemon is up |
-| `agvsr job "<goal>" [--cwd D] [--id ID]` | Submit a job (`D` is the target repo, default: cwd) |
-| `agvsr status [job-id]` | List jobs, or show one job with recent audit state |
-| `agvsr logs <job-id> [-f]` | Show audit messages for a job (`-f` to follow) |
-| `agvsr watch [--all] [--poll N]` | Stream role messages across running jobs in real time |
-| `agvsr tell <job-id> "<message>"` | Send a message to a running job's supervisor |
-| `agvsr stop <job-id>` | Stop a running job gracefully (marks it failed) |
-| `agvsr kill <job-id>` | Kill a running job immediately (marks it interrupted) |
-| `agvsr reload` | Reload `team.yaml` without restarting the daemon |
-| `agvsr team` | Show configured roles |
-| `agvsr doctor [--team F] [--json] [--probe]` | Check adapter CLIs and auth; exit 0 if all pass |
+| Command                                      | Description                                           |
+| -------------------------------------------- | ----------------------------------------------------- |
+| `agvsr init [options]`                       | Generate a `team.yaml`                                |
+| `agvsr daemon [--team F]`                    | Run the daemon in the foreground                      |
+| `agvsr daemon start [--team F]`              | Start the daemon in the background                    |
+| `agvsr daemon stop`                          | Stop the running daemon gracefully                    |
+| `agvsr daemon restart [--team F]`            | Restart the daemon (optionally with a new team file)  |
+| `agvsr ping`                                 | Check the daemon is up                                |
+| `agvsr job "<goal>" [--cwd D] [--id ID]`     | Submit a job (`D` is the target repo, default: cwd)   |
+| `agvsr status [job-id]`                      | List jobs, or show one job with recent audit state    |
+| `agvsr logs <job-id> [-f]`                   | Show audit messages for a job (`-f` to follow)        |
+| `agvsr watch [--all] [--poll N]`             | Stream role messages across running jobs in real time |
+| `agvsr tell <job-id> "<message>"`            | Send a message to a running job's supervisor          |
+| `agvsr stop <job-id>`                        | Stop a running job gracefully (marks it failed)       |
+| `agvsr kill <job-id>`                        | Kill a running job immediately (marks it interrupted) |
+| `agvsr reload`                               | Reload `team.yaml` without restarting the daemon      |
+| `agvsr team`                                 | Show configured roles                                 |
+| `agvsr doctor [--team F] [--json] [--probe]` | Check adapter CLIs and auth; exit 0 if all pass       |
 
 ### Typical workflow
 
@@ -198,18 +205,18 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 
 ## Environment variables
 
-| Variable | Purpose |
-| -------- | ------- |
-| `AGVSR_TEAM` | Default team file path |
-| `AGVSR_STORE` | SQLite store path (default `~/.config/agvsr/inbox.sqlite`) |
-| `AGVSR_SOCK` | IPC endpoint (unix socket / named pipe) override |
-| `AGVSR_DESIGN_GATE` | Design-approval gate before implementation; on by default, disable with `0`/`off`/`false`/`no` |
-| `AGVSR_STALL_TIMEOUT_MS` | Idle-watchdog threshold for marking a job stalled |
-| `AGVSR_NO_PROGRESS_TURNS` | No-progress turn limit before intervention |
-| `AGVSR_LOOP_REPEAT_TURNS` | Repeated-turn detection threshold |
-| `AGVSR_MAX_LOOP_ESCALATIONS` | Max loop escalations before giving up |
-| `AGVSR_MAX_WORKER_FAILURES` | Max worker failures tolerated |
-| `AGVSR_DEBUG` | Enable verbose daemon debug logging |
+| Variable                     | Purpose                                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `AGVSR_TEAM`                 | Default team file path                                                                         |
+| `AGVSR_STORE`                | SQLite store path (default `~/.config/agvsr/inbox.sqlite`)                                     |
+| `AGVSR_SOCK`                 | IPC endpoint (unix socket / named pipe) override                                               |
+| `AGVSR_DESIGN_GATE`          | Design-approval gate before implementation; on by default, disable with `0`/`off`/`false`/`no` |
+| `AGVSR_STALL_TIMEOUT_MS`     | Idle-watchdog threshold for marking a job stalled                                              |
+| `AGVSR_NO_PROGRESS_TURNS`    | No-progress turn limit before intervention                                                     |
+| `AGVSR_LOOP_REPEAT_TURNS`    | Repeated-turn detection threshold                                                              |
+| `AGVSR_MAX_LOOP_ESCALATIONS` | Max loop escalations before giving up                                                          |
+| `AGVSR_MAX_WORKER_FAILURES`  | Max worker failures tolerated                                                                  |
+| `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |
 
 ## Files and locations
 
@@ -228,8 +235,8 @@ Paths honor `XDG_CONFIG_HOME` / `XDG_RUNTIME_DIR` on POSIX and `%APPDATA%` on Wi
 - Run directly: `bunx agvsr --help`
 - Run after a local install: `npm exec agvsr -- --help`
 
-When building a release tarball, verify `src/`, `charters/`, `examples/`, and
-`README.md` are included:
+When building a release tarball, verify `src/`, `charters/`, `examples/`,
+`skills/`, and `README.md` are included:
 
 ```sh
 npm pack --dry-run --json
