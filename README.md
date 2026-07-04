@@ -166,8 +166,12 @@ agvsr init \
 ```
 
 By default, `agvsr init` also installs the bundled `agvsr` skill for Claude
-under the generated project directory. Use `--skill-target` to add Gemini or
-Codex targets, or `--no-skill` to skip skill installation entirely.
+under the generated project directory. `gemini` installs under the generated
+project directory as well. `codex` installs globally to
+`$CODEX_HOME/skills/agvsr/SKILL.md` or `~/.codex/skills/agvsr/SKILL.md` when
+`CODEX_HOME` is unset, and it is only written when explicitly selected. Use
+`--skill-target` to add Gemini or Codex targets, or `--no-skill` to skip skill
+installation entirely.
 
 ## Command reference
 

@@ -699,7 +699,9 @@ Usage: agvsr init [options]
   -f, --force           Overwrite the output file if it already exists
       --no-skill        Skip bundled skill installation
       --skill-target    Skill target(s): claude, gemini, codex
-                        Repeatable or comma-separated. Default: claude
+                        Repeatable or comma-separated. Default: claude.
+                        Codex writes globally to $CODEX_HOME/skills/agvsr/SKILL.md
+                        or ~/.codex/skills/agvsr/SKILL.md when unset.
       --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
       --model <m>       Default model for every role
