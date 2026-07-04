@@ -175,24 +175,26 @@ installation entirely.
 
 ## Command reference
 
-| Command                                      | Description                                           |
-| -------------------------------------------- | ----------------------------------------------------- |
-| `agvsr init [options]`                       | Generate a `team.yaml`                                |
-| `agvsr daemon [--team F]`                    | Run the daemon in the foreground                      |
-| `agvsr daemon start [--team F]`              | Start the daemon in the background                    |
-| `agvsr daemon stop`                          | Stop the running daemon gracefully                    |
-| `agvsr daemon restart [--team F]`            | Restart the daemon (optionally with a new team file)  |
-| `agvsr ping`                                 | Check the daemon is up                                |
-| `agvsr job "<goal>" [--cwd D] [--id ID]`     | Submit a job (`D` is the target repo, default: cwd)   |
-| `agvsr status [job-id]`                      | List jobs, or show one job with recent audit state    |
-| `agvsr logs <job-id> [-f]`                   | Show audit messages for a job (`-f` to follow)        |
-| `agvsr watch [--all] [--poll N]`             | Stream role messages across running jobs in real time |
-| `agvsr tell <job-id> "<message>"`            | Send a message to a running job's supervisor          |
-| `agvsr stop <job-id>`                        | Stop a running job gracefully (marks it failed)       |
-| `agvsr kill <job-id>`                        | Kill a running job immediately (marks it interrupted) |
-| `agvsr reload`                               | Reload `team.yaml` without restarting the daemon      |
-| `agvsr team`                                 | Show configured roles                                 |
-| `agvsr doctor [--team F] [--json] [--probe]` | Check adapter CLIs and auth; exit 0 if all pass       |
+| Command                                                   | Description                                                      |
+| --------------------------------------------------------- | ---------------------------------------------------------------- |
+| `agvsr init [options]`                                    | Generate a `team.yaml`                                           |
+| `agvsr daemon [--team F]`                                 | Run the daemon in the foreground                                 |
+| `agvsr daemon start [--team F]`                           | Start the daemon in the background                               |
+| `agvsr daemon stop`                                       | Stop the running daemon gracefully                               |
+| `agvsr daemon restart [--team F]`                         | Restart the daemon (optionally with a new team file)             |
+| `agvsr ping`                                              | Check the daemon is up                                           |
+| `agvsr job "<goal>" [--cwd D] [--id ID]`                  | Submit a job (`D` is the target repo, default: cwd)              |
+| `agvsr status [job-id]`                                   | List jobs, or show one job with recent audit state               |
+| `agvsr logs <job-id> [-f]`                                | Show audit messages for a job (`-f` to follow)                   |
+| `agvsr watch [--all] [--poll N]`                          | Stream role messages across running jobs in real time            |
+| `agvsr tell <job-id> "<message>"`                         | Send a message to a running job's supervisor                     |
+| `agvsr stop <job-id>`                                     | Stop a running job gracefully (marks it failed)                  |
+| `agvsr kill <job-id>`                                     | Kill a running job immediately (marks it interrupted)            |
+| `agvsr wait <job-id>... [--poll-sec N] [--timeout-sec N]` | Block until each job needs approval or reaches a terminal status |
+| `agvsr reload`                                            | Reload `team.yaml` without restarting the daemon                 |
+| `agvsr team`                                              | Show configured roles                                            |
+| `agvsr cleanup [--apply]`                                 | Report (or remove) job worktrees/branches safe to delete         |
+| `agvsr doctor [--team F] [--json] [--probe]`              | Check adapter CLIs and auth; exit 0 if all pass                  |
 
 ### Typical workflow
 

@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
 import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
@@ -37,8 +38,11 @@ Usage:
   agvsr tell <job-id> "<message>"   Send a message to the supervisor of a running job
   agvsr stop <job-id>               Stop a running job gracefully (mark failed)
   agvsr kill <job-id>               Kill a running job immediately (mark interrupted)
+  agvsr wait <job-id>... [--poll-sec N] [--timeout-sec N]
+                                    Block until each job needs approval or finishes
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
+  agvsr cleanup [--apply]           Report (or remove) job worktrees/branches safe to delete
   agvsr web [--host H] [--port N] [--socket P]  Run the local web gateway
   agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
 `;
@@ -128,6 +132,169 @@ export function formatWatchHeartbeatLine(
   shortId: (id: string) => string,
 ): string {
   return `~ heartbeat [${shortId(job.id)}] ${job.status}${formatRuntime(job, runtime)}`;
+}
+
+// `agvsr wait` — the design-approval gate, the implementation-crash decision
+// gate, and the commit-gate all converge on the same shape: daemon/supervisor
+// addressing the human directly (to_role "user"), expecting a reply via
+// `agvsr tell`. Used to detect "this job needs a human" without parsing
+// human-readable `agvsr status` text.
+function isApprovalRequest(m: Message): boolean {
+  return m.to_role === "user" && (m.kind === "escalation" || m.kind === "message");
+}
+
+function truncateOneLine(s: string, max = 240): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+async function waitPollOnce(
+  c: Client,
+  jobId: string,
+): Promise<{ job: Job; lastMessage: Message | null }> {
+  const jobRes = await c.request<{ job: Job; runtime: JobRuntime }>("job.get", { id: jobId });
+  if (!jobRes.ok) throw new Error(`job.get ${jobId}: ${jobRes.error.message}`);
+  const msgRes = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+  if (!msgRes.ok) throw new Error(`msg.list ${jobId}: ${msgRes.error.message}`);
+  const messages = msgRes.result.messages;
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1]! : null;
+  return { job: jobRes.result.job, lastMessage };
+}
+
+// `agvsr cleanup` — cross-reference the daemon's own `job.list` records
+// (exact `branch`/`worktree` fields recorded at job creation, see
+// `Store.createJob`) against `git worktree list --porcelain`'s own (path,
+// branch) pairs, matched by exact string equality. Never re-derive the
+// branch-naming convention by hand: doing so once (matching an 8-char branch
+// prefix against job ids) mis-classified nearly every real job as orphaned.
+interface WorktreeEntry {
+  path: string;
+  branch: string | null; // null for detached HEAD worktrees
+}
+
+type CleanupClassification = "KEEP" | "SAFE_TO_REMOVE" | "NEEDS_REVIEW";
+
+interface WorktreeAssessment {
+  entry: WorktreeEntry;
+  job: Job | null;
+  dirty: boolean;
+  aheadOfMain: number | null; // null if not resolvable (e.g. detached/no branch)
+  classification: CleanupClassification;
+  reason: string;
+}
+
+function git(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return { ok: r.status === 0, stdout: (r.stdout ?? "").trim(), stderr: (r.stderr ?? "").trim() };
+}
+
+function parseWorktreePorcelain(output: string): WorktreeEntry[] {
+  const entries: WorktreeEntry[] = [];
+  let current: Partial<WorktreeEntry> | null = null;
+  for (const line of output.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current?.path) entries.push({ path: current.path, branch: current.branch ?? null });
+      current = { path: line.slice("worktree ".length), branch: null };
+    } else if (line.startsWith("branch ") && current) {
+      current.branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    } else if (line === "" && current?.path) {
+      entries.push({ path: current.path, branch: current.branch ?? null });
+      current = null;
+    }
+  }
+  if (current?.path) entries.push({ path: current.path, branch: current.branch ?? null });
+  return entries;
+}
+
+function assessWorktree(
+  entry: WorktreeEntry,
+  job: Job | null,
+  mainWorktreePath: string,
+): WorktreeAssessment {
+  if (job?.status === "running") {
+    return {
+      entry,
+      job,
+      dirty: false,
+      aheadOfMain: null,
+      classification: "KEEP",
+      reason: "job is running",
+    };
+  }
+
+  const status = git(entry.path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
+  if (!status.ok) {
+    return {
+      entry,
+      job,
+      dirty: true,
+      aheadOfMain: null,
+      classification: "NEEDS_REVIEW",
+      reason: `git status failed: ${status.stderr || "unknown error"}`,
+    };
+  }
+  const dirty = status.stdout.length > 0;
+
+  let aheadOfMain: number | null = null;
+  if (entry.branch) {
+    const count = git(mainWorktreePath, ["rev-list", "--count", `main..${entry.branch}`]);
+    aheadOfMain = count.ok ? Number(count.stdout) : null;
+  }
+
+  if (dirty) {
+    return {
+      entry,
+      job,
+      dirty,
+      aheadOfMain,
+      classification: "NEEDS_REVIEW",
+      reason: "uncommitted changes in the worktree",
+    };
+  }
+  if (aheadOfMain === null) {
+    return {
+      entry,
+      job,
+      dirty,
+      aheadOfMain,
+      classification: "NEEDS_REVIEW",
+      reason: "could not determine commits-ahead-of-main (detached HEAD or missing branch)",
+    };
+  }
+  if (aheadOfMain > 0) {
+    return {
+      entry,
+      job,
+      dirty,
+      aheadOfMain,
+      classification: "NEEDS_REVIEW",
+      reason: `${aheadOfMain} commit(s) not yet merged into main`,
+    };
+  }
+  return {
+    entry,
+    job,
+    dirty,
+    aheadOfMain,
+    classification: "SAFE_TO_REMOVE",
+    reason: job
+      ? `job ${job.status}, clean, fully merged`
+      : "orphaned (no job record), clean, fully merged",
+  };
+}
+
+function formatWorktreeLine(a: WorktreeAssessment): string {
+  const jobCol = a.job ? `${a.job.id}\t${a.job.status}` : "-\tORPHAN";
+  const aheadCol = a.aheadOfMain === null ? "-" : String(a.aheadOfMain);
+  return [
+    a.entry.path,
+    a.classification,
+    jobCol,
+    `dirty:${a.dirty ? "yes" : "no"}`,
+    `ahead:${aheadCol}`,
+    a.entry.branch ?? "(detached)",
+    a.reason,
+  ].join("\t");
 }
 
 function unwrap<T>(res: Response<T>): T {
@@ -607,6 +774,61 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
 
+    case "wait": {
+      const { values: waitOpts, positionals: jobIds } = parseArgs({
+        args: rest,
+        options: {
+          "poll-sec": { type: "string", default: "30" },
+          "timeout-sec": { type: "string", default: "3600" },
+        },
+        allowPositionals: true,
+      });
+      if (jobIds.length === 0) {
+        console.error("usage: agvsr wait <job-id> [job-id ...] [--poll-sec N] [--timeout-sec N]");
+        process.exit(1);
+      }
+      const pollMs = Math.max(1000, Number(waitOpts["poll-sec"]) * 1000);
+      const deadline = Date.now() + Math.max(1000, Number(waitOpts["timeout-sec"]) * 1000);
+
+      await withClient(async (c) => {
+        const pending = new Set(jobIds);
+        const seenMessageIds = new Set<string>();
+
+        while (pending.size > 0 && Date.now() < deadline) {
+          const settledThisRound: string[] = [];
+          for (const jobId of pending) {
+            const { job, lastMessage } = await waitPollOnce(c, jobId);
+
+            if (job.status !== "running") {
+              settledThisRound.push(jobId);
+              console.log(`${jobId}\tTERMINAL\t${job.status}`);
+              continue;
+            }
+
+            if (lastMessage && !seenMessageIds.has(lastMessage.id)) {
+              seenMessageIds.add(lastMessage.id);
+              if (isApprovalRequest(lastMessage)) {
+                settledThisRound.push(jobId);
+                console.log(
+                  `${jobId}\tAPPROVAL_REQUEST\t${lastMessage.from_role} -> ${lastMessage.to_role}\t${truncateOneLine(lastMessage.body)}`,
+                );
+              }
+            }
+          }
+          for (const jobId of settledThisRound) pending.delete(jobId);
+          if (pending.size > 0) await Bun.sleep(pollMs);
+        }
+
+        if (pending.size > 0) {
+          for (const jobId of pending) {
+            console.log(`${jobId}\tTIMEOUT\tstill running, no approval request seen`);
+          }
+          process.exit(1);
+        }
+      });
+      return;
+    }
+
     case "reload":
       await withClient(async (c) => {
         const { roles } = unwrap(await c.request<{ roles: RoleSummary[] }>("reload"));
@@ -625,6 +847,86 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "cleanup": {
+      const { values: cleanupOpts } = parseArgs({
+        args: rest,
+        options: { apply: { type: "boolean", default: false } },
+      });
+
+      const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+      if (!repoRoot.ok) {
+        console.error("not inside a git repository");
+        process.exit(2);
+      }
+      const mainWorktreePath = repoRoot.stdout;
+
+      const listRes = git(mainWorktreePath, ["worktree", "list", "--porcelain"]);
+      if (!listRes.ok) {
+        console.error(`git worktree list failed: ${listRes.stderr}`);
+        process.exit(2);
+      }
+      const entries = parseWorktreePorcelain(listRes.stdout).filter(
+        (e) => e.path !== mainWorktreePath,
+      );
+
+      if (entries.length === 0) {
+        console.log("no job worktrees found (only the main checkout).");
+        return;
+      }
+
+      await withClient(async (c) => {
+        const { jobs } = unwrap(await c.request<{ jobs: Job[] }>("job.list"));
+        const jobByWorktree = new Map(
+          jobs.filter((j) => j.worktree).map((j) => [j.worktree as string, j]),
+        );
+        const jobByBranch = new Map(
+          jobs.filter((j) => j.branch).map((j) => [j.branch as string, j]),
+        );
+
+        const assessments = entries.map((entry) => {
+          const job =
+            jobByWorktree.get(entry.path) ??
+            (entry.branch ? (jobByBranch.get(entry.branch) ?? null) : null);
+          return assessWorktree(entry, job, mainWorktreePath);
+        });
+
+        for (const a of assessments) console.log(formatWorktreeLine(a));
+
+        const counts = {
+          KEEP: 0,
+          SAFE_TO_REMOVE: 0,
+          NEEDS_REVIEW: 0,
+        } satisfies Record<CleanupClassification, number>;
+        for (const a of assessments) counts[a.classification]++;
+        console.log(
+          `\n${assessments.length} worktree(s): ${counts.KEEP} keep, ${counts.SAFE_TO_REMOVE} safe-to-remove, ${counts.NEEDS_REVIEW} need review`,
+        );
+
+        if (!cleanupOpts.apply) {
+          if (counts.SAFE_TO_REMOVE > 0) {
+            console.log("(dry run — pass --apply to remove the safe-to-remove entries)");
+          }
+          return;
+        }
+
+        for (const a of assessments) {
+          if (a.classification !== "SAFE_TO_REMOVE") continue;
+          if (a.entry.path === mainWorktreePath) continue; // belt-and-suspenders
+          const removed = git(mainWorktreePath, ["worktree", "remove", "--force", a.entry.path]);
+          if (!removed.ok) {
+            console.error(`failed to remove worktree ${a.entry.path}: ${removed.stderr}`);
+            continue;
+          }
+          if (a.entry.branch) git(mainWorktreePath, ["branch", "-D", a.entry.branch]);
+          console.log(
+            `removed ${a.entry.path}${a.entry.branch ? ` (branch ${a.entry.branch})` : ""}`,
+          );
+        }
+        git(mainWorktreePath, ["worktree", "prune"]);
+      });
+      return;
+    }
 
     case "web": {
       const { values } = parseArgs({

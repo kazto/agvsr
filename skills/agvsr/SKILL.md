@@ -93,12 +93,12 @@ Don't `sleep`-poll in the foreground for a job that can run tens of minutes,
 and don't hand-roll a bash loop that greps `agvsr status` text each time — it's
 slow to write correctly, fragile (depends on human-readable wording), and not
 portable (agvsr targets Windows/macOS/Linux, and bash/awk/grep aren't a given
-on Windows). Use the bundled script instead, which talks to the daemon over
-the real IPC protocol (`job.get` + `msg.list`, the same calls the CLI itself
-makes) and exits the moment something needs attention:
+on Windows). Use the built-in subcommand instead, which talks to the daemon
+over the real IPC protocol (`job.get` + `msg.list`, the same calls `status`
+itself makes) and exits the moment something needs attention:
 
 ```bash
-bun run scripts/watch-jobs.ts <job-id> [job-id ...] [--poll-sec N] [--timeout-sec N]
+agvsr wait <job-id> [job-id ...] [--poll-sec N] [--timeout-sec N]
 ```
 
 Run it with the Bash tool's `run_in_background: true`. It prints one
@@ -192,13 +192,13 @@ Don't hand-derive which worktree belongs to which job by re-parsing the
 branch-naming convention (`agvsr/<id-or-id.slice(0,8)>`, from
 `Store.createJob`) — this was tried by hand once and produced a wrong
 classification (an 8-char prefix mismatch marked nearly every real job as
-orphaned). Use the bundled script instead, which cross-references the
+orphaned). Use the built-in subcommand instead, which cross-references the
 daemon's own `job.list` records (exact `branch`/`worktree` fields) against
 `git worktree list --porcelain`'s own pairs by exact string match:
 
 ```bash
-bun run scripts/cleanup-jobs.ts            # report only, no changes
-bun run scripts/cleanup-jobs.ts --apply    # remove the safe entries
+agvsr cleanup            # report only, no changes
+agvsr cleanup --apply    # remove the safe entries
 ```
 
 It classifies every non-main worktree as `KEEP` (job still `running` — never
