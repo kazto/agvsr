@@ -6,7 +6,7 @@ const ROOT = join(import.meta.dir, "..");
 
 describe("package surface", () => {
   it("exports a stable public entrypoint", () => {
-    expect(VERSION).toBe("0.0.0");
+    expect(VERSION).toBe("1.0.0");
   });
 
   it("exposes only the intended runtime API names", async () => {

@@ -15,6 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { Client } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
+import { VERSION } from "../version.ts";
 import type { Job, Message, Request } from "../protocol.ts";
 
 const role = process.env.AGVSR_ROLE ?? "unknown";
@@ -44,7 +45,7 @@ async function relayGet<T>(method: Request["method"], params: unknown): Promise<
   return res.result;
 }
 
-const server = new McpServer({ name: "agvsr", version: "0.0.0" });
+const server = new McpServer({ name: "agvsr", version: VERSION });
 
 server.registerTool(
   "agvsr_send",
