@@ -7,6 +7,8 @@ import { loadTeam, parseTeam } from "../src/config/team.ts";
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "src/cli/agvsr.ts");
 const BUNDLED_SKILL = join(ROOT, "skills/agvsr/SKILL.md");
+const BUNDLED_COMMAND_CLAUDE = join(ROOT, "commands/agvsr.md");
+const BUNDLED_COMMAND_GEMINI = join(ROOT, "commands/agvsr.toml");
 
 function runInit(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
   const proc = Bun.spawnSync(["bun", SCRIPT, "init", ...args], {
@@ -24,6 +26,12 @@ function runInit(args: string[], opts: { cwd?: string; env?: Record<string, stri
 
 function skillPath(targetDir: string, target: "claude" | "gemini"): string {
   return join(targetDir, `.${target}`, "skills", "agvsr", "SKILL.md");
+}
+
+function commandPath(targetDir: string, target: "claude" | "gemini"): string {
+  return target === "claude"
+    ? join(targetDir, ".claude", "commands", "agvsr.md")
+    : join(targetDir, ".gemini", "commands", "agvsr.toml");
 }
 
 describe("agvsr init CLI", () => {
@@ -59,6 +67,11 @@ describe("agvsr init CLI", () => {
     const claudeSkill = skillPath(cwd, "claude");
     expect(existsSync(claudeSkill)).toBe(true);
     expect(readFileSync(claudeSkill, "utf8")).toBe(bundle);
+
+    const claudeCommand = commandPath(cwd, "claude");
+    expect(existsSync(claudeCommand)).toBe(true);
+    expect(readFileSync(claudeCommand, "utf8")).toBe(readFileSync(BUNDLED_COMMAND_CLAUDE, "utf8"));
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(false);
   });
 
   it("refuses to overwrite an existing target skill file without --force", () => {
@@ -75,6 +88,20 @@ describe("agvsr init CLI", () => {
     expect(readFileSync(claudeSkill, "utf8")).toBe("sentinel");
   });
 
+  it("refuses to overwrite an existing target command file without --force", () => {
+    const cwd = makeTmpDir();
+    const out = join(cwd, "team.yaml");
+    const claudeCommand = commandPath(cwd, "claude");
+    mkdirSync(join(cwd, ".claude", "commands"), { recursive: true });
+    writeFileSync(claudeCommand, "sentinel", "utf8");
+
+    const { code, stderr } = runInit([], { cwd });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("already exists");
+    expect(existsSync(out)).toBe(false);
+    expect(readFileSync(claudeCommand, "utf8")).toBe("sentinel");
+  });
+
   it("refuses to overwrite an existing team.yaml without --force", () => {
     const cwd = makeTmpDir();
     const out = join(cwd, "team.yaml");
@@ -87,21 +114,25 @@ describe("agvsr init CLI", () => {
     expect(readFileSync(out, "utf8")).toBe(first);
   });
 
-  it("with --force overwrites existing team.yaml and skill files", () => {
+  it("with --force overwrites existing team.yaml, skill files, and command files", () => {
     const cwd = makeTmpDir();
     const out = join(cwd, "team.yaml");
     const claudeSkill = skillPath(cwd, "claude");
+    const claudeCommand = commandPath(cwd, "claude");
     writeFileSync(out, "old team", "utf8");
     mkdirSync(join(cwd, ".claude", "skills", "agvsr"), { recursive: true });
     writeFileSync(claudeSkill, "old skill", "utf8");
+    mkdirSync(join(cwd, ".claude", "commands"), { recursive: true });
+    writeFileSync(claudeCommand, "old command", "utf8");
 
     const { code } = runInit(["--force"], { cwd });
     expect(code).toBe(0);
     expect(loadTeam(out).roles.supervisor).toBeDefined();
     expect(readFileSync(claudeSkill, "utf8")).toBe(readFileSync(BUNDLED_SKILL, "utf8"));
+    expect(readFileSync(claudeCommand, "utf8")).toBe(readFileSync(BUNDLED_COMMAND_CLAUDE, "utf8"));
   });
 
-  it("--skill-target gemini installs only the Gemini skill", () => {
+  it("--skill-target gemini installs only the Gemini skill and command", () => {
     const cwd = makeTmpDir();
     const { code } = runInit(["--skill-target", "gemini"], { cwd });
     expect(code).toBe(0);
@@ -112,11 +143,16 @@ describe("agvsr init CLI", () => {
     expect(readFileSync(skillPath(cwd, "gemini"), "utf8")).toBe(
       readFileSync(BUNDLED_SKILL, "utf8"),
     );
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(true);
+    expect(readFileSync(commandPath(cwd, "gemini"), "utf8")).toBe(
+      readFileSync(BUNDLED_COMMAND_GEMINI, "utf8"),
+    );
     expect(existsSync(skillPath(cwd, "claude"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "claude"))).toBe(false);
     expect(existsSync(join(cwd, ".codex"))).toBe(false);
   });
 
-  it("--skill-target claude,gemini and repeated flags install both targets", () => {
+  it("--skill-target claude,gemini and repeated flags install both targets' skills and commands", () => {
     const cwd = makeTmpDir();
     const { code } = runInit(["--skill-target", "claude,gemini", "--skill-target", "claude"], {
       cwd,
@@ -131,9 +167,17 @@ describe("agvsr init CLI", () => {
     expect(readFileSync(skillPath(cwd, "gemini"), "utf8")).toBe(
       readFileSync(BUNDLED_SKILL, "utf8"),
     );
+    expect(existsSync(commandPath(cwd, "claude"))).toBe(true);
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(true);
+    expect(readFileSync(commandPath(cwd, "claude"), "utf8")).toBe(
+      readFileSync(BUNDLED_COMMAND_CLAUDE, "utf8"),
+    );
+    expect(readFileSync(commandPath(cwd, "gemini"), "utf8")).toBe(
+      readFileSync(BUNDLED_COMMAND_GEMINI, "utf8"),
+    );
   });
 
-  it("--no-skill skips all skill installs even when --skill-target is present", () => {
+  it("--no-skill skips all skill and command installs even when --skill-target is present", () => {
     const cwd = makeTmpDir();
     const { code } = runInit(["--no-skill", "--skill-target", "claude,gemini"], { cwd });
     expect(code).toBe(0);
@@ -142,6 +186,8 @@ describe("agvsr init CLI", () => {
     expect(loadTeam(out).roles.supervisor).toBeDefined();
     expect(existsSync(skillPath(cwd, "claude"))).toBe(false);
     expect(existsSync(skillPath(cwd, "gemini"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "claude"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(false);
   });
 
   it("--stdout prints only YAML and ignores file preflight and skill install", () => {
@@ -169,9 +215,11 @@ describe("agvsr init CLI", () => {
     expect(existsSync(realCodexSkill)).toBe(realCodexExistsBefore);
     expect(existsSync(skillPath(cwd, "claude"))).toBe(false);
     expect(existsSync(skillPath(cwd, "gemini"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "claude"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(false);
   });
 
-  it("--skill-target codex writes to CODEX_HOME without touching the real home directory", () => {
+  it("--skill-target codex writes only the skill to CODEX_HOME (no command file exists for codex)", () => {
     const cwd = makeTmpDir();
     const codexHome = makeTmpDir();
     const realCodexSkill = join(homedir(), ".codex", "skills", "agvsr", "SKILL.md");
@@ -187,6 +235,11 @@ describe("agvsr init CLI", () => {
     expect(existsSync(codexSkill)).toBe(true);
     expect(readFileSync(codexSkill, "utf8")).toBe(readFileSync(BUNDLED_SKILL, "utf8"));
     expect(existsSync(realCodexSkill)).toBe(realCodexExistsBefore);
+    // Codex has no custom-command mechanism: no commands directory anywhere,
+    // under the target project or under CODEX_HOME.
+    expect(existsSync(join(cwd, ".claude", "commands"))).toBe(false);
+    expect(existsSync(join(cwd, ".gemini", "commands"))).toBe(false);
+    expect(existsSync(join(codexHome, "commands"))).toBe(false);
   });
 
   it("rejects unknown skill targets before writing anything", () => {
@@ -199,6 +252,8 @@ describe("agvsr init CLI", () => {
     expect(existsSync(out)).toBe(false);
     expect(existsSync(skillPath(cwd, "claude"))).toBe(false);
     expect(existsSync(skillPath(cwd, "gemini"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "claude"))).toBe(false);
+    expect(existsSync(commandPath(cwd, "gemini"))).toBe(false);
   });
 
   it("--help includes skill-target and no-skill options", () => {

@@ -43,6 +43,7 @@ describe("package surface", () => {
       "README.md",
       "src/",
       "charters/",
+      "commands/",
       "examples/",
       "skills/",
     ];
@@ -55,6 +56,8 @@ describe("package surface", () => {
     expect(files.has("src/index.ts")).toBe(true);
     expect(files.has("src/cli/agvsr.ts")).toBe(true);
     expect(files.has("charters/scaffold.md")).toBe(true);
+    expect(files.has("commands/agvsr.md")).toBe(true);
+    expect(files.has("commands/agvsr.toml")).toBe(true);
     expect(files.has("examples/team.yaml")).toBe(true);
     expect(files.has("skills/agvsr/SKILL.md")).toBe(true);
     expect(files.has("README.md")).toBe(true);

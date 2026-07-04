@@ -21,6 +21,16 @@ const BUNDLED_SKILL_SOURCE_PATH = fileURLToPath(
   new URL("../../skills/agvsr/SKILL.md", import.meta.url),
 );
 
+// Codex has no user-definable custom-command mechanism (its own `/skills` and
+// `/skill-installer` slash commands are built-in CLI directives for managing
+// skills, not something a package can install) — only claude and gemini get
+// a bundled command file. Codex users invoke the installed skill explicitly
+// with `$agvsr` or browse via `/skills` instead of a `/agvsr` command.
+const BUNDLED_COMMAND_SOURCE_PATHS: Partial<Record<SkillTarget, string>> = {
+  claude: fileURLToPath(new URL("../../commands/agvsr.md", import.meta.url)),
+  gemini: fileURLToPath(new URL("../../commands/agvsr.toml", import.meta.url)),
+};
+
 export interface RoleSpec {
   role: string;
   adapter: Adapter;
@@ -53,6 +63,26 @@ export function resolveSkillTargetPath(target: SkillTarget, targetDir: string): 
       const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       return resolve(codexHome, "skills/agvsr/SKILL.md");
     }
+  }
+}
+
+/** Reads the bundled `/agvsr` command source for a target, or null if that
+ * target has no custom-command mechanism (codex). */
+export function readBundledCommandSource(target: SkillTarget): string | null {
+  const path = BUNDLED_COMMAND_SOURCE_PATHS[target];
+  return path === undefined ? null : readFileSync(path, "utf8");
+}
+
+/** Resolves where the bundled `/agvsr` command installs for a target, or
+ * null if that target has no custom-command mechanism (codex). */
+export function resolveCommandTargetPath(target: SkillTarget, targetDir: string): string | null {
+  switch (target) {
+    case "claude":
+      return resolve(targetDir, ".claude/commands/agvsr.md");
+    case "gemini":
+      return resolve(targetDir, ".gemini/commands/agvsr.toml");
+    case "codex":
+      return null;
   }
 }
 

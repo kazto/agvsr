@@ -144,8 +144,8 @@ agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
-      --no-skill        Skip bundled skill installation
-      --skill-target    Skill target(s): claude, gemini, codex
+      --no-skill        Skip installing the bundled skill and /agvsr command
+      --skill-target    Agent integration target(s): claude, gemini, codex
                         Repeatable or comma-separated. Default: claude
       --roles <list>    Comma-separated role names
                         (default: supervisor,design,implementation,qa)
@@ -165,13 +165,21 @@ agvsr init \
   --role qa:agy:gemini-3-pro
 ```
 
-By default, `agvsr init` also installs the bundled `agvsr` skill for Claude
-under the generated project directory. `gemini` installs under the generated
-project directory as well. `codex` installs globally to
-`$CODEX_HOME/skills/agvsr/SKILL.md` or `~/.codex/skills/agvsr/SKILL.md` when
-`CODEX_HOME` is unset, and it is only written when explicitly selected. Use
-`--skill-target` to add Gemini or Codex targets, or `--no-skill` to skip skill
-installation entirely.
+By default, `agvsr init` also installs the bundled `agvsr` skill and a
+`/agvsr` slash command for Claude under the generated project directory.
+`gemini` installs the skill and an equivalent `/agvsr` command under the
+generated project directory as well. `codex` installs only the skill —
+globally to `$CODEX_HOME/skills/agvsr/SKILL.md` or
+`~/.codex/skills/agvsr/SKILL.md` when `CODEX_HOME` is unset, and only when
+explicitly selected — since Codex has no user-definable custom-command
+mechanism; invoke the skill there with `$agvsr` or browse via `/skills`
+instead. Use `--skill-target` to add Gemini or Codex targets, or `--no-skill`
+to skip installation entirely.
+
+The `/agvsr` command only bootstraps the daemon for the current project (runs
+`agvsr doctor`, starts it with `--team ./team.yaml` if needed, and warns if
+the daemon is already serving a different project's config) — actual job
+submission, approvals, and monitoring are covered by the skill.
 
 ## Command reference
 

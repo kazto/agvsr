@@ -22,15 +22,26 @@ on them, but still verify — see "Don't trust self-reports" below.
 ## Command reference
 
 ```
+agvsr daemon start [--team F]            Start the daemon in the background if not already running
 agvsr job "<goal>" [--cwd D] [--id ID]   Submit a job (D = target repo, default cwd)
 agvsr status [job-id]                    List jobs, or show one with runtime state
 agvsr logs <job-id> [-f]                 Audit messages for a job
 agvsr watch [--all] [--poll N]           Live role-message stream across jobs
+agvsr wait <job-id>... [--poll-sec N] [--timeout-sec N]
+                                          Block until each job needs approval or finishes
 agvsr tell <job-id> "<message>"          Send a message to the job's supervisor
 agvsr stop <job-id>                      Stop gracefully (marks failed)
 agvsr kill <job-id>                      Kill immediately (marks interrupted)
+agvsr cleanup [--apply]                  Report (or remove) job worktrees/branches safe to delete
 agvsr ping / team / doctor               Daemon health / configured roles / adapter checks
 ```
+
+If a project was set up with `agvsr init`, Claude Code and Gemini/Antigravity
+also get a `/agvsr` command that bootstraps the daemon for the current
+project (checks it's running with the right `team.yaml`, runs `agvsr doctor`,
+starts it if needed) — run that first if the daemon isn't up yet. Codex has
+no user-definable slash-command mechanism; invoke this skill there explicitly
+with `$agvsr` or browse via `/skills` instead of expecting a `/agvsr` command.
 
 ## 1. Writing the job prompt — always include a constraint block
 

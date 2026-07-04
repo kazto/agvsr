@@ -8,6 +8,7 @@
   "files": [
     "src",
     "charters",
+    "commands",
     "examples",
     "skills",
     "README.md"

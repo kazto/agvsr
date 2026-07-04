@@ -12,6 +12,7 @@ import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import type { Adapter } from "../config/team.ts";
+import type { SkillTarget } from "../config/init.ts";
 import type {
   Job,
   JobRuntime,
@@ -999,9 +1000,13 @@ Usage: agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
-      --no-skill        Skip bundled skill installation
-      --skill-target    Skill target(s): claude, gemini, codex
+      --no-skill        Skip installing the bundled skill and /agvsr command
+      --skill-target    Agent integration target(s): claude, gemini, codex
                         Repeatable or comma-separated. Default: claude.
+                        Installs the skill for every target, plus a /agvsr
+                        command for claude and gemini (codex has no custom-
+                        command mechanism; invoke the skill there with
+                        $agvsr or browse via /skills instead).
                         Codex writes globally to $CODEX_HOME/skills/agvsr/SKILL.md
                         or ~/.codex/skills/agvsr/SKILL.md when unset.
       --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
@@ -1023,6 +1028,8 @@ Usage: agvsr init [options]
         parseSkillTargets,
         resolveSkillTargetPath,
         readBundledSkillSource,
+        resolveCommandTargetPath,
+        readBundledCommandSource,
       } = await import("../config/init.ts");
 
       const VALID_ADAPTERS = ["claude-code", "codex", "agy"] as const;
@@ -1115,7 +1122,18 @@ Usage: agvsr init [options]
         target,
         path: resolveSkillTargetPath(target, targetDir),
       }));
-      const intendedPaths = [outputPath, ...skillDestinations.map((dest) => dest.path)];
+      // Not every target has a custom-command mechanism (codex does not);
+      // resolveCommandTargetPath/readBundledCommandSource return null there.
+      const commandDestinations = installSkills
+        ? skillTargets
+            .map((target) => ({ target, path: resolveCommandTargetPath(target, targetDir) }))
+            .filter((dest): dest is { target: SkillTarget; path: string } => dest.path !== null)
+        : [];
+      const intendedPaths = [
+        outputPath,
+        ...skillDestinations.map((dest) => dest.path),
+        ...commandDestinations.map((dest) => dest.path),
+      ];
 
       if (!initOpts.force) {
         const existing = intendedPaths.find((path) => existsSync(path));
@@ -1132,6 +1150,12 @@ Usage: agvsr init [options]
         for (const { path } of skillDestinations) {
           mkdirSync(dirname(path), { recursive: true });
           writeFileSync(path, skillContents, "utf8");
+        }
+        for (const { target, path } of commandDestinations) {
+          const contents = readBundledCommandSource(target);
+          if (contents === null) continue; // unreachable given the filter above
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, contents, "utf8");
         }
       }
 

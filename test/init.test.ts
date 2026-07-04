@@ -5,10 +5,13 @@ import { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, InitError } from "../sr
 import {
   DEFAULT_SKILL_TARGETS,
   parseSkillTargets,
+  readBundledCommandSource,
+  resolveCommandTargetPath,
   resolveSkillTargetPath,
   VALID_SKILL_TARGETS,
 } from "../src/config/init.ts";
 import { parseTeam } from "../src/config/team.ts";
+import { readFileSync } from "node:fs";
 
 function defaults() {
   return resolveRoleSpecs({
@@ -195,5 +198,30 @@ describe("skill target helpers", () => {
     expect(resolveSkillTargetPath("codex", targetDir)).toBe(
       join(homedir(), ".codex", "skills", "agvsr", "SKILL.md"),
     );
+  });
+});
+
+describe("command target helpers", () => {
+  it("resolves claude and gemini command destinations, and null for codex", () => {
+    const targetDir = join("/tmp", "agvsr-init-target");
+    expect(resolveCommandTargetPath("claude", targetDir)).toBe(
+      join(targetDir, ".claude", "commands", "agvsr.md"),
+    );
+    expect(resolveCommandTargetPath("gemini", targetDir)).toBe(
+      join(targetDir, ".gemini", "commands", "agvsr.toml"),
+    );
+    // Codex has no user-definable custom-command mechanism.
+    expect(resolveCommandTargetPath("codex", targetDir)).toBeNull();
+  });
+
+  it("reads the bundled command source for claude and gemini, and null for codex", () => {
+    const root = join(import.meta.dir, "..");
+    expect(readBundledCommandSource("claude")).toBe(
+      readFileSync(join(root, "commands/agvsr.md"), "utf8"),
+    );
+    expect(readBundledCommandSource("gemini")).toBe(
+      readFileSync(join(root, "commands/agvsr.toml"), "utf8"),
+    );
+    expect(readBundledCommandSource("codex")).toBeNull();
   });
 });
