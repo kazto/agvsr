@@ -59,6 +59,12 @@ input {
   letter-spacing: 0.02em;
 }
 
+.banner__state {
+  display: grid;
+  justify-items: end;
+  gap: 0.25rem;
+}
+
 .muted {
   color: var(--muted);
   font-size: 0.92rem;
@@ -80,6 +86,93 @@ input {
 .sidebar {
   border-right: 1px solid var(--border);
   background: rgba(17, 24, 49, 0.7);
+}
+
+.sidebar__inner {
+  display: grid;
+  gap: 1rem;
+}
+
+.sidebar__jobs {
+  min-height: 0;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.create-form,
+.action-form {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(21, 31, 61, 0.75);
+  padding: 0.9rem;
+}
+
+.create-form input,
+.action-form textarea,
+.create-form button,
+.action-form button,
+.job {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.create-form input,
+.action-form textarea {
+  background: rgba(8, 13, 28, 0.92);
+  color: var(--text);
+  padding: 0.85rem 0.95rem;
+}
+
+.action-form textarea {
+  resize: vertical;
+  min-height: 7rem;
+}
+
+.create-form button,
+.action-form button {
+  padding: 0.9rem 1rem;
+  cursor: pointer;
+}
+
+.create-form__submit {
+  background: linear-gradient(180deg, var(--accent), #3aa2ea);
+  color: #07101f;
+  font-weight: 700;
+}
+
+.action-form__submit {
+  background: linear-gradient(180deg, var(--accent-2), #38c48a);
+  color: #06120a;
+  font-weight: 700;
+}
+
+.detail__actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.danger-button {
+  background: linear-gradient(180deg, #ff9a9a, var(--danger));
+  color: #220707;
+  font-weight: 700;
+}
+
+.kill-button {
+  background: linear-gradient(180deg, #ffbc7a, #ff824a);
+  color: #251100;
+  font-weight: 700;
+}
+
+.create-form button:disabled,
+.action-form button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .job-list {

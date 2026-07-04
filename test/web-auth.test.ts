@@ -79,7 +79,11 @@ describe("web auth", () => {
           "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'web_%' ORDER BY name",
         )
         .all() as Array<{ name: string }>;
-      expect(tables.map((row) => row.name)).toEqual(["web_bootstrap_tokens", "web_sessions"]);
+      expect(tables.map((row) => row.name)).toEqual([
+        "web_bootstrap_tokens",
+        "web_operation_audit",
+        "web_sessions",
+      ]);
       sqlite.close();
 
       const origin = browserOrigin(web.endpoint);

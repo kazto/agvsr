@@ -44,6 +44,16 @@ type StreamFrame = {
   data: JobDetail["messages"][number];
 };
 
+class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 const POLL_MS = 2000;
 const STREAM_RECONNECT_MIN_MS = 500;
 const STREAM_RECONNECT_MAX_MS = 8000;
@@ -68,6 +78,32 @@ function textEl(tag: string, text: string, className?: string): HTMLElement {
   return el;
 }
 
+function buttonEl(
+  text: string,
+  className?: string,
+  type: "button" | "submit" = "button",
+): HTMLButtonElement {
+  const el = document.createElement("button");
+  el.type = type;
+  if (className) el.className = className;
+  el.textContent = text;
+  return el;
+}
+
+function inputEl(
+  type: string,
+  name: string,
+  placeholder: string,
+  className?: string,
+): HTMLInputElement {
+  const el = document.createElement("input");
+  el.type = type;
+  el.name = name;
+  el.placeholder = placeholder;
+  if (className) el.className = className;
+  return el;
+}
+
 function renderMessage(container: HTMLElement, message: JobDetail["messages"][number]): void {
   const item = document.createElement("article");
   item.className = "message";
@@ -87,9 +123,33 @@ interface DetailState {
   seenMessageIds: Set<string>;
 }
 
-function renderJobDetail(container: HTMLElement, detail: JobDetail): DetailState {
+interface DetailActions {
+  tell(jobId: string, message: string): Promise<void>;
+  stop(jobId: string): Promise<void>;
+  kill(jobId: string): Promise<void>;
+  reportError(message: string): void;
+}
+
+function renderJobDetail(
+  container: HTMLElement,
+  detail: JobDetail,
+  actions: DetailActions,
+): DetailState {
   const section = document.createElement("section");
   section.className = "detail";
+  const tellForm = document.createElement("form");
+  tellForm.className = "action-form";
+  const tellField = document.createElement("textarea");
+  tellField.name = "message";
+  tellField.placeholder = "Tell the supervisor something";
+  tellField.rows = 4;
+  const tellButton = buttonEl("Send tell", "action-form__submit", "submit");
+  const stopButton = buttonEl("Stop job", "danger-button");
+  const killButton = buttonEl("Kill job", "kill-button");
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "detail__actions";
+  actionsRow.append(stopButton, killButton);
+  tellForm.append(tellField, actionsRow, tellButton);
   section.append(
     textEl("h2", detail.job.goal),
     textEl("div", `job ${detail.job.id} · ${detail.job.status} · ${detail.display_state}`, "muted"),
@@ -102,6 +162,7 @@ function renderJobDetail(container: HTMLElement, detail: JobDetail): DetailState
           : `idle ${Math.round(detail.runtime.idle_ms / 1000)}s`,
       "muted",
     ),
+    tellForm,
   );
   const messages = document.createElement("div");
   messages.className = "messages";
@@ -110,6 +171,38 @@ function renderJobDetail(container: HTMLElement, detail: JobDetail): DetailState
   for (const message of detail.messages) seenMessageIds.add(message.id);
   section.append(messages);
   container.replaceChildren(section);
+  const running = detail.job.status === "running";
+  tellField.disabled = !running;
+  tellButton.disabled = !running;
+  stopButton.disabled = !running;
+  killButton.disabled = !running;
+  tellForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const message = tellField.value.trim();
+    if (!message) return;
+    try {
+      await actions.tell(detail.job.id, message);
+      tellField.value = "";
+    } catch (err) {
+      actions.reportError(err instanceof ApiError ? err.message : "tell failed");
+    }
+  });
+  stopButton.addEventListener("click", async () => {
+    if (!confirm(`Stop job ${detail.job.id}?`)) return;
+    try {
+      await actions.stop(detail.job.id);
+    } catch (err) {
+      actions.reportError(err instanceof ApiError ? err.message : "stop failed");
+    }
+  });
+  killButton.addEventListener("click", async () => {
+    if (!confirm(`Kill job ${detail.job.id}?`)) return;
+    try {
+      await actions.kill(detail.job.id);
+    } catch (err) {
+      actions.reportError(err instanceof ApiError ? err.message : "kill failed");
+    }
+  });
   return {
     jobId: detail.job.id,
     messagesEl: messages,
@@ -149,10 +242,35 @@ export function mountApp(root: HTMLElement): void {
   shell.className = "shell";
   const banner = document.createElement("header");
   banner.className = "banner";
+  const bannerState = document.createElement("div");
+  bannerState.className = "banner__state";
+  const bannerStatus = document.createElement("div");
+  bannerStatus.className = "banner__status";
+  bannerState.append(bannerStatus);
+  banner.append(textEl("div", "agvsr web", "brand"), bannerState);
   const content = document.createElement("main");
   content.className = "content";
   const sidebar = document.createElement("section");
   sidebar.className = "sidebar";
+  const sidebarInner = document.createElement("div");
+  sidebarInner.className = "sidebar__inner";
+  const createForm = document.createElement("form");
+  createForm.className = "create-form";
+  const goalInput = inputEl("text", "goal", "New job goal");
+  const cwdInput = inputEl("text", "cwd", "cwd");
+  const idInput = inputEl("text", "id", "optional id");
+  const createButton = buttonEl("Create job", "create-form__submit", "submit");
+  createForm.append(
+    textEl("h2", "Create job", "panel-title"),
+    goalInput,
+    cwdInput,
+    idInput,
+    createButton,
+  );
+  const jobsHost = document.createElement("div");
+  jobsHost.className = "sidebar__jobs";
+  sidebarInner.append(createForm, jobsHost);
+  sidebar.append(sidebarInner);
   const detail = document.createElement("section");
   detail.className = "detail-pane";
   content.append(sidebar, detail);
@@ -185,8 +303,33 @@ export function mountApp(root: HTMLElement): void {
       ...init,
       headers,
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      throw new ApiError(await readErrorMessage(res), res.status);
+    }
     return (await res.json()) as T;
+  }
+
+  async function readErrorMessage(res: Response): Promise<string> {
+    const raw = await res.text();
+    try {
+      const parsed = JSON.parse(raw) as { error?: { message?: string } | string };
+      if (typeof parsed.error === "string") return parsed.error;
+      if (parsed.error && typeof parsed.error === "object" && parsed.error.message) {
+        return parsed.error.message;
+      }
+    } catch {
+      /* fall through */
+    }
+    return raw || `request failed (${res.status})`;
+  }
+
+  function setBannerStatus(text: string, className = "muted"): void {
+    bannerStatus.className = className;
+    bannerStatus.textContent = text;
+  }
+
+  function showError(message: string): void {
+    setBannerStatus(message, "error");
   }
 
   async function refreshSession(): Promise<void> {
@@ -196,18 +339,12 @@ export function mountApp(root: HTMLElement): void {
       currentJobId = null;
       detailState = null;
       closeStream();
-      banner.replaceChildren(
-        textEl("div", "agvsr web", "brand"),
-        textEl("div", "read-only monitoring", "muted"),
-      );
+      setBannerStatus("read-only monitoring");
       content.replaceChildren(loginForm);
       return;
     }
     csrfToken = session.csrfToken;
-    banner.replaceChildren(
-      textEl("div", "agvsr web", "brand"),
-      textEl("div", "authenticated", "muted"),
-    );
+    setBannerStatus("authenticated");
     content.replaceChildren(sidebar, detail);
   }
 
@@ -296,7 +433,7 @@ export function mountApp(root: HTMLElement): void {
 
   async function refreshJobs(): Promise<void> {
     const res = (await api("/api/jobs", { headers: {} })) as { jobs: JobSummary[] };
-    renderJobs(sidebar, res.jobs, (id) => {
+    renderJobs(jobsHost, res.jobs, (id) => {
       if (currentJobId !== id) closeStream();
       currentJobId = id;
       void refreshDetail(id);
@@ -310,9 +447,65 @@ export function mountApp(root: HTMLElement): void {
   async function refreshDetail(id: string): Promise<void> {
     const res = (await api(`/api/jobs/${encodeURIComponent(id)}`, { headers: {} })) as JobDetail;
     if (currentJobId !== id) return;
-    detailState = renderJobDetail(detail, res);
+    detailState = renderJobDetail(detail, res, {
+      async tell(jobId, message) {
+        await api(`/api/jobs/${encodeURIComponent(jobId)}/tell`, {
+          method: "POST",
+          body: JSON.stringify({ message }),
+        });
+        await refreshJobs();
+        await refreshDetail(jobId);
+        setBannerStatus("authenticated");
+      },
+      async stop(jobId) {
+        await api(`/api/jobs/${encodeURIComponent(jobId)}/stop`, {
+          method: "POST",
+          body: "{}",
+        });
+        await refreshJobs();
+        await refreshDetail(jobId);
+        setBannerStatus("authenticated");
+      },
+      async kill(jobId) {
+        await api(`/api/jobs/${encodeURIComponent(jobId)}/kill`, {
+          method: "POST",
+          body: "{}",
+        });
+        await refreshJobs();
+        await refreshDetail(jobId);
+        setBannerStatus("authenticated");
+      },
+      reportError: showError,
+    });
     ensureStream(id);
   }
+
+  createForm.addEventListener("submit", async (event: SubmitEvent) => {
+    event.preventDefault();
+    const goal = goalInput.value.trim();
+    const cwd = cwdInput.value.trim();
+    const id = idInput.value.trim();
+    if (!goal || !cwd) return;
+    try {
+      const created = await api<{ job: JobSummary["job"] }>("/api/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          goal,
+          cwd,
+          ...(id ? { id } : {}),
+        }),
+      });
+      goalInput.value = "";
+      cwdInput.value = "";
+      idInput.value = "";
+      currentJobId = created.job.id;
+      await refreshJobs();
+      await refreshDetail(created.job.id);
+      setBannerStatus("authenticated");
+    } catch (err) {
+      showError(err instanceof ApiError ? err.message : "create failed");
+    }
+  });
 
   loginForm.addEventListener("submit", async (event: SubmitEvent) => {
     event.preventDefault();
@@ -328,10 +521,10 @@ export function mountApp(root: HTMLElement): void {
       tokenInput.value = "";
       await refreshSession();
       await refreshJobs();
-    } catch {
+    } catch (err) {
       csrfToken = "";
       closeStream();
-      banner.replaceChildren(textEl("div", "login failed", "error"));
+      showError(err instanceof ApiError ? err.message : "login failed");
     }
   });
 
