@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ADAPTERS, type Adapter, parseTeam } from "./team.ts";
 
 export const BUNDLED_CHARTER_ROLES = new Set(["supervisor", "design", "implementation", "qa"]);
@@ -9,6 +13,13 @@ export const DEFAULT_MODELS: Record<Adapter, string> = {
 };
 
 export const DEFAULT_ROLES = ["supervisor", "design", "implementation", "qa"] as const;
+export const VALID_SKILL_TARGETS = ["claude", "gemini", "codex"] as const;
+export type SkillTarget = (typeof VALID_SKILL_TARGETS)[number];
+export const DEFAULT_SKILL_TARGETS = ["claude"] as const;
+
+const BUNDLED_SKILL_SOURCE_PATH = fileURLToPath(
+  new URL("../../skills/agvsr/SKILL.md", import.meta.url),
+);
 
 export interface RoleSpec {
   role: string;
@@ -26,6 +37,53 @@ export class InitError extends Error {
     super(message);
     this.name = "InitError";
   }
+}
+
+export function readBundledSkillSource(): string {
+  return readFileSync(BUNDLED_SKILL_SOURCE_PATH, "utf8");
+}
+
+export function resolveSkillTargetPath(target: SkillTarget, targetDir: string): string {
+  switch (target) {
+    case "claude":
+      return resolve(targetDir, ".claude/skills/agvsr/SKILL.md");
+    case "gemini":
+      return resolve(targetDir, ".gemini/skills/agvsr/SKILL.md");
+    case "codex": {
+      const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+      return resolve(codexHome, "skills/agvsr/SKILL.md");
+    }
+  }
+}
+
+export function parseSkillTargets(rawTargets: readonly string[] | undefined): SkillTarget[] {
+  if (rawTargets === undefined) return [...DEFAULT_SKILL_TARGETS];
+
+  const seen = new Set<SkillTarget>();
+  const targets: SkillTarget[] = [];
+  for (const raw of rawTargets) {
+    for (const part of raw.split(",")) {
+      const target = part.trim();
+      if (!target) {
+        throw new InitError("empty --skill-target entry");
+      }
+      if (!(VALID_SKILL_TARGETS as readonly string[]).includes(target)) {
+        throw new InitError(
+          `unknown --skill-target "${target}". Valid targets: ${VALID_SKILL_TARGETS.join(", ")}`,
+        );
+      }
+      const typed = target as SkillTarget;
+      if (seen.has(typed)) continue;
+      seen.add(typed);
+      targets.push(typed);
+    }
+  }
+
+  if (targets.length === 0) {
+    throw new InitError("empty --skill-target list");
+  }
+
+  return targets;
 }
 
 export function buildTeamYaml(spec: InitSpec): string {
