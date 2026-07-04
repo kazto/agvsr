@@ -186,22 +186,27 @@ they approved a push earlier in the session — confirm each time.
 Job worktrees/branches accumulate fast (the daemon creates one per job, and
 some test suites can leak extras into the real `~/.config/agvsr/worktrees` if
 they don't override the worktree root — this has been a real, fixed bug, not
-just a theoretical risk). Periodic cleanup is safe as long as you don't touch
-`main`:
+just a theoretical risk).
+
+Don't hand-derive which worktree belongs to which job by re-parsing the
+branch-naming convention (`agvsr/<id-or-id.slice(0,8)>`, from
+`Store.createJob`) — this was tried by hand once and produced a wrong
+classification (an 8-char prefix mismatch marked nearly every real job as
+orphaned). Use the bundled script instead, which cross-references the
+daemon's own `job.list` records (exact `branch`/`worktree` fields) against
+`git worktree list --porcelain`'s own pairs by exact string match:
 
 ```bash
-# Never operate on the /home/kazto/src/agvsr entry itself.
-git worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r path; do
-  [ "$path" = "/home/kazto/src/agvsr" ] && continue
-  br=$(git -C "$path" symbolic-ref --short HEAD 2>/dev/null)
-  git worktree remove --force "$path" && [ -n "$br" ] && git branch -D "$br"
-done
-git worktree prune
+bun run scripts/cleanup-jobs.ts            # report only, no changes
+bun run scripts/cleanup-jobs.ts --apply    # remove the safe entries
 ```
 
-Before mass-removing, cross-check `agvsr status` for any job still `running`
-— never remove a running job's worktree. For jobs whose work you intend to
-keep but haven't merged yet, leave those specific worktrees/branches alone.
+It classifies every non-main worktree as `KEEP` (job still `running` — never
+touched), `SAFE_TO_REMOVE` (terminal/orphaned, clean tree, branch fully
+merged into main), or `NEEDS_REVIEW` (uncommitted changes and/or commits not
+yet in main — never auto-removed, regardless of `--apply`). Only run
+`--apply` after skimming the report; for anything you intend to keep despite
+not being merged yet, just leave that worktree alone and rerun later.
 
 ## Safety — non-negotiable
 
