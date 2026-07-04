@@ -12,6 +12,21 @@ CREATE TABLE IF NOT EXISTS web_sessions (
   created_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS web_operation_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_hash TEXT,
+  operation TEXT NOT NULL,
+  job_id TEXT,
+  status TEXT NOT NULL,
+  error_code TEXT,
+  request_summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_web_operation_audit_created
+  ON web_operation_audit(created_at);
+CREATE INDEX IF NOT EXISTS idx_web_operation_audit_job
+  ON web_operation_audit(job_id, created_at);
 `;
 
 const now = (): string => new Date().toISOString();
@@ -20,6 +35,34 @@ export interface WebSessionRow {
   session_hash: string;
   created_at: string;
   last_seen_at: string;
+}
+
+export interface WebOperationAuditRow {
+  id: number;
+  session_hash: string | null;
+  operation: string;
+  job_id: string | null;
+  status: string;
+  error_code: string | null;
+  request_summary: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateWebOperationAuditInput {
+  session_hash: string | null;
+  operation: string;
+  job_id: string | null;
+  status: string;
+  error_code: string | null;
+  request_summary: string;
+}
+
+export interface UpdateWebOperationAuditInput {
+  id: number;
+  job_id?: string | null;
+  status?: string;
+  error_code?: string | null;
 }
 
 export class WebAuthStore {
@@ -102,6 +145,73 @@ export class WebAuthStore {
     this.db.query(`DELETE FROM web_sessions WHERE session_hash = $session_hash`).run({
       $session_hash: sessionHash,
     });
+  }
+
+  createWebOperationAudit(input: CreateWebOperationAuditInput): WebOperationAuditRow {
+    const row = {
+      session_hash: input.session_hash,
+      operation: input.operation,
+      job_id: input.job_id,
+      status: input.status,
+      error_code: input.error_code,
+      request_summary: input.request_summary,
+      created_at: now(),
+      updated_at: now(),
+    };
+    const res = this.db
+      .query(
+        `INSERT INTO web_operation_audit (
+           session_hash, operation, job_id, status, error_code, request_summary, created_at, updated_at
+         ) VALUES (
+           $session_hash, $operation, $job_id, $status, $error_code, $request_summary, $created_at, $updated_at
+         )`,
+      )
+      .run({
+        $session_hash: row.session_hash,
+        $operation: row.operation,
+        $job_id: row.job_id,
+        $status: row.status,
+        $error_code: row.error_code,
+        $request_summary: row.request_summary,
+        $created_at: row.created_at,
+        $updated_at: row.updated_at,
+      });
+    return {
+      id: Number(res.lastInsertRowid),
+      ...row,
+    };
+  }
+
+  updateWebOperationAudit(input: UpdateWebOperationAuditInput): void {
+    const parts = ["updated_at = $updated_at"];
+    const params: Record<string, string | number | null> = {
+      $id: input.id,
+      $updated_at: now(),
+    };
+    if (input.job_id !== undefined) {
+      parts.push("job_id = $job_id");
+      params.$job_id = input.job_id;
+    }
+    if (input.status !== undefined) {
+      parts.push("status = $status");
+      params.$status = input.status;
+    }
+    if (input.error_code !== undefined) {
+      parts.push("error_code = $error_code");
+      params.$error_code = input.error_code;
+    }
+    this.db.query(`UPDATE web_operation_audit SET ${parts.join(", ")} WHERE id = $id`).run(params);
+  }
+
+  listWebOperationAudit(limit = 100): WebOperationAuditRow[] {
+    return this.db
+      .query(
+        `SELECT id, session_hash, operation, job_id, status, error_code, request_summary, created_at, updated_at
+         FROM web_operation_audit
+         ORDER BY id DESC
+         LIMIT $limit`,
+      )
+      .all({ $limit: limit }) as WebOperationAuditRow[];
   }
 
   close(): void {

@@ -14,7 +14,7 @@ import {
   CSRF_COOKIE,
 } from "./auth.ts";
 import type { WebAuthStore } from "./auth-store.ts";
-import type { WebDaemonClient, JobDetailView, JobView } from "./ipc.ts";
+import { WebDaemonError, type WebDaemonClient, type JobDetailView, type JobView } from "./ipc.ts";
 
 const STALL_THRESHOLD_MS = 10 * 60 * 1000;
 type HeaderInit = ConstructorParameters<typeof Headers>[0];
@@ -55,6 +55,83 @@ function json(body: unknown, init?: ResponseInit): Response {
     ...init,
     headers,
   });
+}
+
+function errorJson(code: string, message: string, status: number): Response {
+  return json({ error: { code, message } }, { status });
+}
+
+function textPreview(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : value.slice(0, maxChars);
+}
+
+function summarizeCreateRequest(goal: string, cwd: string, id: string | null): string {
+  return JSON.stringify({
+    goal_preview: textPreview(goal, 160),
+    goal_length: goal.length,
+    cwd,
+    custom_id: id,
+  });
+}
+
+function summarizeTellRequest(body: string): string {
+  return JSON.stringify({
+    body_preview: textPreview(body, 160),
+    body_length: body.length,
+  });
+}
+
+function summarizeEmptyRequest(): string {
+  return "{}";
+}
+
+function daemonStatusForCode(code: string): number {
+  switch (code) {
+    case "bad_request":
+    case "provisioning_failed":
+      return 400;
+    case "forbidden":
+      return 403;
+    case "not_found":
+      return 404;
+    case "no_team":
+      return 503;
+    default:
+      return 500;
+  }
+}
+
+function daemonErrorResponse(err: unknown): Response {
+  if (err instanceof WebDaemonError) {
+    return errorJson(err.code, err.message, daemonStatusForCode(err.code));
+  }
+  return errorJson("internal", err instanceof Error ? err.message : "unexpected error", 500);
+}
+
+function authenticatedSessionHash(
+  ctx: WebRouteContext,
+  cookies: Map<string, string>,
+): string | null {
+  const sessionToken = cookies.get(SESSION_COOKIE);
+  if (!sessionToken) return null;
+  const sessionHash = hashToken(sessionToken);
+  if (!ctx.authStore.getSession(sessionHash)) return null;
+  return sessionHash;
+}
+
+function csrfMatches(cookies: Map<string, string>, csrfHeader: string | null): boolean {
+  const csrfCookie = cookies.get(CSRF_COOKIE);
+  return Boolean(csrfCookie && csrfHeader && csrfCookie === csrfHeader);
+}
+
+function readJobIdFromPath(pathname: string, suffix: string): string | null {
+  try {
+    const raw = pathname.slice("/api/jobs/".length, pathname.length - suffix.length);
+    const decoded = decodeURIComponent(raw);
+    return decoded.trim() ? decoded : null;
+  } catch {
+    return null;
+  }
 }
 
 export function deriveJobDisplayState(
@@ -226,6 +303,47 @@ function logoutResponse(
   });
 }
 
+function recordAttempt(
+  ctx: WebRouteContext,
+  sessionHash: string,
+  operation: string,
+  jobId: string | null,
+  requestSummary: string,
+): number | null {
+  try {
+    return ctx.authStore.createWebOperationAudit({
+      session_hash: sessionHash,
+      operation,
+      job_id: jobId,
+      status: "attempted",
+      error_code: null,
+      request_summary: requestSummary,
+    }).id;
+  } catch {
+    return null;
+  }
+}
+
+function finalizeAttempt(
+  ctx: WebRouteContext,
+  auditId: number | null,
+  status: "success" | "failure",
+  errorCode: string | null = null,
+  jobId: string | null | undefined = undefined,
+): void {
+  if (auditId === null) return;
+  try {
+    ctx.authStore.updateWebOperationAudit({
+      id: auditId,
+      status,
+      error_code: errorCode,
+      ...(jobId !== undefined ? { job_id: jobId } : {}),
+    });
+  } catch {
+    /* fail open after the attempt has been recorded */
+  }
+}
+
 export async function handleWebRequest(ctx: WebRouteContext, request: Request): Promise<Response> {
   const host = request.headers.get("host");
   if (!host || !allowedHost(host, ctx.hostAllowlist)) {
@@ -264,6 +382,162 @@ export async function handleWebRequest(ctx: WebRouteContext, request: Request): 
   if (pathname === "/api/session/logout" && request.method === "POST") {
     const csrf = request.headers.get("x-csrf-token");
     return logoutResponse(ctx, cookies, csrf);
+  }
+
+  if (pathname === "/api/jobs" && request.method === "POST") {
+    const sessionHash = authenticatedSessionHash(ctx, cookies);
+    if (!sessionHash) {
+      return errorJson("unauthorized", "unauthorized", 401);
+    }
+    ctx.authStore.touchSession(sessionHash);
+
+    const csrfHeader = request.headers.get("x-csrf-token");
+    const raw = (await request.json().catch(() => ({}))) as {
+      goal?: unknown;
+      cwd?: unknown;
+      id?: unknown;
+    };
+    const goal = typeof raw.goal === "string" ? raw.goal.trim() : "";
+    const cwd = typeof raw.cwd === "string" ? raw.cwd.trim() : "";
+    const customId = typeof raw.id === "string" ? raw.id.trim() : "";
+    const requestSummary = summarizeCreateRequest(goal, cwd, customId || null);
+    const auditId = recordAttempt(ctx, sessionHash, "job.create", null, requestSummary);
+    if (auditId === null) {
+      return errorJson("internal", "audit write failed", 500);
+    }
+
+    if (!csrfMatches(cookies, csrfHeader)) {
+      finalizeAttempt(ctx, auditId, "failure", "csrf_mismatch");
+      return errorJson("csrf_mismatch", "csrf token mismatch", 403);
+    }
+    if (!goal) {
+      finalizeAttempt(ctx, auditId, "failure", "bad_request");
+      return errorJson("bad_request", "goal must not be empty", 400);
+    }
+    if (Buffer.byteLength(goal, "utf8") > 8 * 1024) {
+      finalizeAttempt(ctx, auditId, "failure", "bad_request");
+      return errorJson("bad_request", "goal must not exceed 8 KiB", 400);
+    }
+    if (!cwd) {
+      finalizeAttempt(ctx, auditId, "failure", "bad_request");
+      return errorJson("bad_request", "cwd must not be empty", 400);
+    }
+    if (Buffer.byteLength(cwd, "utf8") > 4 * 1024) {
+      finalizeAttempt(ctx, auditId, "failure", "bad_request");
+      return errorJson("bad_request", "cwd must not exceed 4 KiB", 400);
+    }
+    if (customId && Buffer.byteLength(customId, "utf8") > 128) {
+      finalizeAttempt(ctx, auditId, "failure", "bad_request");
+      return errorJson("bad_request", "job id must not exceed 128 bytes", 400);
+    }
+
+    try {
+      const created = await ctx.daemon.createJob(goal, cwd, customId || undefined);
+      const detail = await ctx.daemon.getJob(created.job.id);
+      finalizeAttempt(ctx, auditId, "success", null, created.job.id);
+      return json({ job: viewForJob(detail.job, detail.runtime) }, { status: 201 });
+    } catch (err) {
+      finalizeAttempt(
+        ctx,
+        auditId,
+        "failure",
+        err instanceof WebDaemonError ? err.code : "internal",
+      );
+      return daemonErrorResponse(err);
+    }
+  }
+
+  if (pathname.startsWith("/api/jobs/") && request.method === "POST") {
+    const suffixes = [
+      { suffix: "/tell", operation: "job.tell" as const },
+      { suffix: "/stop", operation: "job.stop" as const },
+      { suffix: "/kill", operation: "job.kill" as const },
+    ];
+    const matched = suffixes.find((entry) => pathname.endsWith(entry.suffix));
+    if (!matched) {
+      return json({ error: "not found" }, { status: 404, headers: getSecurityHeaders() });
+    }
+
+    const sessionHash = authenticatedSessionHash(ctx, cookies);
+    if (!sessionHash) {
+      return errorJson("unauthorized", "unauthorized", 401);
+    }
+    ctx.authStore.touchSession(sessionHash);
+
+    const csrfHeader = request.headers.get("x-csrf-token");
+    const jobId = readJobIdFromPath(pathname, matched.suffix);
+    if (!jobId) {
+      return errorJson("bad_request", "job id must not be empty", 400);
+    }
+
+    if (matched.operation === "job.tell") {
+      const raw = (await request.json().catch(() => ({}))) as { message?: unknown; body?: unknown };
+      const body =
+        typeof raw.message === "string"
+          ? raw.message.trim()
+          : typeof raw.body === "string"
+            ? raw.body.trim()
+            : "";
+      const requestSummary = summarizeTellRequest(body);
+      const auditId = recordAttempt(ctx, sessionHash, matched.operation, jobId, requestSummary);
+      if (auditId === null) {
+        return errorJson("internal", "audit write failed", 500);
+      }
+      if (!csrfMatches(cookies, csrfHeader)) {
+        finalizeAttempt(ctx, auditId, "failure", "csrf_mismatch");
+        return errorJson("csrf_mismatch", "csrf token mismatch", 403);
+      }
+      if (!body) {
+        finalizeAttempt(ctx, auditId, "failure", "bad_request");
+        return errorJson("bad_request", "message body must not be empty", 400);
+      }
+      if (Buffer.byteLength(body, "utf8") > 64 * 1024) {
+        finalizeAttempt(ctx, auditId, "failure", "bad_request");
+        return errorJson("bad_request", "message body must not exceed 64 KiB", 400);
+      }
+
+      try {
+        const result = await ctx.daemon.tellJob(jobId, body);
+        finalizeAttempt(ctx, auditId, "success");
+        return json(result);
+      } catch (err) {
+        finalizeAttempt(
+          ctx,
+          auditId,
+          "failure",
+          err instanceof WebDaemonError ? err.code : "internal",
+        );
+        return daemonErrorResponse(err);
+      }
+    }
+
+    await request.json().catch(() => ({}));
+    const requestSummary = summarizeEmptyRequest();
+    const auditId = recordAttempt(ctx, sessionHash, matched.operation, jobId, requestSummary);
+    if (auditId === null) {
+      return errorJson("internal", "audit write failed", 500);
+    }
+    if (!csrfMatches(cookies, csrfHeader)) {
+      finalizeAttempt(ctx, auditId, "failure", "csrf_mismatch");
+      return errorJson("csrf_mismatch", "csrf token mismatch", 403);
+    }
+
+    try {
+      const result =
+        matched.operation === "job.stop"
+          ? await ctx.daemon.stopJob(jobId)
+          : await ctx.daemon.killJob(jobId);
+      finalizeAttempt(ctx, auditId, "success");
+      return json(result);
+    } catch (err) {
+      finalizeAttempt(
+        ctx,
+        auditId,
+        "failure",
+        err instanceof WebDaemonError ? err.code : "internal",
+      );
+      return daemonErrorResponse(err);
+    }
   }
 
   if (pathname === "/api/jobs" && request.method === "GET") {
