@@ -95,7 +95,7 @@ spawn する**。したがって Web から不正にジョブを投入できる�
 
 - **初版は `job.list` ポーリング**（2 秒間隔程度、`watch` と同等）で実装する。実用上十分。
 - ジョブ数増加でポーリング負荷/遅延が問題化したら、**daemon に lifecycle push `job.update` を
-  追加**（フェーズ5）。それまでは追加しない。
+  追加**（フェーズ5）。実装設計は §13。
 
 ## 6. 機能要件: プッシュ通知
 
@@ -163,7 +163,7 @@ localhost バインドを前提にしても、以下は**すべて低コスト�
 3. **操作系**: tell/stop/kill/新規投入 + CSRF + Web 操作監査ログ。
 4. **プッシュ通知**: Service Worker + VAPID + subscription 永続化 + lifecycle イベント
    （終端 + escalation/人間入力待ち）。
-5. **(将来) daemon lifecycle push `job.update`**、ターンコスト可視化連動。
+5. **daemon lifecycle push `job.update`**（2 秒ポーリング撤廃、実装設計は §13）、ターンコスト可視化連動。
 
 ## 10. 決定事項（旧・未決事項）
 
@@ -634,3 +634,304 @@ oxfmt
   ポーリング維持のため却下。
 - **通知本文にジョブ内容を載せる**: プライバシー最小化（§6/§7）に反するため却下。job_id + status のみ。
 - **フォーム/トグルに UI ライブラリ導入**: 依存ゼロ方針と現行 DOM SPA で十分なため却下。
+
+## 13. Phase 5 実装設計: daemon lifecycle push (`job.update`) と 2 秒ポーリング撤廃
+
+この節は §5「プロトコルのギャップと移行方針」および §9-5 の実装承認用メモ。Phase 1–4 の
+`src/web/`（Host/Origin allowlist、セッション cookie、CSRF、CSP、read-only + mutation API、
+per-job WebSocket ストリーム、`WebAuthStore`）と、`src/daemon/daemon.ts` の既存 IPC push
+（`msg.watch` → `msg.new` を `PushFrame` で配信する `notifyWatchers` / `msgWatchers` の仕組み）を
+前提に、**ジョブの生成・status 遷移を daemon から push する `job.update` を追加**し、SPA の主ポーリング
+（現状 2 秒間隔の `startPolling`）を **push 駆動 + まれなフォールバックポーリング（30–60 秒）**へ置き換える。
+
+### 13.0 背骨となる事実（設計の前提）
+
+1. **IPC の push トランスポートは既に存在し、汎用である**。`src/ipc/transport.ts` の `PushFn` /
+   `Client.onPush` は `PushFrame` を型で縛らずに素通しするため、`PushFrame` に新イベントを足せば
+   **新しいトランスポートを一切足さずに** daemon → client の push を増やせる。`msg.watch` → `msg.new`
+   がその実証。`job.update` は同じ経路に相乗りする。
+2. **現状 `PushFrame` は `msg.new` 単形**（`src/protocol.ts`）。これを判別可能ユニオンに拡張し、
+   `msg.new` を温存したまま `job.update` を足す。
+3. **status 遷移に単一のチョークポイントは存在しない**。`daemon.ts` は `store.setJobStatus(...)` を
+   **11 箇所**で呼び、加えて `store.createJob`（→ running）と起動時 `store.interruptRunningJobs()`
+   （→ interrupted 一括）がある。既存 `hook()` ヘルパは終端遷移では発火するが、**ジョブ生成と
+   worktree provisioning 失敗時の `setJobStatus` を取りこぼす**ため、そのままでは完全な発火点にならない
+   （13.3 参照）。よって「11 箇所を機械的に薄い wrapper に置換して単一チョークポイントを作る」方針を採る。
+4. **`job.update` は Phase 4 Web Push とは別物**。Phase 4 は `src/hooks.ts` の `PushNotifier` /
+   `PushPayload`（ブラウザへ Service Worker + VAPID で届ける外部通知）。Phase 5 の `job.update` は
+   **daemon 内部の IPC push**で、生きている監視 UI をライブ更新するためだけの内部イベントである。
+   両者は payload も配送路もファイルも独立で、Phase 5 は **Phase 4 のファイル（`src/web/push.ts` /
+   `src/web/client/sw.ts` / VAPID / subscription テーブル）に一切触らない**。命名も `pushNotifier` を
+   再利用せず、`job.update` 専用の関数・型を新設して混同を避ける（13.6）。
+
+### 13.1 触るファイルと責務
+
+- `src/protocol.ts`
+  - `PushFrame` を判別可能ユニオンに拡張（`msg.new` | `job.update`）。`JobUpdate` payload 型を追加。
+  - `Request` ユニオンに `job.watch`（グローバル購読、params なし）を追加。`Method` は自動追随。
+- `src/daemon/daemon.ts`
+  - daemon ローカルの薄い wrapper `setStatus(jobId, status)` を追加し、**既存 11 箇所の
+    `store.setJobStatus(...)` をこれへ機械置換**する。wrapper は `store.setJobStatus` を呼んだ直後に
+    `emitJobUpdate(jobId, status)` を呼ぶ。
+  - `emitJobUpdate` と、`msgWatchers` と同型のグローバル購読集合 `jobWatchers:
+    Set<(frame: PushFrame) => boolean>` を追加。`msg.watch` の `notifyWatchers` と同じ prune 方式。
+  - `job.create` 成功パス末尾（`return ok(req.id, { job })` 直前）で `emitJobUpdate(job.id, "running")`
+    を 1 回発火（= 生成イベント）。
+  - `handle` の switch に `case "job.watch"` を追加：接続を `jobWatchers` に登録して `{ watching: true }`
+    を返す（`msg.watch` と同作法、ただし job 単位ではなくグローバル）。
+- `src/web/stream.ts`
+  - 共有 IPC `Client` で **起動時に `job.watch` を 1 回呼ぶ**。`client.onPush` を拡張し、
+    `event === "job.update"` のフレームをグローバル購読 WS 群へファンアウトする。
+  - WebSocket データ型を判別可能ユニオン化：`{ kind: "job"; jobId } | { kind: "jobs" }`。
+    `kind: "jobs"` の socket 集合 `jobsSubscribers` を持ち、`job.update` を全員へ配る。
+    `kind: "job"` の既存挙動（backfill + `msg.new`）は不変。
+- `src/web/server.ts`
+  - upgrade 判定に **グローバルストリーム `pathname === "/api/jobs/stream"`** の分岐を追加。
+    既存の Host/Origin/session チェックを同じ順序で通し、`server.upgrade(request, { data: { kind: "jobs" } })`。
+    既存の per-job `/api/jobs/:id/stream` は `{ kind: "job", jobId }` に変わるだけで挙動は不変。
+    **`/api/jobs/stream` を per-job パーサより前に判定する**こと（後者は jobId="" で 400 になるため）。
+- `src/web/client/app.ts`
+  - **2 秒 `startPolling` の主ループを撤廃**。初回ロード / ログイン後に一度 `refreshSession` +
+    `refreshJobs` + `initPush` を実行。
+  - グローバル job-updates WebSocket（`/api/jobs/stream`）を開き、`job.update` 受信で
+    **デバウンス（〜250ms）した `refreshJobs()`**（現在選択中ジョブなら `refreshDetail` も）を実行。
+    per-job msg ストリームの再接続ロジックを流用してバックオフ再接続する。
+  - **フォールバックポーリング 30–60 秒**を残す（`refreshSession` + `refreshJobs`）。WS 断・イベント取りこぼし・
+    セッション失効・再接続の隙間を拾う保険。定数 `POLL_MS` は用途を「フォールバック間隔」に変更。
+- `test/protocol.test.ts`（無ければ新規、または既存 protocol テストに追記）— 13.7-1。
+- `test/job-update.test.ts`（新規）— 実 daemon + 実 IPC の発火テスト、13.7-2。
+- `test/web-ws.test.ts`（拡張）— 実 daemon + 実 gateway + 実 WebSocket のブリッジテスト、13.7-3。
+- `docs/progress.md` — 実装後に Phase 5 完了内容だけ追記（本設計では触らない）。
+
+**触らない**: Phase 4 の `src/web/push.ts` / `src/web/client/sw.ts` / `WebAuthStore` の VAPID・
+subscription テーブル・`src/hooks.ts`。README。新規デーモン/サービス/依存。HOME/認証のリマップ。
+
+### 13.2 プロトコル拡張（`src/protocol.ts`）
+
+`PushFrame` を判別可能ユニオンにし、`msg.new` を温存する:
+
+```ts
+/** Minimal lifecycle payload for job.update. Internal to daemon↔gateway; not Web Push. */
+export interface JobUpdate {
+  job_id: string;
+  status: JobStatus;
+  updated_at: string;
+}
+
+/** Server-initiated push frame. Discriminated by `event`. */
+export type PushFrame =
+  | { type: "push"; event: "msg.new"; data: Message }
+  | { type: "push"; event: "job.update"; data: JobUpdate };
+```
+
+`Request` ユニオンに追加:
+
+```ts
+| { id: string; type: "request"; method: "job.watch"; params?: Record<string, never> }
+```
+
+- **payload は最小**：`job_id` / `status` / `updated_at` のみ。goal・cwd・メッセージ本文・runtime は
+  **載せない**。`job.update` は「ジョブ一覧が変わった」という**無効化シグナル**であり、SPA はこれを受けて
+  `job.list` を（デバウンスして）取り直す。full Job を載せない理由は 13.10。
+- `updated_at` は client 側で古い/重複フレームを無視するために持たせる（`Job.updated_at` と同値）。
+- ユニオン化に伴う既存コードへの影響（すべて型で吸収され、実挙動は不変）:
+  - `notifyWatchers`（`msg.new` を組み立て）と `stream.ts` の `frameForMessage` は既存のまま有効。
+  - `stream.ts` の `client.onPush` と `deliverPush` は `frame.event` で絞り込み済みなので、
+    `job.update` 分岐を足すだけ。`msg.watch` の watcher は `frame.event === "msg.new"` guard 済み。
+
+### 13.3 daemon 発火点と choke point 戦略（`src/daemon/daemon.ts`）
+
+**方針: 11 箇所の `store.setJobStatus` を薄い wrapper へ機械置換して単一チョークポイントを作る。**
+`hook()` に相乗りしない理由は、`hook()` がジョブ生成と provisioning 失敗時の `setJobStatus` を
+カバーせず、遷移の取りこぼしが起きるため（13.10 の代替案参照）。
+
+wrapper と発火:
+
+```ts
+const setStatus = (jobId: string, status: JobStatus): void => {
+  store.setJobStatus(jobId, status);
+  emitJobUpdate(jobId, status);
+};
+
+const emitJobUpdate = (jobId: string, status: JobStatus): void => {
+  if (jobWatchers.size === 0) return;
+  const job = store.getJob(jobId);
+  const frame: PushFrame = {
+    type: "push",
+    event: "job.update",
+    data: { job_id: jobId, status, updated_at: job?.updated_at ?? new Date().toISOString() },
+  };
+  for (const watcher of jobWatchers) {
+    if (!watcher(frame)) jobWatchers.delete(watcher); // prune dead connections
+  }
+};
+```
+
+置換する 11 の `setJobStatus` サイト（すべて `setStatus` へ）:
+
+| # | 箇所 | 遷移 |
+| --- | --- | --- |
+| 1 | supervisor がツール呼び出し無しでテキストのみ返した | → failed |
+| 2 | ターン失敗（supervisor / タイムアウト） | → failed |
+| 3 | worker 連続失敗が閾値到達 | → failed |
+| 4 | loop escalation が閾値到達 | → failed |
+| 5 | `enqueueDispatch` catch: supervisor クラッシュ | → failed |
+| 6 | `enqueueDispatch` catch: worker クラッシュ閾値到達 | → failed |
+| 7 | worktree provisioning 失敗 | → failed |
+| 8 | `job.complete` | → done |
+| 9 | `job.fail` | → failed |
+| 10 | `job.stop` | → failed |
+| 11 | `job.kill` | → interrupted |
+
+加えて **生成イベント**: `job.create` 成功パス末尾で `emitJobUpdate(job.id, "running")` を 1 回。
+（provisioning 失敗時は #7 の `setStatus(failed)` が発火するので、生成 push は成功パスにのみ置く。）
+
+**起動時 `interruptRunningJobs()` は emit しない**（そのタイミングでは `jobWatchers` が空、かつ gateway は
+接続直後に `job.list` で初期スナップショットを取るため）。`emitJobUpdate` は `jobWatchers.size === 0` で
+早期 return するので、置いても実害はないが、意図を明確にするため生成/遷移サイトのみに置く。
+
+**発火の一意性**: 各 `setStatus` 呼び出し = 1 push。終端遷移は既存ロジック上ジョブごとに一度しか起きない
+（`store.getJob(...)?.status !== "running"` ガードで二重遷移が抑止されている）。生成も 1 回。
+よって重複 push は原理的に発生しない。`emitJobUpdate` は fire-and-forget（購読者が居なければ no-op、
+書き込み失敗は prune のみ）で daemon の実行を止めない。
+
+### 13.4 ゲートウェイ WebSocket ブリッジ（`src/web/stream.ts` / `src/web/server.ts`）
+
+`msg.watch`（per-job push を gateway が受けブラウザへファンアウト）と**同じ二段構え**を `job.update` に適用:
+
+- `createWebStreamBridge` は共有 `Client` で **起動時に一度 `job.watch` を発行**（`ensureWatched` の
+  グローバル版。job 単位ではないので単純に 1 回）。
+- `client.onPush` を拡張:
+  - `frame.event === "msg.new"` → 既存の `deliverPush`（per-job `subscribers`）。
+  - `frame.event === "job.update"` → 新設 `deliverJobUpdate`（`jobsSubscribers` 全員へ `sendFrame`）。
+- WS データ型: `type StreamSocketData = { kind: "job"; jobId: string } | { kind: "jobs" }`。
+  `open` で `kind` により分岐：`"job"` は現行どおり backfill + `msg.new`、`"jobs"` は `jobsSubscribers`
+  へ登録するだけ（open 時の backfill 無し。初期スナップショットは SPA の初回 `job.list` が担う）。
+- `server.ts` の upgrade 判定にグローバル分岐を追加（Host/Origin/session チェックは既存ヘルパを同順で流用）:
+
+```
+pathname === "/api/jobs/stream"        → upgrade { kind: "jobs" }   // ★ per-job パーサより前
+pathname startsWith "/api/jobs/" && endsWith "/stream" → 従来どおり { kind: "job", jobId }
+```
+
+**分離の要点**: `job.update` は `jobsSubscribers` にしか流れず、`msg.new` は per-job `subscribers` にしか
+流れない。per-job 詳細ストリームの契約（`msg.new` のみ）は不変で、既存 `web-ws` テストは通り続ける。
+
+### 13.5 SPA 消費とポーリング削減（`src/web/client/app.ts`）
+
+現状の主ループ:
+
+```ts
+startPolling(async () => {
+  await refreshSession();
+  if (csrfToken) { await refreshJobs(); await initPush(); }
+}, POLL_MS /* 2000 */);
+```
+
+Phase 5 後:
+
+1. **初回のみ** `refreshSession` → 認証済みなら `refreshJobs` + `initPush` を一度実行。
+2. 認証済みになったら **グローバル job-updates WS（`/api/jobs/stream`）を開く**。
+   - `job.update` フレーム受信 → **デバウンス（〜250ms）した `refreshJobs()`**。受信 payload の `job_id`
+     が `currentJobId` なら `refreshDetail(currentJobId)` も。デバウンスで連続遷移（生成直後に done 等）の
+     取得を 1 回にまとめる。
+   - open/close/error と再接続バックオフは per-job ストリームの実装（`scheduleStreamReconnect` 等）を
+     グローバル版に流用。ログアウト時は `closeStream` 同様に閉じる。
+3. **フォールバックポーリング 30–60 秒**（`startPolling` を残すが間隔を延長）で `refreshSession` +
+   `refreshJobs` を実行。役割:
+   - WS 断中・`job.watch` 未確立時の劣化フォールバック。
+   - `job.update` を取りこぼした場合の収束（結果整合の保険）。
+   - セッション失効・ログアウトの検出（現行 2 秒ループが担っていた責務の継続）。
+
+**トレードオフ（明示）**: runtime 表示（`idle_ms` / `in_flight` / possibly-stalled バッジ）は status 遷移では
+変化しない連続量なので、push だけでは更新されず**フォールバック間隔（30–60 秒）でのみ再取得**される。
+選択中ジョブは per-job `msg.new` 到着時に `refreshDetail` を呼べば活動に追随できるが、idle タイマーの
+表示粒度が 2 秒→30–60 秒に粗くなる点は許容（§5 の「まれなフォールバック」方針どおり）。これは残論点 13.9。
+
+### 13.6 Phase 4 Web Push との分離（混同防止）
+
+| 観点 | Phase 4 Web Push | Phase 5 `job.update` |
+| --- | --- | --- |
+| 目的 | ブラウザを閉じても届く外部通知 | 生きている監視 UI のライブ更新 |
+| 型 | `PushPayload`（hooks.ts） | `JobUpdate`（protocol.ts） |
+| 配送路 | Service Worker + VAPID + ベンダ push | daemon IPC `PushFrame` → gateway WS |
+| 発火点 | `hook()` の 4 箇所（終端 + attention） | 生成 + 全 status 遷移（11 箇所）|
+| ファイル | `push.ts` / `sw.ts` / VAPID テーブル | `protocol.ts` / `daemon.ts` / `stream.ts` |
+
+Phase 5 は Phase 4 の型・関数・ファイルを**再利用も改変もしない**。`pushNotifier` という名前は Web Push
+専用のまま残し、`job.update` 側は `emitJobUpdate` / `jobWatchers` という別名を用いる。両者が status を
+導出するのは偶然の一致であり、依存関係は無い。
+
+### 13.7 テスト戦略（`bun test`）
+
+Phase 3/4 と同じ実在統合スタイル（`startDaemon` + 実 IPC / `startWebGateway` + 実 WebSocket、temp ファイル、
+外部サービス無し、daemon・gateway の配線をモックしない）。
+
+1. **プロトコル型/形状**（`test/protocol.test.ts`）
+   - `job.update` の `PushFrame` を構築し JSON ラウンドトリップ、`event`/`data.job_id`/`data.status`/
+     `data.updated_at` を assert。`msg.new` フレームが従来どおり構築できることも確認（ユニオン退行防止）。
+2. **daemon 発火（実 IPC）**（`test/job-update.test.ts`）
+   - 実 daemon を temp socket で起動、実 `Client` を接続、`job.watch` を発行、`client.onPush` を記録。
+   - fake runner で `job.create` → 完了まで駆動し、push が `running`（生成）→ `done` の順で**各一度**
+     届くことを assert。別ケースで `job.stop`→`failed`、`job.kill`→`interrupted`、`job.fail`→`failed`。
+   - `job.watch` の応答が `{ watching: true }`。購読前の遷移が届かないこと、購読後は届くことを確認。
+   - **暗号もブラウザも経由しない、純粋な daemon↔IPC 配線テスト**。
+3. **実 daemon + 実 gateway + 実 WebSocket ブリッジ**（`test/web-ws.test.ts` を拡張）
+   - グローバル `/api/jobs/stream` を認証付きで開き、IPC もしくは HTTP でジョブを生成→完了させ、
+     WS が `job.update`（`running`→`done`）を受けることを assert。二クライアントへのファンアウトも確認。
+   - **退行防止**: 既存 per-job `/api/jobs/:id/stream` が `job.update` を運ばず `msg.new` のみであること。
+   - `/api/jobs/stream` の upgrade が **未認証 → 401 / 不正 Origin → 403** で拒否されること
+     （既存 per-job の拒否テストと同型で追加）。
+
+Run before handoff:
+
+```sh
+bun test test/protocol.test.ts test/job-update.test.ts test/web-ws.test.ts
+bun run typecheck
+bunx oxlint src test
+oxfmt
+```
+
+### 13.8 「end-to-end で動く」の定義
+
+- **エントリポイント**: `agvsr web` を `http://localhost:<PORT>` で配信し、ブラウザで開く（Phase 1–4 と同じ）。
+- **ハッピーパス**: ログイン → ジョブ一覧表示（初回 `job.list` 1 回）→ グローバル `/api/jobs/stream` 接続。
+  別経路（`agvsr create` / GUI の Create フォーム / 別ブラウザ）でジョブが生成されると、daemon が
+  `job.update{running}` を push → gateway が WS でファンアウト → SPA が**2 秒待たずに**一覧へ反映。
+  そのジョブが done/failed/interrupted へ遷移すると `job.update` が届き一覧が即更新。**2 秒ポーリングは無し**、
+  30–60 秒のフォールバックのみが背後で動く。
+- **成功条件（自動検証で機械的に示せる部分）**: (a) `job.watch` 購読後、daemon が生成と各遷移で正しい
+  `{job_id, status}` を push し（13.7-2）、(b) gateway が実 WebSocket でそれをブラウザ相当クライアントへ
+  ブリッジし（13.7-3）、(c) per-job 詳細ストリームが従来どおり `msg.new` のみを運ぶこと。実ブラウザでの
+  「2 秒ポーリング撤廃後もライブ更新される」体感は手動 e2e で確認する。
+
+### 13.9 リスクと残論点
+
+- **runtime 表示の粒度低下**: `idle_ms` / possibly-stalled は status 遷移では動かないため push で更新されず、
+  フォールバック間隔でのみ再取得（13.5 のトレードオフ）。うるさくない範囲でフォールバックを 30 秒寄りにするか、
+  選択中ジョブのみ `msg.new` 到着時に `refreshDetail` する軽い追随を入れるかは実装計画で確定。
+- **WS 断中の取りこぼし**: 再接続の隙間に起きた遷移はフォールバックポーリングが収束させる（結果整合）。
+  グローバルストリームは open 時に backfill しない設計なので、**再接続直後に SPA が `refreshJobs` を 1 回**
+  呼ぶこと（per-job の prime と同様の一手）を実装時に忘れないこと。
+- **gateway の IPC client 再接続**: 現行ブリッジは daemon 再起動時に IPC client を張り直さない既存制約が
+  あり、`job.watch` も同じ制約を負う。これは Phase 5 の新規課題ではなく、対応は本スコープ外。
+- **`agvsr watch` / `agvsr wait` への波及は将来のフォローアップ（本スコープ外）**。`job.update` は CLI の
+  `agvsr watch`（多ジョブ横断のライブ表示）や `agvsr wait`（終端までブロック）を polling 無しで実装する
+  土台になり得るが、本 Phase では **Web UI の消費のみ**を実装し、CLI 側は既存挙動を変えない。明示的に非対象。
+
+### 13.10 検討した代替案
+
+- **`hook()` に `job.update` を相乗り**（Phase 4 の `pushNotifier` と同じ発火点を使う）: 実装は最小だが、
+  `hook()` は**ジョブ生成と provisioning 失敗時の `setJobStatus` を発火しない**ため生成/失敗イベントを
+  取りこぼす。要件は「生成 + 全 status 遷移」なので却下。`setStatus` wrapper で全 11 サイトを覆う方が
+  取りこぼしゼロを保証でき、置換もほぼ機械的。
+- **`msg.watch` を job 横断に拡張して流用**: `msg.watch` は job 単位設計で、新規ジョブや未 watch のジョブの
+  lifecycle を拾えない。監視 UI が必要とするのはグローバルな一覧変化なので、params なしの独立 `job.watch`
+  を足す方が自然かつ小さい。新トランスポートは足さない（同じ `PushFrame`/`PushFn`）。
+- **`job.update` payload に full `Job` を載せて SPA を round-trip 無しで更新**: payload が肥大化し
+  「最小・内部限定」に反する。生成直後は worktree/branch 等が確定過程にあり、`job.list` が権威。無効化
+  シグナル + デバウンス refetch の方が単純で、削除/生成/リネームにも頑健。却下（最小 payload を採用）。
+- **daemon が SSE/新エンドポイントで直接ブラウザへ push**: 二重トランスポート化・認証/CSP の再設計が必要で
+  「新デーモン/トランスポート禁止」に反する。既存 IPC push → gateway WS ブリッジ（`msg.new` と同構造）で足りる。却下。
+- **2 秒ポーリングを完全撤廃（フォールバックも消す）**: WS 断・イベント取りこぼし・セッション失効の検出手段が
+  無くなる。§5 が求める「まれな 30–60 秒フォールバック」を残す方が堅牢。却下。
