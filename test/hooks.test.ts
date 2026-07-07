@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "../src/ipc/transport.ts";
 import { parseTeam } from "../src/config/team.ts";
 import type { TurnDispatch } from "../src/daemon/daemon.ts";
-import type { HookEvent } from "../src/hooks.ts";
+import type { HookEvent, PushPayload } from "../src/hooks.ts";
 import type { Job } from "../src/protocol.ts";
 
 const TEAM_YAML = `
@@ -38,6 +38,7 @@ async function makeDaemon(
   runner: (
     d: TurnDispatch,
   ) => ReturnType<(d: TurnDispatch) => Promise<import("../src/adapters/types.ts").TurnResult>>,
+  pushFired?: PushPayload[],
 ) {
   const base = makeBase();
   const sock = `${base}.sock`;
@@ -55,6 +56,11 @@ async function makeDaemon(
     hookRunner: (cmd, event) => {
       fired.push({ name: cmd, event });
     },
+    pushNotifier: pushFired
+      ? (payload) => {
+          pushFired.push(payload);
+        }
+      : undefined,
   });
   return { daemon, sock, db, base, repo };
 }
@@ -195,6 +201,125 @@ roles:
 
     expect(fired.length).toBe(0);
 
+    c.close();
+    await daemon.close();
+    cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);
+  });
+});
+
+describe("pushNotifier spy (Phase 4 hook wiring)", () => {
+  it("fires with status=done when job completes", async () => {
+    const pushFired: PushPayload[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(
+      TEAM_YAML,
+      [],
+      async (d) => ({
+        events: [],
+        outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
+      }),
+      pushFired,
+    );
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "push done", cwd: repo });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    await c.request("job.complete", { job_id: jobId, result: "finished" });
+    expect(pushFired.some((p) => p.job_id === jobId && p.status === "done")).toBe(true);
+    c.close();
+    await daemon.close();
+    cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);
+  });
+
+  it("fires with status=failed when job.fail is called", async () => {
+    const pushFired: PushPayload[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(
+      TEAM_YAML,
+      [],
+      async (d) => ({
+        events: [],
+        outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
+      }),
+      pushFired,
+    );
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "will fail",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    await c.request("job.fail", { job_id: jobId, reason: "reason" });
+    expect(pushFired.some((p) => p.job_id === jobId && p.status === "failed")).toBe(true);
+    c.close();
+    await daemon.close();
+    cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);
+  });
+
+  it("fires with status=interrupted when job.kill is called", async () => {
+    const pushFired: PushPayload[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(
+      TEAM_YAML,
+      [],
+      async (d) => {
+        await Bun.sleep(300);
+        return {
+          events: [],
+          outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
+        };
+      },
+      pushFired,
+    );
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "kill me",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 20; i++) {
+      await Bun.sleep(20);
+      const r = await c.request<{ job: Job }>("job.get", { id: jobId });
+      const job = r.ok ? r.result.job : null;
+      if (job?.status === "running") break;
+    }
+    await c.request("job.kill", { job_id: jobId });
+    for (let i = 0; i < 30; i++) {
+      await Bun.sleep(20);
+      if (pushFired.some((p) => p.job_id === jobId)) break;
+    }
+    expect(pushFired.some((p) => p.job_id === jobId && p.status === "interrupted")).toBe(true);
+    c.close();
+    await daemon.close();
+    cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);
+  });
+
+  it("fires with status=attention when supervisor sends to user", async () => {
+    const pushFired: PushPayload[] = [];
+    const seen: TurnDispatch[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(
+      TEAM_YAML,
+      [],
+      async (d) => {
+        seen.push(d);
+        return { events: [], outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 } };
+      },
+      pushFired,
+    );
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "attention test",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "user",
+      body: "Need your attention.",
+    });
+    expect(pushFired.some((p) => p.job_id === jobId && p.status === "attention")).toBe(true);
     c.close();
     await daemon.close();
     cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);

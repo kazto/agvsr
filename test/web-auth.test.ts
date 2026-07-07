@@ -82,7 +82,9 @@ describe("web auth", () => {
       expect(tables.map((row) => row.name)).toEqual([
         "web_bootstrap_tokens",
         "web_operation_audit",
+        "web_push_subscriptions",
         "web_sessions",
+        "web_vapid_keys",
       ]);
       sqlite.close();
 

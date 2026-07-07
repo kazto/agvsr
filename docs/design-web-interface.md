@@ -393,3 +393,244 @@ bunx oxlint src test
   the current polling plus per-job message WebSocket model.
 - Trust SameSite cookies without CSRF header: rejected because the security design explicitly requires CSRF on
   state-changing APIs, and the existing double-submit machinery is already present.
+
+## 12. Phase 4 実装設計: プッシュ通知 (Service Worker + VAPID + subscription 永続化 + lifecycle トリガ)
+
+この節は §9-4 / §6 の実装承認用メモ。Phase 1/2/3 の `src/web/`（Host/Origin allowlist、セッション
+cookie、CSRF、CSP、read-only + mutation API、WebSocket、`WebAuthStore` の SQLite/WAL/migration 規約）と、
+`src/daemon/daemon.ts` の既存 D26 フックディスパッチ（`on_job_done` / `on_job_failed` /
+`on_supervisor_message` / `on_job_stalled`）を前提に、その上に Web Push を積む。Phase 5 の daemon
+lifecycle push (`job.update`) は扱わず、監視 UI は既存の `job.list` ポーリングのままにする。
+
+### 12.0 背骨となる 3 つの事実（設計の前提）
+
+1. **daemon store と web auth-store は既定で同一 SQLite ファイル**。`startDaemon` の `storeFile` と
+   `startWebGateway` の `storeFile` はどちらも `storePath()`（既定 `inbox.sqlite`、`AGVSR_STORE` で上書き）に
+   解決される。したがって subscription / VAPID 鍵を `WebAuthStore` の新テーブルに置けば、**daemon プロセスも
+   同じファイルからそれを読める**。これが Phase 5 を持ち込まずに daemon 側から push を送れる根拠。
+2. **フックは既に正しい瞬間・正しい回数で発火している**。`daemon.ts` の `hook()` ヘルパが
+   終端遷移（`job.complete` → done、`job.fail`/`job.stop` → failed、`job.kill` → interrupted、
+   stall 検出 → stalled）と supervisor→user メッセージ（escalation / 人間の入力待ち）で一度ずつ発火する。
+   Phase 4 はこの発火点に push を相乗りさせるだけで、daemon プロトコルもフック契約も変えない。
+3. **`on_job_failed` イベントだけでは failed と interrupted を区別できない**（kill は
+   `event: "job_failed"` を出しつつ status を `interrupted` にする）。よって通知の `status` は
+   イベント名からではなく `store.getJob(job_id).status`（daemon が保持する権威値）から解決する。
+
+4. **Web Push の暗号は Bun 組み込みの WebCrypto + `Buffer` で完結する**（ECDH P-256 /
+   HKDF-SHA256 / AES-128-GCM / ES256 JWT はすべて `crypto.subtle` にある）。`web-push` パッケージや
+   ビルドツールは不要。もし実装中に組み込みだけでは満たせない箇所が判明したら、依存を足さずに
+   **ブロッカーとしてエスカレーションする**（現時点の調査では不要と結論）。
+
+### 12.1 触るファイルと責務
+
+- `src/web/auth-store.ts`
+  - `web_vapid_keys`（単一行、`web_bootstrap_tokens` と同じ `id = 1` 方式）と `web_push_subscriptions`
+    テーブルを既存 `SCHEMA` に追加する。同じ DB 接続・WAL・冪等 `CREATE IF NOT EXISTS` 方式
+    （Phase 3 `web_operation_audit` と同一規約）。
+  - アクセサを追加: `getOrCreateVapidKeys()`（無ければ生成して永続化し返す）、`getVapidPublicKey()`、
+    `addPushSubscription(sub)`、`listPushSubscriptions()`、`removePushSubscription(endpoint)`。
+- `src/web/push.ts`（新規）
+  - Web Push 暗号一式を自己完結で実装する: VAPID JWT 署名（ES256）、RFC 8291 aes128gcm ペイロード暗号化、
+    `sendPush(subscription, vapidKeys, payloadBytes)`（`fetch` で購読 endpoint へ POST、201/200 成功、
+    404/410 は失効とみなし呼び出し側へ通知）。
+  - `createPushNotifier(storeFile: string): (payload: { job_id: string; status: string }) => void`
+    を公開する。これは storeFile 上に自前の `WebAuthStore` ハンドルを開き、VAPID 鍵 + 全 subscription を
+    読み、最小ペイロードを暗号化して各 endpoint へ送る。`fireHook` と同じく **fire-and-forget・例外は
+    握り潰す**（push が daemon を止めない）。404/410 の subscription は `removePushSubscription` で掃除する。
+- `src/hooks.ts`
+  - 既存 `HookEvent` / `fireHook` の隣に push 通知の抽象を置く: `PushPayload`（`{ job_id, status }`）と
+    `PushNotifier` 型、既定の no-op notifier。daemon はこの型を注入経由で受け取る（web 実装を daemon に
+    import させず、テストでスパイ注入できるようにするため）。
+- `src/daemon/daemon.ts`
+  - `StartDaemonOptions` に `pushNotifier?: PushNotifier`（既定 no-op、`hookRunner` と同じ注入パターン）を追加。
+  - `hook()` ヘルパ内で、対象 4 フックのときに `status` を導出して `pushNotifier({ job_id, status })` を呼ぶ:
+    `on_job_done`→`"done"`、`on_job_stalled`→`"stalled"`、`on_supervisor_message`→`"attention"`、
+    `on_job_failed`→`store.getJob(job_id)?.status`（`"failed"` か `"interrupted"`）。daemon は web を import しない。
+- `src/cli/agvsr.ts`
+  - 本番の daemon 起動経路で、既定の実 notifier（`createPushNotifier(storeFile)` from `src/web/push.ts`）を
+    `startDaemon` に注入する。これで daemon 単体でも（web GUI プロセスが起動していなくても）push が届く
+    ＝「ブラウザを閉じていても届く」を満たす。web import はこの CLI 配線点に閉じる。
+- `src/web/security.ts`
+  - CSP に `worker-src 'self'` を追加する（Service Worker スクリプト取得のため）。`connect-src 'self'` は
+    据え置き。**外部 push サービスへの接続はブラウザ内部（PushManager）と daemon 側 `fetch` が行うため、
+    ページ CSP を外向きに緩める必要はない**。
+- `src/web/routes.ts`
+  - `GET /sw.js`（Service Worker、ルートスコープ配信、`Service-Worker-Allowed: /`）を追加。
+  - `GET /api/push/config`（要セッション）→ `{ vapidPublicKey: base64url, enabled: true }`。
+  - `POST /api/push/subscribe` / `POST /api/push/unsubscribe`（session + Origin + CSRF、Phase 3 mutation と
+    同じ順序・同じヘルパ `authenticatedSessionHash` / `touchSession` / `csrfMatches` / `errorJson`）。
+- `src/web/server.ts`
+  - `ctx.assets` に `swJs`（`src/web/client/sw.ts` を既存 `loadClientSource` で transpile）を追加。VAPID 公開鍵は
+    起動時に `authStore.getOrCreateVapidKeys()` で確定させておく。
+- `src/web/client/sw.ts`（新規）
+  - Service Worker。`push` イベントで最小ペイロードから `showNotification("agvsr", { body, tag, data })`、
+    `notificationclick` で `/#/jobs/<id>` を開く/フォーカスする。`tag` に job_id を使い重複表示を抑える。
+- `src/web/client/app.ts`
+  - 「通知を有効化 / 無効化」トグルを追加。フロー: capability 検出 → `/sw.js` 登録 →
+    `Notification.requestPermission()` → `/api/push/config` から公開鍵取得 →
+    `registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey })` →
+    購読 JSON を `/api/push/subscribe` へ POST（既存 `api()` の `X-CSRF-Token` 経路を再利用）。無効化は
+    `unsubscribe()` + `/api/push/unsubscribe`。すべて `textContent` / DOM 生成、`innerHTML` 不使用。
+- `src/web/client/styles.css`
+  - トグルと権限状態（未対応 / 拒否 / 有効）の表示スタイルを追加。inline style は使わない。
+- `test/web-push.test.ts`（新規）— 12.6 参照。
+- `test/hooks.test.ts`（または `test/web-push.test.ts`）— `pushNotifier` スパイでフック発火を検証。
+- `docs/progress.md` — 実装後に Phase 4 完了内容だけ追記（本設計では触らない）。
+
+### 12.2 データモデル（`WebAuthStore` 追加テーブル）
+
+```sql
+CREATE TABLE IF NOT EXISTS web_vapid_keys (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  public_key  TEXT NOT NULL,   -- base64url, raw uncompressed EC point (65 bytes)
+  private_key TEXT NOT NULL,   -- PKCS8 (or JWK) base64, never leaves the server
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+  endpoint    TEXT PRIMARY KEY,
+  p256dh      TEXT NOT NULL,   -- base64url, subscriber public key
+  auth        TEXT NOT NULL,   -- base64url, subscriber auth secret (16 bytes)
+  created_at  TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+```
+
+- VAPID 鍵はプロセス横断で 1 組を共有（生成は初回 `getOrCreateVapidKeys()` 時、以降は読み出し）。
+  `private_key` は API では絶対に返さない。`public_key` のみ `/api/push/config` で配る。
+- subscription は endpoint を主キーに upsert（同一ブラウザの再購読を重複させない）。
+- 掃除: daemon 側の送信で 404/410 を受けたら `removePushSubscription(endpoint)`。
+
+### 12.3 HTTP API（追加）
+
+| Endpoint | Method | Auth | Body | Success |
+| --- | --- | --- | --- | --- |
+| `/sw.js` | GET | 不要 | — | `200` JS（`Service-Worker-Allowed: /`, `Content-Type: application/javascript`） |
+| `/api/push/config` | GET | session | — | `200 { "vapidPublicKey": string, "enabled": true }` |
+| `/api/push/subscribe` | POST | session + Origin + CSRF | `{ "endpoint": string, "keys": { "p256dh": string, "auth": string } }` | `201 { "subscribed": true }` |
+| `/api/push/unsubscribe` | POST | session + Origin + CSRF | `{ "endpoint": string }` | `200 { "unsubscribed": true }` |
+
+Validation（IPC 前の web ローカル、Phase 3 と同方針で保守的に）:
+
+- subscribe/unsubscribe は認証済み `__Host-agvsr_session` cookie 必須（無ければ `401`）。
+- unsafe method の Origin allowlist と double-submit CSRF（`X-CSRF-Token` == `__Host-agvsr_csrf`）を通す。
+- `endpoint` は非空文字列かつ `https:` の絶対 URL であること（それ以外は `400`）。`p256dh`/`auth` は非空
+  base64url 文字列で長さ上限を課す（例: endpoint 2 KiB、p256dh 256 B、auth 64 B）。上限超過や型不一致は `400`。
+- 不正 JSON は `400`。未知フィールドは無視。エラー本文は Phase 3 と同じ `{ "error": { "code", "message" } }`。
+- subscribe/unsubscribe は job を動かさない設定操作なので **Phase 3 の `web_operation_audit` には記録しない**
+  （必要なら将来 `push.subscribe` として同ヘルパで足せる余地は残す）。
+
+### 12.4 通知トリガと最小ペイロード（daemon 側）
+
+- 発火点は既存 `hook()` の 4 箇所のみ。追加の daemon イベントも IPC も無い（Phase 5 を持ち込まない）。
+- `pushNotifier({ job_id, status })` に渡す `status` は:
+  - `on_job_done` → `"done"`
+  - `on_job_failed` → `store.getJob(job_id)?.status`（`"failed"` / `"interrupted"` を正しく反映）
+  - `on_job_stalled` → `"stalled"`
+  - `on_supervisor_message` → `"attention"`（escalation / 人間の入力待ち。supervisor→user メッセージでのみ発火）
+- **ペイロードは `{ "job_id": <id>, "status": <上記> }` のみ**。goal 文言・メッセージ本文・エージェント出力・
+  reason は一切含めない（§6 / §7 の本文最小化）。job_id はランダム UUID であり、push ベンダに egress しても
+  内容漏洩にならない。詳細は通知クリックで localhost を開いて取得する。
+- 重複排除: 終端フックはトランジションごとに一度だけ発火（stall は既存 `stallNotified` セットでガード）。
+  SW 側でも `tag: job_id` で同一ジョブの通知を畳む。`on_supervisor_message` は毎メッセージ発火し得るので
+  **過剰通知の可能性を残論点とする**（12.8）。
+- 送信は fire-and-forget: 例外・ネットワーク失敗は握り潰し、404/410 のみ subscription を掃除する。
+
+### 12.5 Web Push 暗号（`src/web/push.ts`、組み込みのみ）
+
+依存を増やさないための核。すべて `crypto.subtle` + `Buffer`（base64url）で実装する。
+
+- **VAPID (RFC 8292)**: `crypto.subtle.sign("ECDSA", {hash:"SHA-256"}, …)` で JWT（header `{alg:ES256,typ:JWT}`,
+  payload `{aud: <endpoint origin>, exp: now + <12h 未満>, sub: "mailto:agvsr@localhost"}`）を署名。
+  `Authorization: vapid t=<jwt>, k=<base64url public key>` を付す。
+- **ペイロード暗号 (RFC 8291 / aes128gcm, RFC 8188)**:
+  1. サーバ側 ephemeral ECDH P-256 鍵を `generateKey`。
+  2. 購読者 `p256dh` を raw import し `deriveBits(ECDH)` で共有秘密。
+  3. `IKM = HKDF-Extract(auth_secret, ecdh_secret)` → `HKDF-Expand(key_info, 32)`、
+     `key_info = "WebPush: info\0" || ua_public(65) || as_public(65)`。
+  4. `salt`（16 ランダム）で `CEK = HKDF(salt, IKM, "Content-Encoding: aes128gcm\0", 16)`、
+     `NONCE = HKDF(salt, IKM, "Content-Encoding: nonce\0", 12)`。
+  5. 本文に区切り `0x02`（+任意パディング）を付け AES-128-GCM で暗号化。
+  6. ヘッダ `salt(16) || rs(4=4096) || idlen(1=65) || as_public(65)` に暗号文を連結して body に。
+  - リクエストヘッダ: `Content-Encoding: aes128gcm`, `Content-Type: application/octet-stream`, `TTL`,
+    `Content-Length`, `Authorization`（VAPID）。
+- 送信は `fetch(endpoint, { method: "POST", headers, body })`。実装リスクの中心はこの暗号の正しさなので、
+  12.6 の往復スモークテストで担保する。
+
+### 12.6 テスト戦略（`bun test`）
+
+Phase 3 と同じ実在統合スタイル（`startDaemon` + `startWebGateway` + 実 HTTP、temp ファイル、外部サービス無し）。
+
+1. **subscribe/unsubscribe エンドポイント**（`web-ops` 系ハーネスを流用）
+   - 認証無し → `401`、Origin 不正 → `403`、CSRF 不正 → `403`、いずれも副作用なし。
+   - 正常 subscribe → `web_push_subscriptions` に 1 行、`GET /api/push/config` が公開鍵を返す。
+   - unsubscribe → 行削除。不正 JSON / 非 https endpoint / 上限超過 → `400`。
+2. **フック発火（daemon 配線）**: `hooks.test.ts` と同じく `pushNotifier` にスパイを注入し、
+   `job.create` → `job.complete`/`job.fail`/`job.stop`/`job.kill`/stall、及び supervisor→user `msg.send` で、
+   スパイが期待 `{ job_id, status }`（done / failed / interrupted / stalled / attention）で一度ずつ呼ばれることを検証。
+   **暗号を経由しない配線テスト**。
+3. **実クリプトのスモークテスト（必須・モックしない）**:
+   - `getOrCreateVapidKeys()` で実鍵生成。
+   - 疑似ブラウザ購読を生成（P-256 ECDH 鍵ペア + 16 バイト auth secret → `{endpoint, keys:{p256dh, auth}}`）。
+   - `push.ts` の暗号関数で `{job_id, status}` を aes128gcm 本文に暗号化し、**テスト内で購読者秘密鍵を使って
+     RFC 8291 の逆手順で復号**、平文がペイロードに一致することを assert（鍵生成 + 暗号を実経路で往復）。
+   - さらに `Bun.serve` でローカルの偽 push endpoint を立て、それを `endpoint` にして `sendPush` を実行し、
+     受信側で `Content-Encoding: aes128gcm` と `Authorization: vapid …` ヘッダと本文が届くことを assert。
+     404/410 を返す偽 endpoint で subscription が掃除されることも確認。
+
+Run before handoff:
+
+```sh
+bun test test/web-push.test.ts test/hooks.test.ts test/web-ops.test.ts
+bun run typecheck
+bunx oxlint src test
+oxfmt
+```
+
+### 12.7 「end-to-end で動く」の定義
+
+- **エントリポイント**: `agvsr web` を `http://localhost:<PORT>`（TCP loopback）で配信。Service Worker / Push は
+  secure context を要求するため `http://localhost`・`http://127.0.0.1`・HTTPS トンネルで成立する。
+  **Unix domain socket 経由や非 localhost の平文 HTTP ではブラウザが Push を許可しない**（12.8 リスク）。
+- **ハッピーパス**: ログイン → 「通知を有効化」→ 権限付与 → subscription 永続化。以後、あるジョブが
+  done に遷移 → daemon の `pushNotifier` が aes128gcm 暗号本文を購読 endpoint へ POST → ブラウザ SW が
+  `push` を受け「agvsr / Job <id> done」を表示 → クリックで該当ジョブ詳細へ。
+- **成功条件（自動検証で機械的に示せる部分）**: (a) subscribe が行を永続化し、(b) `job.complete` などが
+  daemon notifier に正しい `{job_id, status}` を渡し、(c) 実鍵での暗号本文が偽 push endpoint に正しいヘッダ付きで
+  到達し、購読者鍵で復号可能。実ブラウザ + 実 push サービスの通知表示は手動 e2e で確認する。
+
+### 12.8 リスクと残論点
+
+- **Secure context 制約**: Push は localhost TCP か HTTPS トンネル前提。Unix socket / 非 localhost 平文では
+  不可。UI は capability 検出で「この接続経路では通知を利用できません」と degrade する必要がある。
+- **`on_supervisor_message` の過剰通知**: supervisor→user の全メッセージで発火し得る。既定は「全メッセージ =
+  attention」だが、`kind === "escalation"` のみに絞る選択肢もある。実装計画で確定（推奨: まず全メッセージ +
+  SW 側 `tag` 集約、うるさければ escalation 限定へ）。
+- **クロスプロセス SQLite**: daemon は `Store`（jobs/messages を書く）と push 用 `WebAuthStore`
+  （subscription/VAPID を読む）の 2 ハンドルを同一 WAL ファイルに開き、加えて web GUI プロセスも同ファイルを開く。
+  WAL は複数リーダ + 単一ライタ/行集合で成立するため整合は取れるが、subscription は web が書き daemon が読む
+  結果整合であることを明記。
+- **VAPID `sub` の値**: 一部 push サービスは有効な `mailto:`/`https:` を要求する。`mailto:agvsr@localhost` を
+  既定にするが、実配送で弾かれる可能性は実装時に確認（設定可能にする余地）。
+- **暗号の正しさ**が最大の実装リスク。12.6-3 の往復スモークで担保し、失敗時は「送信先を持たない単体復号」で
+  切り分ける。
+- **job_id の egress**: 最小ペイロードでも job UUID は push ベンダを通る（ディープリンクに必要）。ランダム UUID で
+  内容を含まないため許容（§6 既定）。
+- **依存ゼロの担保**: 現調査では `crypto.subtle` で全暗号が可能。実装中に組み込みで満たせない箇所が出たら
+  依存追加でなく**ブロッカーとしてエスカレーション**する（プロトコル §5）。
+
+### 12.9 検討した代替案
+
+- **ゲートウェイ駆動 push（daemon 無改変）**: web GUI プロセスが既存の `msg.watch` ストリーム + `job.list`
+  ポーリング差分で終端/待ち状態を検出し push する案。daemon を web から完全に切り離せる利点があるが、
+  (a) 本タスクが指定する「src/hooks.ts のフックをトリガにする」に反し、(b) daemon が持つ権威 status を使えず
+  ポーリング差分で failed/interrupted を再判定する必要があり、(c) GUI プロセス停止中は push が止まる
+  （「ブラウザを閉じていても届く」を弱める）。よって **daemon 側発火を主案**とし、これは代替として記録。
+- **daemon が `Store` から直接 push テーブルを読む**: 追加ハンドルを避けられるが、`Store` の SCHEMA に web 用
+  テーブルを混ぜることになり層が崩れる。注入 notifier + 自前 `WebAuthStore` ハンドルの方が daemon を web から
+  独立に保て、テストでスパイ注入できる。却下。
+- **`web-push` npm パッケージ導入**: 実装は楽だが「新規ランタイム依存禁止」に反する。組み込みで代替可能なので却下
+  （不可能と判明した場合のみブロッカー化）。
+- **daemon lifecycle push (`job.update`) を足して GUI が送る**: Phase 5 スコープ。本 Phase では `job.list`
+  ポーリング維持のため却下。
+- **通知本文にジョブ内容を載せる**: プライバシー最小化（§6/§7）に反するため却下。job_id + status のみ。
+- **フォーム/トグルに UI ライブラリ導入**: 依存ゼロ方針と現行 DOM SPA で十分なため却下。

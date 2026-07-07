@@ -20,7 +20,7 @@ import {
   type TurnResult,
 } from "../adapters/index.ts";
 import { validateTeamModels } from "../adapters/validate.ts";
-import { fireHook, type HookEvent } from "../hooks.ts";
+import { fireHook, noopPushNotifier, type HookEvent, type PushNotifier } from "../hooks.ts";
 import type {
   Job,
   JobRuntime,
@@ -112,6 +112,8 @@ export interface StartDaemonOptions {
   interruptRunningJobsOnStart?: boolean;
   /** Override hook runner for testing (default: fireHook). */
   hookRunner?: (cmd: string, event: HookEvent) => void;
+  /** Push notifier injected at startup (default: no-op). */
+  pushNotifier?: PushNotifier;
   /** Override resolved PATH (default: query $SHELL login profile). */
   userPath?: string;
 }
@@ -376,6 +378,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const endpoint = options.endpoint ?? ipcEndpoint();
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
+  const pushNotify = options.pushNotifier ?? noopPushNotifier;
   const userPath = options.userPath ?? (await resolveUserPath());
   debug("starting", { endpoint, pid: process.pid });
 
@@ -393,6 +396,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
     if (cmd) hookRun(cmd, event);
+
+    const jobId = typeof event.job_id === "string" ? event.job_id : null;
+    if (!jobId) return;
+    if (hookName === "on_job_done") {
+      pushNotify({ job_id: jobId, status: "done" });
+    } else if (hookName === "on_job_stalled") {
+      pushNotify({ job_id: jobId, status: "stalled" });
+    } else if (hookName === "on_supervisor_message") {
+      pushNotify({ job_id: jobId, status: "attention" });
+    } else if (hookName === "on_job_failed") {
+      const job = store.getJob(jobId);
+      const status = job?.status ?? "failed";
+      pushNotify({ job_id: jobId, status });
+    }
   };
   // Per-job team snapshots (D17): role config captured at job creation so
   // reload doesn't change adapter/model mid-job.

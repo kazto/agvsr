@@ -238,6 +238,7 @@ export function mountApp(root: HTMLElement): void {
   let streamSocket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
   let reconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+  let pushRegistration: ServiceWorkerRegistration | null = null;
   const shell = document.createElement("div");
   shell.className = "shell";
   const banner = document.createElement("header");
@@ -246,7 +247,11 @@ export function mountApp(root: HTMLElement): void {
   bannerState.className = "banner__state";
   const bannerStatus = document.createElement("div");
   bannerStatus.className = "banner__status";
-  bannerState.append(bannerStatus);
+  const pushToggle = document.createElement("button");
+  pushToggle.type = "button";
+  pushToggle.className = "push-toggle push-toggle--hidden";
+  pushToggle.textContent = "Enable notifications";
+  bannerState.append(bannerStatus, pushToggle);
   banner.append(textEl("div", "agvsr web", "brand"), bannerState);
   const content = document.createElement("main");
   content.className = "content";
@@ -528,10 +533,81 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
+  function updatePushToggle(subscribed: boolean): void {
+    pushToggle.textContent = subscribed ? "Disable notifications" : "Enable notifications";
+    pushToggle.dataset.subscribed = subscribed ? "1" : "0";
+  }
+
+  async function initPush(): Promise<void> {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      pushRegistration = reg;
+      const existing = await reg.pushManager.getSubscription();
+      updatePushToggle(existing !== null);
+      pushToggle.classList.remove("push-toggle--hidden");
+    } catch {
+      // push not available in this context
+    }
+  }
+
+  async function subscribePush(): Promise<void> {
+    if (!pushRegistration) return;
+    const configRes = await api<{ vapidPublicKey: string }>("/api/push/config");
+    const appServerKey = Uint8Array.from(
+      [...atob(configRes.vapidPublicKey.replace(/-/g, "+").replace(/_/g, "/"))].map((c) =>
+        c.charCodeAt(0),
+      ),
+    );
+    const sub = await pushRegistration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: appServerKey,
+    });
+    const json = sub.toJSON() as {
+      endpoint: string;
+      keys: { p256dh: string; auth: string };
+    };
+    await api("/api/push/subscribe", {
+      method: "POST",
+      body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
+    });
+    updatePushToggle(true);
+  }
+
+  async function unsubscribePush(): Promise<void> {
+    if (!pushRegistration) return;
+    const sub = await pushRegistration.pushManager.getSubscription();
+    if (!sub) {
+      updatePushToggle(false);
+      return;
+    }
+    await sub.unsubscribe();
+    await api("/api/push/unsubscribe", {
+      method: "POST",
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    });
+    updatePushToggle(false);
+  }
+
+  pushToggle.addEventListener("click", async () => {
+    const subscribed = pushToggle.dataset.subscribed === "1";
+    try {
+      if (subscribed) {
+        await unsubscribePush();
+      } else {
+        const perm = await Notification.requestPermission();
+        if (perm === "granted") await subscribePush();
+      }
+    } catch (err) {
+      showError(err instanceof ApiError ? err.message : "push toggle failed");
+    }
+  });
+
   startPolling(async () => {
     await refreshSession();
     if (csrfToken) {
       await refreshJobs();
+      await initPush();
     }
   }, POLL_MS);
 }

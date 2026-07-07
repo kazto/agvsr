@@ -11,6 +11,15 @@ export interface HookEvent {
   [key: string]: unknown;
 }
 
+export interface PushPayload {
+  job_id: string;
+  status: string;
+}
+
+export type PushNotifier = (payload: PushPayload) => void;
+
+export const noopPushNotifier: PushNotifier = () => {};
+
 export function fireHook(cmd: string, event: HookEvent): void {
   const shell = process.platform === "win32" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
   try {
