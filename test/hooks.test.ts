@@ -278,7 +278,8 @@ describe("pushNotifier spy (Phase 4 hook wiring)", () => {
     const jobId = created.ok ? created.result.job.id : "";
     for (let i = 0; i < 20; i++) {
       await Bun.sleep(20);
-      const job = (await c.request<{ job: Job }>("job.get", { id: jobId })).result?.job;
+      const r = await c.request<{ job: Job }>("job.get", { id: jobId });
+      const job = r.ok ? r.result.job : null;
       if (job?.status === "running") break;
     }
     await c.request("job.kill", { job_id: jobId });

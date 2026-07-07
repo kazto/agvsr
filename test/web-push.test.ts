@@ -681,8 +681,8 @@ describe("real crypto smoke test", () => {
       let receivedBody: Uint8Array | null = null;
       let receivedContentEncoding: string | null = null;
       let receivedAuthorization: string | null = null;
-      let fakeServerPublicRaw: Uint8Array | null = null;
-      let fakeSalt: Uint8Array | null = null;
+      let fakeServerPublicRaw: Buffer | null = null;
+      let fakeSalt: Buffer | null = null;
 
       const fakeServer = Bun.serve({
         hostname: "127.0.0.1",
@@ -691,13 +691,13 @@ describe("real crypto smoke test", () => {
           receivedContentEncoding = req.headers.get("Content-Encoding");
           receivedAuthorization = req.headers.get("Authorization");
           const buf = await req.arrayBuffer();
-          const raw = new Uint8Array(buf);
+          const raw = Buffer.from(buf);
           receivedBody = raw;
 
           // Parse the binary header: salt(16) + rs(4) + idlen(1) + keyid(65)
-          fakeSalt = raw.slice(0, 16);
+          fakeSalt = raw.subarray(0, 16) as Buffer;
           // rs is bytes 16-19 (big-endian uint32)
-          fakeServerPublicRaw = raw.slice(21, 86); // 21 = 16+4+1, len=65
+          fakeServerPublicRaw = raw.subarray(21, 86) as Buffer; // 21 = 16+4+1, len=65
 
           return new Response(null, { status: 201 });
         },
@@ -714,18 +714,22 @@ describe("real crypto smoke test", () => {
       fakeServer.stop();
 
       expect(result.pruneEndpoint).toBe(false);
-      expect(receivedContentEncoding).toBe("aes128gcm");
-      expect(receivedAuthorization).toContain("vapid t=");
-      expect(receivedAuthorization).toContain(", k=");
+      expect(receivedContentEncoding ?? "").toBe("aes128gcm");
+      expect(receivedAuthorization ?? "").toContain("vapid t=");
+      expect(receivedAuthorization ?? "").toContain(", k=");
       expect(receivedBody).not.toBeNull();
 
       // Decrypt using subscriber private key
-      const uaPublicRaw = new Uint8Array(Buffer.from(p256dh, "base64url"));
+      const uaPublicRaw = Buffer.from(p256dh, "base64url");
+
+      function toABTest(buf: Buffer): ArrayBuffer {
+        return (buf.buffer as ArrayBuffer).slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+      }
 
       // Derive ECDH shared secret between subscriber private key and server ephemeral public key
       const serverEphemeralPub = await crypto.subtle.importKey(
         "raw",
-        fakeServerPublicRaw!,
+        toABTest(fakeServerPublicRaw!),
         { name: "ECDH", namedCurve: "P-256" },
         false,
         [],
