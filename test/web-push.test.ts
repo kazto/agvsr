@@ -321,7 +321,10 @@ describe("push API endpoints security and validation", () => {
       const res = await gatewayFetch(web.endpoint, "/api/push/subscribe", {
         method: "POST",
         headers: { origin, "content-type": "application/json" },
-        body: JSON.stringify({ endpoint: "https://push.example.com/1", keys: { p256dh: "x", auth: "y" } }),
+        body: JSON.stringify({
+          endpoint: "https://push.example.com/1",
+          keys: { p256dh: "x", auth: "y" },
+        }),
       });
       expect(res.status).toBe(401);
     } finally {
@@ -355,7 +358,10 @@ describe("push API endpoints security and validation", () => {
           origin: "http://evil.example.com",
           "content-type": "application/json",
         },
-        body: JSON.stringify({ endpoint: "https://push.example.com/1", keys: { p256dh: "x", auth: "y" } }),
+        body: JSON.stringify({
+          endpoint: "https://push.example.com/1",
+          keys: { p256dh: "x", auth: "y" },
+        }),
       });
       expect(res.status).toBe(403);
     } finally {
@@ -390,7 +396,10 @@ describe("push API endpoints security and validation", () => {
           origin,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ endpoint: "https://push.example.com/1", keys: { p256dh: "x", auth: "y" } }),
+        body: JSON.stringify({
+          endpoint: "https://push.example.com/1",
+          keys: { p256dh: "x", auth: "y" },
+        }),
       });
       expect(res.status).toBe(403);
     } finally {
@@ -425,7 +434,10 @@ describe("push API endpoints security and validation", () => {
           origin,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ endpoint: "http://push.example.com/1", keys: { p256dh: "x", auth: "y" } }),
+        body: JSON.stringify({
+          endpoint: "http://push.example.com/1",
+          keys: { p256dh: "x", auth: "y" },
+        }),
       });
       expect(res.status).toBe(400);
     } finally {
@@ -755,7 +767,11 @@ describe("real crypto smoke test", () => {
       const cekKey = await crypto.subtle.importKey("raw", cek, { name: "AES-GCM" }, false, [
         "decrypt",
       ]);
-      const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, cekKey, ciphertext);
+      const decrypted = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: nonce },
+        cekKey,
+        ciphertext,
+      );
 
       // Remove the 0x02 delimiter byte at the end
       const decryptedBytes = new Uint8Array(decrypted);
@@ -783,7 +799,9 @@ describe("real crypto smoke test", () => {
         true,
         ["deriveBits"],
       );
-      const subPubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", subscriberKP.publicKey));
+      const subPubRaw = new Uint8Array(
+        await crypto.subtle.exportKey("raw", subscriberKP.publicKey),
+      );
       const fakeAuth = crypto.getRandomValues(new Uint8Array(16));
 
       const fakeServer404 = Bun.serve({
@@ -822,7 +840,9 @@ describe("real crypto smoke test", () => {
         true,
         ["deriveBits"],
       );
-      const subPubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", subscriberKP.publicKey));
+      const subPubRaw = new Uint8Array(
+        await crypto.subtle.exportKey("raw", subscriberKP.publicKey),
+      );
       const fakeAuth = crypto.getRandomValues(new Uint8Array(16));
 
       const fakeServer410 = Bun.serve({
@@ -863,7 +883,9 @@ describe("real crypto smoke test", () => {
         true,
         ["deriveBits"],
       );
-      const subPubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", subscriberKP.publicKey));
+      const subPubRaw = new Uint8Array(
+        await crypto.subtle.exportKey("raw", subscriberKP.publicKey),
+      );
       const fakeAuth = crypto.getRandomValues(new Uint8Array(16));
 
       const deadServer = Bun.serve({

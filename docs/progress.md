@@ -252,6 +252,8 @@ Current validation: **250 passing tests, 0 failing**; `bun run typecheck`, `bunx
 
 Current validation: **295 passing tests, 0 failing**; `bun run typecheck` passes (pre-existing `TS2688: Cannot find type definition file for 'bun'` — not introduced by this phase); `bunx oxlint src test` and `bunx oxfmt src` both exit 0.
 
+QA sign-off: independent verification re-ran the full suite clean after a frozen install, including the unsubscribe fix path.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
