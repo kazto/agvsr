@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeDriver } from "../src/adapters/claude.ts";
@@ -168,16 +168,33 @@ describe("codex driver", () => {
     expect(resumed.args).not.toContain("--sandbox"); // resume rejects it (S2)
   });
 
-  it("allows writes to the linked worktree's real git dir (index.lock lives outside cwd)", () => {
+  it("allows writes to both the linked worktree's private git dir and the shared common dir", () => {
     const dir = mkdtempSync(join(tmpdir(), "codex-worktree-"));
-    const gitCommonDir = join(dir, "main-repo-git-worktrees-entry");
-    writeFileSync(join(dir, ".git"), `gitdir: ${gitCommonDir}\n`);
+    const worktreeGitDir = join(dir, "main-repo-git-worktrees-entry");
+    const commonDir = join(dir, "main-repo-dot-git");
+    writeFileSync(join(dir, ".git"), `gitdir: ${worktreeGitDir}\n`);
+    mkdirSync(worktreeGitDir, { recursive: true });
+    writeFileSync(join(worktreeGitDir, "commondir"), `${commonDir}\n`);
 
     const s = codexDriver.buildSpawn({ ...spec("codex"), cwd: dir }, null, "do it");
     expect(s.args).toEqual(
       expect.arrayContaining([
         "-c",
-        `sandbox_workspace_write.writable_roots=${JSON.stringify([gitCommonDir])}`,
+        `sandbox_workspace_write.writable_roots=${JSON.stringify([worktreeGitDir, commonDir])}`,
+      ]),
+    );
+  });
+
+  it("allows writes to just the resolved git dir when there is no commondir file (non-linked repo)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-worktree-"));
+    const gitDir = join(dir, "some-git-dir");
+    writeFileSync(join(dir, ".git"), `gitdir: ${gitDir}\n`);
+
+    const s = codexDriver.buildSpawn({ ...spec("codex"), cwd: dir }, null, "do it");
+    expect(s.args).toEqual(
+      expect.arrayContaining([
+        "-c",
+        `sandbox_workspace_write.writable_roots=${JSON.stringify([gitDir])}`,
       ]),
     );
   });

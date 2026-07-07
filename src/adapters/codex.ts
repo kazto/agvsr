@@ -12,19 +12,30 @@ import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./t
 
 /**
  * A job's cwd is a linked git worktree: its `.git` is a file pointing at the real
- * git dir under the main repo's `.git/worktrees/<id>`, which lies outside cwd. The
- * codex sandbox denies writes outside its writable_roots, so `git commit` (index.lock
- * etc.) fails there unless we allow it explicitly.
+ * per-worktree git dir under the main repo's `.git/worktrees/<id>` (HEAD/index/logs),
+ * which lies outside cwd. That dir in turn has a `commondir` file pointing at the
+ * *shared* git dir (objects/refs/packed-refs etc.), typically the main repo's `.git`
+ * itself. Both live outside cwd. The codex sandbox denies writes outside its
+ * writable_roots, so `git add`/`git commit` (index.lock, loose objects, ...) fail
+ * there unless both dirs are allowed explicitly.
  */
-function resolveGitCommonDir(cwd: string): string | null {
+function resolveGitWritableRoots(cwd: string): string[] {
   try {
     const gitFile = readFileSync(resolve(cwd, ".git"), "utf8");
     const match = /^gitdir:\s*(.+)$/m.exec(gitFile);
     const gitdir = match?.[1];
-    if (!gitdir) return null;
-    return resolve(cwd, gitdir.trim());
+    if (!gitdir) return [];
+    const worktreeGitDir = resolve(cwd, gitdir.trim());
+    const roots = [worktreeGitDir];
+    try {
+      const commonDir = readFileSync(resolve(worktreeGitDir, "commondir"), "utf8").trim();
+      if (commonDir) roots.push(resolve(worktreeGitDir, commonDir));
+    } catch {
+      // No commondir file: worktreeGitDir is already the (non-linked) git dir.
+    }
+    return roots;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -80,8 +91,7 @@ export const codexDriver: CliDriver = {
   adapter: "codex",
 
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
-    const gitCommonDir = resolveGitCommonDir(spec.cwd);
-    const writableRoots = gitCommonDir ? [gitCommonDir] : [];
+    const writableRoots = resolveGitWritableRoots(spec.cwd);
     const common = [
       "--json",
       "--skip-git-repo-check",
