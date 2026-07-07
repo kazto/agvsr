@@ -27,6 +27,19 @@ CREATE INDEX IF NOT EXISTS idx_web_operation_audit_created
   ON web_operation_audit(created_at);
 CREATE INDEX IF NOT EXISTS idx_web_operation_audit_job
   ON web_operation_audit(job_id, created_at);
+CREATE TABLE IF NOT EXISTS web_vapid_keys (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  public_key  TEXT NOT NULL,
+  private_key TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+  endpoint     TEXT PRIMARY KEY,
+  p256dh       TEXT NOT NULL,
+  auth         TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
 `;
 
 const now = (): string => new Date().toISOString();
@@ -63,6 +76,19 @@ export interface UpdateWebOperationAuditInput {
   job_id?: string | null;
   status?: string;
   error_code?: string | null;
+}
+
+export interface VapidKeysRow {
+  publicKey: string;
+  privateKey: string;
+}
+
+export interface PushSubscriptionRow {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  created_at: string;
+  last_seen_at: string;
 }
 
 export class WebAuthStore {
@@ -212,6 +238,66 @@ export class WebAuthStore {
          LIMIT $limit`,
       )
       .all({ $limit: limit }) as WebOperationAuditRow[];
+  }
+
+  async getOrCreateVapidKeys(): Promise<VapidKeysRow> {
+    const row = this.db
+      .query(`SELECT public_key, private_key FROM web_vapid_keys WHERE id = 1`)
+      .get() as { public_key: string; private_key: string } | null;
+    if (row) return { publicKey: row.public_key, privateKey: row.private_key };
+
+    const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ]);
+    const pubRaw = await crypto.subtle.exportKey("raw", kp.publicKey);
+    const privPkcs8 = await crypto.subtle.exportKey("pkcs8", kp.privateKey);
+    const pubB64 = Buffer.from(pubRaw).toString("base64url");
+    const privB64 = Buffer.from(privPkcs8).toString("base64url");
+    this.db
+      .query(
+        `INSERT INTO web_vapid_keys (id, public_key, private_key, created_at)
+         VALUES (1, $pub, $priv, $ts)
+         ON CONFLICT(id) DO NOTHING`,
+      )
+      .run({ $pub: pubB64, $priv: privB64, $ts: now() });
+    const saved = this.db
+      .query(`SELECT public_key, private_key FROM web_vapid_keys WHERE id = 1`)
+      .get() as { public_key: string; private_key: string };
+    return { publicKey: saved.public_key, privateKey: saved.private_key };
+  }
+
+  getVapidPublicKey(): string | null {
+    const row = this.db.query(`SELECT public_key FROM web_vapid_keys WHERE id = 1`).get() as {
+      public_key: string;
+    } | null;
+    return row?.public_key ?? null;
+  }
+
+  addPushSubscription(sub: { endpoint: string; p256dh: string; auth: string }): void {
+    const ts = now();
+    this.db
+      .query(
+        `INSERT INTO web_push_subscriptions (endpoint, p256dh, auth, created_at, last_seen_at)
+         VALUES ($endpoint, $p256dh, $auth, $ts, $ts)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           p256dh = excluded.p256dh,
+           auth = excluded.auth,
+           last_seen_at = excluded.last_seen_at`,
+      )
+      .run({ $endpoint: sub.endpoint, $p256dh: sub.p256dh, $auth: sub.auth, $ts: ts });
+  }
+
+  listPushSubscriptions(): PushSubscriptionRow[] {
+    return this.db
+      .query(`SELECT endpoint, p256dh, auth, created_at, last_seen_at FROM web_push_subscriptions`)
+      .all() as PushSubscriptionRow[];
+  }
+
+  removePushSubscription(endpoint: string): void {
+    this.db
+      .query(`DELETE FROM web_push_subscriptions WHERE endpoint = $endpoint`)
+      .run({ $endpoint: endpoint });
   }
 
   close(): void {

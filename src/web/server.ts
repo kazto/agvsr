@@ -77,8 +77,12 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
 
     const clientPath = fileURLToPath(new URL("./client/app.ts", import.meta.url));
     const cssPath = fileURLToPath(new URL("./client/styles.css", import.meta.url));
+    const swPath = fileURLToPath(new URL("./client/sw.ts", import.meta.url));
     const clientSource = await loadClientSource(clientPath);
     const cssSource = await Bun.file(cssPath).text();
+    const swSource = await loadClientSource(swPath);
+
+    await authStore.getOrCreateVapidKeys();
 
     ctx = {
       authStore,
@@ -90,6 +94,7 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
       assets: {
         appJs: clientSource,
         appCss: cssSource,
+        swJs: swSource,
       },
     };
 

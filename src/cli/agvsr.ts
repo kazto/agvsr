@@ -497,7 +497,13 @@ async function main(argv: string[]): Promise<void> {
       }
 
       const { startDaemon } = await import("../daemon/daemon.ts");
-      const daemon = await startDaemon({ teamFile: daemonOpts.team });
+      const { createPushNotifier } = await import("../web/push.ts");
+      const { storePath: getStorePath } = await import("../paths.ts");
+      const daemonStoreFile = process.env.AGVSR_STORE ?? getStorePath();
+      const daemon = await startDaemon({
+        teamFile: daemonOpts.team,
+        pushNotifier: createPushNotifier(daemonStoreFile),
+      });
       console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
       const shutdown = async () => {
         await daemon.close();

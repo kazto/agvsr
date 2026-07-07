@@ -29,6 +29,7 @@ export interface WebRouteContext {
   assets: {
     appJs: string;
     appCss: string;
+    swJs: string;
   };
 }
 
@@ -368,6 +369,14 @@ export async function handleWebRequest(ctx: WebRouteContext, request: Request): 
   if (pathname === "/assets/app.css") {
     return textResponse(ctx.assets.appCss, "text/css; charset=utf-8");
   }
+  if (pathname === "/sw.js") {
+    const headers = makeHeaders({
+      "Service-Worker-Allowed": "/",
+      "Cache-Control": "no-store",
+    });
+    headers.set("Content-Type", "application/javascript; charset=utf-8");
+    return new Response(ctx.assets.swJs, { headers });
+  }
 
   if (pathname === "/api/session" && request.method === "GET") {
     return sessionView(ctx, cookies);
@@ -556,6 +565,91 @@ export async function handleWebRequest(ctx: WebRouteContext, request: Request): 
     const detail = await detailForJob(ctx, id);
     if (!detail) return json({ error: "not found" }, { status: 404 });
     return json(detail);
+  }
+
+  if (pathname === "/api/push/config" && request.method === "GET") {
+    if (!hasAuthenticatedSession(ctx, cookies)) {
+      return errorJson("unauthorized", "unauthorized", 401);
+    }
+    const publicKey = ctx.authStore.getVapidPublicKey();
+    if (!publicKey) {
+      return errorJson("not_ready", "VAPID keys not initialized", 503);
+    }
+    return json({ vapidPublicKey: publicKey, enabled: true });
+  }
+
+  if (pathname === "/api/push/subscribe" && request.method === "POST") {
+    const sessionHash = authenticatedSessionHash(ctx, cookies);
+    if (!sessionHash) return errorJson("unauthorized", "unauthorized", 401);
+    ctx.authStore.touchSession(sessionHash);
+    const csrfHeader = request.headers.get("x-csrf-token");
+    if (!csrfMatches(cookies, csrfHeader)) {
+      return errorJson("csrf_mismatch", "csrf token mismatch", 403);
+    }
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return errorJson("bad_request", "invalid JSON", 400);
+    }
+    const body = raw as {
+      endpoint?: unknown;
+      keys?: { p256dh?: unknown; auth?: unknown };
+    };
+    const endpoint = typeof body.endpoint === "string" ? body.endpoint : null;
+    const p256dh = body.keys && typeof body.keys.p256dh === "string" ? body.keys.p256dh : null;
+    const auth = body.keys && typeof body.keys.auth === "string" ? body.keys.auth : null;
+    if (!endpoint) return errorJson("bad_request", "endpoint is required", 400);
+    if (!p256dh) return errorJson("bad_request", "keys.p256dh is required", 400);
+    if (!auth) return errorJson("bad_request", "keys.auth is required", 400);
+    try {
+      const u = new URL(endpoint);
+      if (u.protocol !== "https:") {
+        return errorJson("bad_request", "endpoint must use https", 400);
+      }
+    } catch {
+      return errorJson("bad_request", "endpoint must be a valid URL", 400);
+    }
+    if (Buffer.byteLength(endpoint, "utf8") > 2048) {
+      return errorJson("bad_request", "endpoint must not exceed 2 KiB", 400);
+    }
+    if (Buffer.byteLength(p256dh, "utf8") > 256) {
+      return errorJson("bad_request", "p256dh must not exceed 256 bytes", 400);
+    }
+    if (Buffer.byteLength(auth, "utf8") > 64) {
+      return errorJson("bad_request", "auth must not exceed 64 bytes", 400);
+    }
+    ctx.authStore.addPushSubscription({ endpoint, p256dh, auth });
+    return json({ subscribed: true }, { status: 201 });
+  }
+
+  if (pathname === "/api/push/unsubscribe" && request.method === "POST") {
+    const sessionHash = authenticatedSessionHash(ctx, cookies);
+    if (!sessionHash) return errorJson("unauthorized", "unauthorized", 401);
+    ctx.authStore.touchSession(sessionHash);
+    const csrfHeader = request.headers.get("x-csrf-token");
+    if (!csrfMatches(cookies, csrfHeader)) {
+      return errorJson("csrf_mismatch", "csrf token mismatch", 403);
+    }
+    let raw: unknown;
+    try {
+      raw = await request.json();
+    } catch {
+      return errorJson("bad_request", "invalid JSON", 400);
+    }
+    const body = raw as { endpoint?: unknown };
+    const endpoint = typeof body.endpoint === "string" ? body.endpoint : null;
+    if (!endpoint) return errorJson("bad_request", "endpoint is required", 400);
+    try {
+      const u = new URL(endpoint);
+      if (u.protocol !== "https:") {
+        return errorJson("bad_request", "endpoint must use https", 400);
+      }
+    } catch {
+      return errorJson("bad_request", "endpoint must be a valid URL", 400);
+    }
+    ctx.authStore.removePushSubscription(endpoint);
+    return json({ unsubscribed: true });
   }
 
   if (pathname.startsWith("/api/")) {
