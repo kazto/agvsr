@@ -95,8 +95,7 @@ export const codexDriver: CliDriver = {
     const common = [
       "--json",
       "--skip-git-repo-check",
-      "-C",
-      spec.cwd,
+      ...(sessionId ? [] : ["-C", spec.cwd]),
       "-c",
       'approval_policy="never"',
       "-c",
@@ -110,6 +109,10 @@ export const codexDriver: CliDriver = {
       spec.model,
     ];
     if (sessionId) {
+      // `exec resume` has no `-C`/`--cd` flag at all (unlike fresh `exec`) — passing
+      // one is a hard CLI-parse error ("unexpected argument '-C' found"), exit code 2,
+      // before codex does anything. The child's OS-level cwd is already spec.cwd via
+      // Bun.spawn's own `cwd` option, so resume still runs in the right directory.
       return { bin: "codex", args: ["exec", "resume", sessionId, ...common, message] };
     }
     return {

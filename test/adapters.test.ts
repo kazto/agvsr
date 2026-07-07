@@ -147,7 +147,9 @@ describe("codex driver", () => {
     expect(resumed.bin).toBe("codex");
     expect(resumed.bin).not.toMatch(/docker|chroot|wrapper/i);
     expect(resumed.args.slice(0, 3)).toEqual(["exec", "resume", "T1"]);
-    expect(resumed.args).toEqual(expect.arrayContaining(["-C", "/work/repo"]));
+    // `exec resume` has no `-C`/`--cd` flag; passing one is a hard CLI-parse error
+    // (exit code 2, "unexpected argument '-C' found") before codex does anything.
+    expect(resumed.args).not.toContain("-C");
     expect(resumed.args).toEqual(
       expect.arrayContaining(codexMcpConfigArgs({ cwd: "/work/repo", env: spec("codex").env })),
     );
