@@ -227,6 +227,15 @@ Current validation: **226 passing tests, 0 failing**; `bun run typecheck`, `bunx
 
 Current validation: **250 passing tests, 0 failing**; `bun run typecheck`, `bunx oxlint src test`, and `bunx oxfmt src test` all pass.
 
+### Phase 19 — Turn-Failure Diagnostics ✅
+
+| File                   | What it does                                                                                                                                                                                                                                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/daemon/daemon.ts` | Adds `turnFailureDiagnostics(adapter, model, exitCode, stderrTail)` helper (2048-byte tail bound, same as `configErrorEscalation`). Enriches 3 failure sites: (1) supervisor non-timeout failure → user-facing body gets `exitCode/adapter/model` (no stderrTail, option b); (2) worker hard-fail at threshold → user-facing body gets `exitCode/adapter/model` (no stderrTail); (3) worker retry escalation → supervisor-facing body gets `exitCode/adapter/model/stderrTail`. Timeout reason text left unchanged. |
+| `test/ipc.test.ts`     | 5 new tests: retry escalation body has exitCode/adapter/model/stderrTail; hard-fail user-facing body has exitCode/adapter/model but not raw stderr; supervisor non-timeout failure body has exitCode/adapter/model; timeout body unchanged and lacks exitCode=/stderrTail; long stderrTail truncated with tail kept and head dropped. |
+
+Current validation: **275 passing tests, 0 failing**; `bun run typecheck`, `bunx oxlint src test`, and `bunx oxfmt src test` all pass.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**

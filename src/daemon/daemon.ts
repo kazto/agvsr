@@ -209,6 +209,21 @@ function configErrorEscalation(
   ].join("\n\n");
 }
 
+const STDERR_DIAG_CAP = 2048;
+
+function turnFailureDiagnostics(
+  adapter: Adapter,
+  model: string,
+  exitCode: number,
+  stderrTail: string | undefined,
+): string {
+  const tail = tailText(stderrTail ?? "", STDERR_DIAG_CAP);
+  return [
+    `exitCode=${exitCode} adapter=${adapter} model=${model}`,
+    tail ? `stderrTail:\n${tail}` : "stderrTail: (empty)",
+  ].join("\n\n");
+}
+
 function appendRecoverableDirtyWorktreeNote(job: Job, reason: string): string {
   const note = recoverableDirtyWorktreeNote(job);
   return note ? `${reason}\n${note}` : reason;
@@ -672,7 +687,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
               ? `${role} turn failed: no progress for ${idleMs}ms (no-progress timeout).`
               : `${role} turn failed: exceeded hard timeout ${hardMs}ms.`;
         } else {
-          reason = `${role} turn failed.`;
+          reason = `${role} turn failed.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`;
         }
         reason = appendRecoverableDirtyWorktreeNote(job, reason);
         store.setJobStatus(job.id, "failed");
@@ -708,7 +723,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (failures >= threshold) {
           const reason = appendRecoverableDirtyWorktreeNote(
             job,
-            `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+            `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`,
           );
           store.setJobStatus(job.id, "failed");
           createMsg({
@@ -720,7 +735,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           });
           hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
-          const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.`;
+          const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, result.outcome.stderrTail)}`;
           createMsg({
             job_id: job.id,
             from_role: "daemon",

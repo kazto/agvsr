@@ -2197,4 +2197,349 @@ describe("timeout failure reasons (AC-4)", () => {
       } catch {}
     }
   });
+
+  it("retry escalation body includes exitCode, adapter, model, and stderrTail", async () => {
+    const base = join(tmpdir(), `agvsr-diag-retry-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const STDERR_MARKER = "STDERR_DIAG_MARKER_RETRY_TEST";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "boom" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "boom",
+              exitCode: 2,
+              stderrTail: STDERR_MARKER,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "diag-retry",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "please fail",
+      });
+      for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+        await Bun.sleep(5);
+      }
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const esc = logs.result.messages.find(
+        (m) => m.kind === "escalation" && m.from_role === "daemon" && m.to_role === "supervisor",
+      );
+      expect(esc).toBeTruthy();
+      expect(esc!.body).toContain("exitCode=2");
+      expect(esc!.body).toContain("adapter=codex");
+      expect(esc!.body).toContain("model=gpt-5-codex");
+      expect(esc!.body).toContain(STDERR_MARKER);
+
+      c.close();
+    } finally {
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
+  it("hard-fail user-facing body includes exitCode/adapter/model but not raw stderr", async () => {
+    const base = join(tmpdir(), `agvsr-diag-hardfail-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const STDERR_MARKER = "STDERR_DIAG_MARKER_HARDFAIL_TEST";
+    const saved = process.env.AGVSR_MAX_WORKER_FAILURES;
+    process.env.AGVSR_MAX_WORKER_FAILURES = "1";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "boom" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "boom",
+              exitCode: 3,
+              stderrTail: STDERR_MARKER,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "diag-hardfail",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "please fail",
+      });
+      for (let i = 0; i < 100; i++) {
+        const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+        if (got.ok && got.result.job.status === "failed") break;
+        await Bun.sleep(5);
+      }
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const failMsg = logs.result.messages.find(
+        (m) => m.kind === "failure" && m.to_role === "user" && m.from_role === "daemon",
+      );
+      expect(failMsg).toBeTruthy();
+      expect(failMsg!.body).toContain("exitCode=3");
+      expect(failMsg!.body).toContain("adapter=codex");
+      expect(failMsg!.body).toContain("model=gpt-5-codex");
+      expect(failMsg!.body).not.toContain(STDERR_MARKER);
+
+      c.close();
+    } finally {
+      if (saved === undefined) delete process.env.AGVSR_MAX_WORKER_FAILURES;
+      else process.env.AGVSR_MAX_WORKER_FAILURES = saved;
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
+  it("supervisor non-timeout failure body includes exitCode, adapter, and model", async () => {
+    const base = join(tmpdir(), `agvsr-diag-sup-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async () => ({
+        events: [],
+        outcome: { sessionId: null, finalText: "", exitCode: 5 },
+      }),
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "sup-non-timeout-fail",
+        cwd: repoLocal,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+
+      for (let i = 0; i < 100; i++) {
+        const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+        if (got.ok && got.result.job.status === "failed") break;
+        await Bun.sleep(5);
+      }
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const failMsg = logs.result.messages.find((m) => m.kind === "failure");
+      expect(failMsg).toBeTruthy();
+      expect(failMsg!.body).toContain("exitCode=5");
+      expect(failMsg!.body).toContain("adapter=claude-code");
+      expect(failMsg!.body).toContain("model=claude-opus-4-8");
+
+      c.close();
+    } finally {
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, repoLocal]) {
+        try {
+          rmSync(f, { recursive: true });
+        } catch {}
+      }
+    }
+  });
+
+  it("timeout failure body is unchanged and does not contain exitCode= or stderrTail", async () => {
+    const base = join(tmpdir(), `agvsr-diag-timeout-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repoLocal = `${base}-repo`;
+    mkdirSync(repoLocal, { recursive: true });
+    const STDERR_MARKER = "STDERR_DIAG_MARKER_TIMEOUT_TEST";
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async () => ({
+        events: [],
+        outcome: {
+          sessionId: null,
+          finalText: "",
+          exitCode: 1,
+          timedOut: true,
+          timeoutKind: "idle" as const,
+          stderrTail: STDERR_MARKER,
+        },
+      }),
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "timeout-unchanged",
+        cwd: repoLocal,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+
+      for (let i = 0; i < 100; i++) {
+        const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+        if (got.ok && got.result.job.status === "failed") break;
+        await Bun.sleep(5);
+      }
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const failMsg = logs.result.messages.find((m) => m.kind === "failure");
+      expect(failMsg).toBeTruthy();
+      expect(failMsg!.body).toContain("no-progress timeout");
+      expect(failMsg!.body).not.toContain("exitCode=");
+      expect(failMsg!.body).not.toContain(STDERR_MARKER);
+
+      c.close();
+    } finally {
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`, repoLocal]) {
+        try {
+          rmSync(f, { recursive: true });
+        } catch {}
+      }
+    }
+  });
+
+  it("long stderrTail in retry escalation is truncated keeping tail, dropping head", async () => {
+    const base = join(tmpdir(), `agvsr-diag-bound-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const HEAD_MARKER = "STDERR_DIAG_HEAD_MARKER";
+    const TAIL_MARKER = "STDERR_DIAG_TAIL_MARKER";
+    const longStderr = HEAD_MARKER + "x".repeat(3000) + TAIL_MARKER;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          return {
+            events: [{ kind: "result", ok: false, text: "err" }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: "err",
+              exitCode: 1,
+              stderrTail: longStderr,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "diag-bound",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "please fail",
+      });
+      for (let i = 0; i < 100 && seen.filter((d) => d.role === "supervisor").length < 2; i++) {
+        await Bun.sleep(5);
+      }
+
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const esc = logs.result.messages.find(
+        (m) => m.kind === "escalation" && m.from_role === "daemon" && m.to_role === "supervisor",
+      );
+      expect(esc).toBeTruthy();
+      expect(esc!.body).toContain(TAIL_MARKER);
+      expect(esc!.body).not.toContain(HEAD_MARKER);
+
+      c.close();
+    } finally {
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
 });
