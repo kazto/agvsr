@@ -5,8 +5,28 @@
  * persists in the session). Session id = the `thread.started` event's thread_id.
  * NOTE: `exec resume` does not accept --sandbox (set via -c in Phase 4).
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { codexMcpConfigArgs } from "./mcp.ts";
 import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+
+/**
+ * A job's cwd is a linked git worktree: its `.git` is a file pointing at the real
+ * git dir under the main repo's `.git/worktrees/<id>`, which lies outside cwd. The
+ * codex sandbox denies writes outside its writable_roots, so `git commit` (index.lock
+ * etc.) fails there unless we allow it explicitly.
+ */
+function resolveGitCommonDir(cwd: string): string | null {
+  try {
+    const gitFile = readFileSync(resolve(cwd, ".git"), "utf8");
+    const match = /^gitdir:\s*(.+)$/m.exec(gitFile);
+    const gitdir = match?.[1];
+    if (!gitdir) return null;
+    return resolve(cwd, gitdir.trim());
+  } catch {
+    return null;
+  }
+}
 
 interface CodexEvent {
   type?: string;
@@ -60,6 +80,8 @@ export const codexDriver: CliDriver = {
   adapter: "codex",
 
   buildSpawn(spec: AgentSpec, sessionId: string | null, message: string): SpawnSpec {
+    const gitCommonDir = resolveGitCommonDir(spec.cwd);
+    const writableRoots = gitCommonDir ? [gitCommonDir] : [];
     const common = [
       "--json",
       "--skip-git-repo-check",
@@ -70,7 +92,7 @@ export const codexDriver: CliDriver = {
       "-c",
       'sandbox_mode="workspace-write"',
       "-c",
-      "sandbox_workspace_write.writable_roots=[]",
+      `sandbox_workspace_write.writable_roots=${JSON.stringify(writableRoots)}`,
       "-c",
       "sandbox_workspace_write.network_access=false",
       ...codexMcpConfigArgs({ cwd: spec.cwd, env: spec.env }),

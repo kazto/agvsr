@@ -168,6 +168,27 @@ describe("codex driver", () => {
     expect(resumed.args).not.toContain("--sandbox"); // resume rejects it (S2)
   });
 
+  it("allows writes to the linked worktree's real git dir (index.lock lives outside cwd)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-worktree-"));
+    const gitCommonDir = join(dir, "main-repo-git-worktrees-entry");
+    writeFileSync(join(dir, ".git"), `gitdir: ${gitCommonDir}\n`);
+
+    const s = codexDriver.buildSpawn({ ...spec("codex"), cwd: dir }, null, "do it");
+    expect(s.args).toEqual(
+      expect.arrayContaining([
+        "-c",
+        `sandbox_workspace_write.writable_roots=${JSON.stringify([gitCommonDir])}`,
+      ]),
+    );
+  });
+
+  it("falls back to an empty writable_roots when cwd has no linked-worktree .git file", () => {
+    const s = codexDriver.buildSpawn(spec("codex"), null, "do it");
+    expect(s.args).toEqual(
+      expect.arrayContaining(["-c", "sandbox_workspace_write.writable_roots=[]"]),
+    );
+  });
+
   it("parses thread/item/turn events", () => {
     const p = codexDriver.createParser();
     const events = drain(p, [
