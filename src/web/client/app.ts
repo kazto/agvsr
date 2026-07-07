@@ -581,11 +581,11 @@ export function mountApp(root: HTMLElement): void {
       updatePushToggle(false);
       return;
     }
+    await sub.unsubscribe();
     await api("/api/push/unsubscribe", {
       method: "POST",
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
-    await sub.unsubscribe();
     updatePushToggle(false);
   }
 
