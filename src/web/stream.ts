@@ -2,9 +2,7 @@ import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { Client } from "../ipc/transport.ts";
 import type { Message, PushFrame } from "../protocol.ts";
 
-interface StreamSocketData {
-  jobId: string;
-}
+export type StreamSocketData = { kind: "job"; jobId: string } | { kind: "jobs" };
 
 type StreamSocket = ServerWebSocket<StreamSocketData>;
 
@@ -13,7 +11,7 @@ interface SocketState {
   ready: boolean;
   closed: boolean;
   seenIds: Set<string>;
-  queue: PushFrame[];
+  queue: Array<Extract<PushFrame, { event: "msg.new" }>>;
 }
 
 export interface WebStreamBridge {
@@ -21,7 +19,7 @@ export interface WebStreamBridge {
   close(): Promise<void>;
 }
 
-function frameForMessage(message: Message): PushFrame {
+function frameForMessage(message: Message): Extract<PushFrame, { event: "msg.new" }> {
   return { type: "push", event: "msg.new", data: message };
 }
 
@@ -31,6 +29,10 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
   const watchedJobs = new Set<string>();
   const watchPromises = new Map<string, Promise<void>>();
   const states = new Map<StreamSocket, SocketState>();
+  const jobsSubscribers = new Set<StreamSocket>();
+
+  // Subscribe to global job lifecycle push events once at startup.
+  void client.request("job.watch");
 
   const cleanup = (ws: StreamSocket): void => {
     const state = states.get(ws);
@@ -39,6 +41,7 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
       state.queue.length = 0;
       states.delete(ws);
     }
+    if (ws.data.kind !== "job") return;
     const jobId = ws.data.jobId;
     const set = subscribers.get(jobId);
     if (!set) return;
@@ -66,7 +69,7 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
     return promise;
   };
 
-  const deliverPush = (frame: PushFrame): void => {
+  const deliverPush = (frame: Extract<PushFrame, { event: "msg.new" }>): void => {
     const set = subscribers.get(frame.data.job_id);
     if (!set || set.size === 0) return;
     for (const ws of set) {
@@ -82,19 +85,34 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
     }
   };
 
+  const deliverJobUpdate = (frame: Extract<PushFrame, { event: "job.update" }>): void => {
+    for (const ws of jobsSubscribers) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        jobsSubscribers.delete(ws);
+        continue;
+      }
+      ws.sendText(JSON.stringify(frame));
+    }
+  };
+
   client.onPush = (frame) => {
-    if (frame.type !== "push" || frame.event !== "msg.new") return;
-    deliverPush(frame);
+    if (frame.event === "msg.new") {
+      deliverPush(frame);
+    } else if (frame.event === "job.update") {
+      deliverJobUpdate(frame);
+    }
   };
 
   const primeSocket = async (ws: StreamSocket): Promise<void> => {
+    if (ws.data.kind !== "job") return;
+    const jobId = ws.data.jobId;
     const state = states.get(ws);
     if (!state) return;
     try {
-      await ensureWatched(state.jobId);
+      await ensureWatched(jobId);
       if (state.closed || ws.readyState !== WebSocket.OPEN) return;
       const res = await client.request<{ messages: Message[] }>("msg.list", {
-        job_id: state.jobId,
+        job_id: jobId,
       });
       if (!res.ok) throw new Error(res.error.message);
       if (state.closed || ws.readyState !== WebSocket.OPEN) return;
@@ -120,14 +138,19 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
       /* read-only stream; clients must not send messages */
     },
     open(ws) {
-      let set = subscribers.get(ws.data.jobId);
+      if (ws.data.kind === "jobs") {
+        jobsSubscribers.add(ws);
+        return;
+      }
+      const jobId = ws.data.jobId;
+      let set = subscribers.get(jobId);
       if (!set) {
         set = new Set();
-        subscribers.set(ws.data.jobId, set);
+        subscribers.set(jobId, set);
       }
       set.add(ws);
       states.set(ws, {
-        jobId: ws.data.jobId,
+        jobId,
         ready: false,
         closed: false,
         seenIds: new Set(),
@@ -136,6 +159,10 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
       void primeSocket(ws);
     },
     close(ws) {
+      if (ws.data.kind === "jobs") {
+        jobsSubscribers.delete(ws);
+        return;
+      }
       cleanup(ws);
     },
   };
@@ -148,6 +175,7 @@ export async function createWebStreamBridge(daemonEndpoint: string): Promise<Web
       watchedJobs.clear();
       watchPromises.clear();
       states.clear();
+      jobsSubscribers.clear();
     },
   };
 }
