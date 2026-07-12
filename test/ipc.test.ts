@@ -1464,8 +1464,10 @@ hooks:
     for (let i = 0; i < 50 && pushed.length === 0; i++) await Bun.sleep(5);
     expect(pushed.length).toBeGreaterThan(0);
     expect(pushed[0]!.event).toBe("msg.new");
-    expect(pushed[0]!.data.body).toBe("pushed hello");
-    expect(pushed[0]!.data.job_id).toBe(jobId);
+    const p0 = pushed[0]!;
+    if (p0.event !== "msg.new") throw new Error("expected msg.new frame");
+    expect(p0.data.body).toBe("pushed hello");
+    expect(p0.data.job_id).toBe(jobId);
 
     c1.close();
     c2.close();

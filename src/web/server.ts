@@ -6,7 +6,7 @@ import { WebAuthStore } from "./auth-store.ts";
 import { WebDaemonClient } from "./ipc.ts";
 import { handleWebRequest, type WebRouteContext } from "./routes.ts";
 import { allowedHost, loopbackHosts } from "./security.ts";
-import { createWebStreamBridge } from "./stream.ts";
+import { createWebStreamBridge, type StreamSocketData } from "./stream.ts";
 
 export interface WebGatewayOptions {
   daemonEndpoint?: string;
@@ -103,15 +103,17 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
     const host = options.host ?? defaultHost();
     const port = parsePort(options.port);
 
-    const fetch = async (request: Request, server: Bun.Server<{ jobId: string }>) => {
+    const fetch = async (request: Request, server: Bun.Server<StreamSocketData>) => {
       const webCtx = ctx!;
       const url = new URL(request.url);
       const pathname = url.pathname;
+      const isGlobalStream = pathname === "/api/jobs/stream";
+      const isPerJobStream =
+        pathname.startsWith("/api/jobs/") && pathname.endsWith("/stream") && !isGlobalStream;
       const isStreamUpgrade =
         request.method === "GET" &&
         request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-        pathname.startsWith("/api/jobs/") &&
-        pathname.endsWith("/stream");
+        (isGlobalStream || isPerJobStream);
       if (!isStreamUpgrade) {
         return handleWebRequest(webCtx, request);
       }
@@ -148,6 +150,21 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
           },
         });
       }
+
+      if (isGlobalStream) {
+        const upgraded = server.upgrade(request, { data: { kind: "jobs" } as StreamSocketData });
+        if (!upgraded) {
+          return new Response(JSON.stringify({ error: "websocket upgrade failed" }), {
+            status: 400,
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store",
+            },
+          });
+        }
+        return;
+      }
+
       const prefix = "/api/jobs/";
       const suffix = "/stream";
       let jobId = "";
@@ -171,7 +188,9 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
           },
         });
       }
-      const upgraded = server.upgrade(request, { data: { jobId } });
+      const upgraded = server.upgrade(request, {
+        data: { kind: "job", jobId } as StreamSocketData,
+      });
       if (!upgraded) {
         return new Response(JSON.stringify({ error: "websocket upgrade failed" }), {
           status: 400,

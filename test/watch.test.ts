@@ -95,8 +95,12 @@ describe("agvsr watch — cross-job message streaming", () => {
     const seenJobIds = new Set(pushed.map((f) => f.data.job_id));
     expect(seenJobIds.has(jobId1)).toBe(true);
     expect(seenJobIds.has(jobId2)).toBe(true);
-    expect(pushed.find((f) => f.data.body === "message for job one")).toBeTruthy();
-    expect(pushed.find((f) => f.data.body === "message for job two")).toBeTruthy();
+    expect(
+      pushed.find((f) => f.event === "msg.new" && f.data.body === "message for job one"),
+    ).toBeTruthy();
+    expect(
+      pushed.find((f) => f.event === "msg.new" && f.data.body === "message for job two"),
+    ).toBeTruthy();
 
     c.close();
   });
@@ -134,7 +138,9 @@ describe("agvsr watch — cross-job message streaming", () => {
     });
     for (let i = 0; i < 50 && pushed.length === 0; i++) await Bun.sleep(5);
     expect(pushed.length).toBeGreaterThan(0);
-    expect(pushed[0]!.data.body).toBe("should arrive");
+    const w0 = pushed[0]!;
+    if (w0.event !== "msg.new") throw new Error("expected msg.new frame");
+    expect(w0.data.body).toBe("should arrive");
 
     c.close();
   });
@@ -187,8 +193,10 @@ describe("agvsr watch — cross-job message streaming", () => {
 
     for (let i = 0; i < 50 && pushed.length === 0; i++) await Bun.sleep(5);
     expect(pushed.length).toBeGreaterThan(0);
-    expect(pushed[0]!.data.body).toBe("hello late job");
-    expect(pushed[0]!.data.job_id).toBe(created.result.job.id);
+    const late0 = pushed[0]!;
+    if (late0.event !== "msg.new") throw new Error("expected msg.new frame");
+    expect(late0.data.body).toBe("hello late job");
+    expect(late0.data.job_id).toBe(created.result.job.id);
 
     c.close();
     await d.close();
@@ -239,7 +247,9 @@ describe("agvsr watch — cross-job message streaming", () => {
     });
 
     for (let i = 0; i < 50 && pushed.length === 0; i++) await Bun.sleep(5);
-    expect(pushed.some((f) => f.data.body === "post-subscribe message")).toBe(true);
+    expect(
+      pushed.some((f) => f.event === "msg.new" && f.data.body === "post-subscribe message"),
+    ).toBe(true);
 
     c.close();
   });

@@ -92,6 +92,7 @@ export type Request =
       method: "msg.watch";
       params: { job_id: string; mark_read?: boolean };
     }
+  | { id: string; type: "request"; method: "job.watch"; params?: Record<string, never> }
   | {
       id: string;
       type: "request";
@@ -107,12 +108,17 @@ export type Request =
 
 export type Method = Extract<Request, { type: "request" }>["method"];
 
-/** Server-initiated push frame sent to clients subscribed via msg.watch. */
-export interface PushFrame {
-  type: "push";
-  event: "msg.new";
-  data: Message;
+/** Minimal lifecycle payload for job.update. Internal to daemon↔gateway; not Web Push. */
+export interface JobUpdate {
+  job_id: string;
+  status: JobStatus;
+  updated_at: string;
 }
+
+/** Server-initiated push frame. Discriminated by `event`. */
+export type PushFrame =
+  | { type: "push"; event: "msg.new"; data: Message }
+  | { type: "push"; event: "job.update"; data: JobUpdate };
 
 export interface ResponseOk<T = unknown> {
   id: string;

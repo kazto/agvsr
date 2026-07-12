@@ -24,6 +24,7 @@ import { fireHook, noopPushNotifier, type HookEvent, type PushNotifier } from ".
 import type {
   Job,
   JobRuntime,
+  JobStatus,
   Message,
   PushFrame,
   Request,
@@ -444,12 +445,32 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const jobKillControllers = new Map<string, Set<AbortController>>();
   // Per-job push subscribers registered via msg.watch.
   const msgWatchers = new Map<string, Set<(frame: PushFrame) => boolean>>();
+  // Global job lifecycle push subscribers registered via job.watch.
+  const jobWatchers = new Set<(frame: PushFrame) => boolean>();
   // Deferred close trigger for daemon.stop.
   let doClose: () => Promise<void> = async () => {};
 
   if (team) {
     emitTeamModelWarnings(team, "startup");
   }
+
+  const emitJobUpdate = (jobId: string, status: JobStatus): void => {
+    if (jobWatchers.size === 0) return;
+    const job = store.getJob(jobId);
+    const frame: PushFrame = {
+      type: "push",
+      event: "job.update",
+      data: { job_id: jobId, status, updated_at: job?.updated_at ?? new Date().toISOString() },
+    };
+    for (const watcher of jobWatchers) {
+      if (!watcher(frame)) jobWatchers.delete(watcher);
+    }
+  };
+
+  const setStatus = (jobId: string, status: JobStatus): void => {
+    store.setJobStatus(jobId, status);
+    emitJobUpdate(jobId, status);
+  };
 
   const notifyWatchers = (msg: Message): void => {
     const set = msgWatchers.get(msg.job_id);
@@ -659,7 +680,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       const reason =
         "supervisor turn ended with assistant text but no agvsr tool call was recorded; " +
         "the text was saved to the audit log, but no work was routed and the job cannot progress.";
-      store.setJobStatus(job.id, "failed");
+      setStatus(job.id, "failed");
       createMsg({
         job_id: job.id,
         from_role: "daemon",
@@ -707,7 +728,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           reason = `${role} turn failed.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`;
         }
         reason = appendRecoverableDirtyWorktreeNote(job, reason);
-        store.setJobStatus(job.id, "failed");
+        setStatus(job.id, "failed");
         createMsg({
           job_id: job.id,
           from_role: "daemon",
@@ -742,7 +763,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             job,
             `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`,
           );
-          store.setJobStatus(job.id, "failed");
+          setStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
             from_role: "daemon",
@@ -775,7 +796,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             job,
             `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`,
           );
-          store.setJobStatus(job.id, "failed");
+          setStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
             from_role: "daemon",
@@ -811,7 +832,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const message = (e as Error).message;
         if (role === SUPERVISOR) {
           const reason = appendRecoverableDirtyWorktreeNote(job, message);
-          store.setJobStatus(job.id, "failed");
+          setStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
             from_role: "daemon",
@@ -833,7 +854,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
               job,
               `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
             );
-            store.setJobStatus(job.id, "failed");
+            setStatus(job.id, "failed");
             createMsg({
               job_id: job.id,
               from_role: "daemon",
@@ -1021,7 +1042,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             job.worktree = worktree;
           }
         } catch (e) {
-          store.setJobStatus(job.id, "failed");
+          setStatus(job.id, "failed");
           store.createMessage({
             job_id: job.id,
             from_role: "daemon",
@@ -1042,6 +1063,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           body: job.goal,
         });
         enqueueDispatch(job, SUPERVISOR, job.goal);
+        emitJobUpdate(job.id, "running");
         return ok(req.id, { job });
       }
 
@@ -1170,6 +1192,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         return ok(req.id, { watching: true });
       }
 
+      case "job.watch": {
+        const watcher = (frame: PushFrame): boolean => push(frame);
+        jobWatchers.add(watcher);
+        return ok(req.id, { watching: true });
+      }
+
       case "job.complete": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
@@ -1184,7 +1212,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           });
           return err(req.id, gate.code, gate.message);
         }
-        store.setJobStatus(req.params.job_id, "done");
+        setStatus(req.params.job_id, "done");
         createMsg({
           job_id: req.params.job_id,
           from_role: SUPERVISOR,
@@ -1205,7 +1233,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
         const reason = appendRecoverableDirtyWorktreeNote(job, req.params.reason);
-        store.setJobStatus(req.params.job_id, "failed");
+        setStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,
           from_role: SUPERVISOR,
@@ -1252,7 +1280,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             `job ${req.params.job_id} is not running (status: ${job.status})`,
           );
         debug("job stop", { job: job.id });
-        store.setJobStatus(req.params.job_id, "failed");
+        setStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,
           from_role: "user",
@@ -1279,7 +1307,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             `job ${req.params.job_id} is not running (status: ${job.status})`,
           );
         debug("job kill", { job: job.id });
-        store.setJobStatus(req.params.job_id, "interrupted");
+        setStatus(req.params.job_id, "interrupted");
         createMsg({
           job_id: req.params.job_id,
           from_role: "user",

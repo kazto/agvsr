@@ -54,11 +54,13 @@ class ApiError extends Error {
   }
 }
 
-const POLL_MS = 2000;
+/** Fallback polling interval — primary live updates come from /api/jobs/stream. */
+export const FALLBACK_POLL_MS = 30000;
 const STREAM_RECONNECT_MIN_MS = 500;
 const STREAM_RECONNECT_MAX_MS = 8000;
+const JOB_UPDATE_DEBOUNCE_MS = 250;
 
-export function startPolling(fn: () => void | Promise<void>, ms = POLL_MS): () => void {
+export function startPolling(fn: () => void | Promise<void>, ms = FALLBACK_POLL_MS): () => void {
   void fn();
   const timer = setInterval(() => {
     void fn();
@@ -238,6 +240,10 @@ export function mountApp(root: HTMLElement): void {
   let streamSocket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
   let reconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+  let jobsStreamSocket: WebSocket | null = null;
+  let jobsReconnectTimer: number | null = null;
+  let jobsReconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+  let jobUpdateDebounceTimer: number | null = null;
   let pushRegistration: ServiceWorkerRegistration | null = null;
   const shell = document.createElement("div");
   shell.className = "shell";
@@ -344,6 +350,7 @@ export function mountApp(root: HTMLElement): void {
       currentJobId = null;
       detailState = null;
       closeStream();
+      closeJobsStream();
       setBannerStatus("read-only monitoring");
       content.replaceChildren(loginForm);
       return;
@@ -367,6 +374,88 @@ export function mountApp(root: HTMLElement): void {
       streamSocket.close();
     }
     streamSocket = null;
+  }
+
+  function clearJobsReconnectTimer(): void {
+    if (jobsReconnectTimer !== null) {
+      clearTimeout(jobsReconnectTimer);
+      jobsReconnectTimer = null;
+    }
+  }
+
+  function closeJobsStream(): void {
+    clearJobsReconnectTimer();
+    jobsReconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+    if (jobsStreamSocket && jobsStreamSocket.readyState < WebSocket.CLOSING) {
+      jobsStreamSocket.close();
+    }
+    jobsStreamSocket = null;
+    if (jobUpdateDebounceTimer !== null) {
+      clearTimeout(jobUpdateDebounceTimer);
+      jobUpdateDebounceTimer = null;
+    }
+  }
+
+  function debouncedRefreshJobs(triggerJobId?: string): void {
+    if (jobUpdateDebounceTimer !== null) clearTimeout(jobUpdateDebounceTimer);
+    jobUpdateDebounceTimer = window.setTimeout(async () => {
+      jobUpdateDebounceTimer = null;
+      await refreshJobs();
+      if (triggerJobId && currentJobId === triggerJobId) {
+        await refreshDetail(triggerJobId);
+      }
+    }, JOB_UPDATE_DEBOUNCE_MS);
+  }
+
+  function jobsStreamUrl(): URL {
+    const url = new URL("/api/jobs/stream", window.location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url;
+  }
+
+  function scheduleJobsStreamReconnect(): void {
+    if (jobsStreamSocket !== null || jobsReconnectTimer !== null) return;
+    jobsReconnectTimer = window.setTimeout(() => {
+      jobsReconnectTimer = null;
+      if (jobsStreamSocket === null && csrfToken) {
+        openJobsStream();
+      }
+    }, jobsReconnectDelayMs);
+    jobsReconnectDelayMs = Math.min(jobsReconnectDelayMs * 2, STREAM_RECONNECT_MAX_MS);
+  }
+
+  function openJobsStream(): void {
+    closeJobsStream();
+    if (!csrfToken) return;
+    const socket = new WebSocket(jobsStreamUrl().toString());
+    jobsStreamSocket = socket;
+
+    socket.addEventListener("open", () => {
+      if (jobsStreamSocket !== socket) return;
+      jobsReconnectDelayMs = STREAM_RECONNECT_MIN_MS;
+      void refreshJobs();
+    });
+    socket.addEventListener("message", (event) => {
+      if (jobsStreamSocket !== socket) return;
+      if (typeof event.data !== "string") return;
+      let frame: { event: string; data: { job_id: string } } | null = null;
+      try {
+        frame = JSON.parse(event.data) as { event: string; data: { job_id: string } };
+      } catch {
+        return;
+      }
+      if (frame.event === "job.update") {
+        debouncedRefreshJobs(frame.data.job_id);
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (jobsStreamSocket !== socket) return;
+      jobsStreamSocket = null;
+      if (csrfToken) scheduleJobsStreamReconnect();
+    });
+    socket.addEventListener("error", () => {
+      /* close event will handle reconnect */
+    });
   }
 
   function scheduleStreamReconnect(jobId: string): void {
@@ -526,9 +615,11 @@ export function mountApp(root: HTMLElement): void {
       tokenInput.value = "";
       await refreshSession();
       await refreshJobs();
+      openJobsStream();
     } catch (err) {
       csrfToken = "";
       closeStream();
+      closeJobsStream();
       showError(err instanceof ApiError ? err.message : "login failed");
     }
   });
@@ -603,13 +694,21 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-  startPolling(async () => {
+  // Initial load: check session, load jobs, set up push, open global stream.
+  void (async () => {
     await refreshSession();
     if (csrfToken) {
       await refreshJobs();
       await initPush();
+      openJobsStream();
     }
-  }, POLL_MS);
+  })();
+
+  // Fallback polling for session drift, WS gaps, and recovery — not the primary update path.
+  startPolling(async () => {
+    await refreshSession();
+    if (csrfToken) await refreshJobs();
+  }, FALLBACK_POLL_MS);
 }
 
 if (typeof document !== "undefined") {

@@ -510,3 +510,224 @@ describe("web websocket stream", () => {
     }
   });
 });
+
+describe("global /api/jobs/stream WebSocket", () => {
+  function openJobsStream(
+    url: string,
+    headers: Record<string, string>,
+  ): {
+    ws: WebSocket;
+    frames: Array<{ event: string; data: Record<string, unknown> }>;
+    openedFlag: boolean;
+    closedFlag: boolean;
+    erroredFlag: boolean;
+    opened: Promise<void>;
+    closed: Promise<CloseEvent>;
+  } {
+    const frames: Array<{ event: string; data: Record<string, unknown> }> = [];
+    let openedFlag = false;
+    let closedFlag = false;
+    let erroredFlag = false;
+    let openResolve!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      openResolve = resolve;
+    });
+    let closeResolve!: (ev: CloseEvent) => void;
+    const closed = new Promise<CloseEvent>((resolve) => {
+      closeResolve = resolve;
+    });
+    const ws = new WebSocket(url, { headers } as unknown as ConstructorParameters<
+      typeof WebSocket
+    >[1]);
+    ws.addEventListener("open", () => {
+      openedFlag = true;
+      openResolve();
+    });
+    ws.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") return;
+      try {
+        frames.push(JSON.parse(event.data) as { event: string; data: Record<string, unknown> });
+      } catch {
+        /* ignore malformed */
+      }
+    });
+    ws.addEventListener("close", (event) => {
+      closedFlag = true;
+      closeResolve(event);
+    });
+    ws.addEventListener("error", () => {
+      erroredFlag = true;
+    });
+    return {
+      ws,
+      frames,
+      get openedFlag() {
+        return openedFlag;
+      },
+      get closedFlag() {
+        return closedFlag;
+      },
+      get erroredFlag() {
+        return erroredFlag;
+      },
+      opened,
+      closed,
+    };
+  }
+
+  it("/api/jobs/stream delivers job.update to authenticated client", async () => {
+    const harness = await setupHarness();
+    try {
+      const url = new URL("/api/jobs/stream", harness.web.endpoint).toString();
+      const stream = openJobsStream(url, {
+        origin: harness.origin,
+        cookie: harness.cookieHeader,
+      });
+      await stream.opened;
+
+      const created = await harness.client.request<{ job: Job }>("job.create", {
+        goal: "global stream test",
+        cwd: harness.repo,
+      });
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error(created.error.message);
+      const jobId = created.result.job.id;
+
+      await waitFor(() =>
+        stream.frames.some(
+          (f) => f.event === "job.update" && (f.data as { job_id: string }).job_id === jobId,
+        ),
+      );
+
+      const updates = stream.frames.filter(
+        (f) => f.event === "job.update" && (f.data as { job_id: string }).job_id === jobId,
+      );
+      expect(updates.length).toBeGreaterThan(0);
+      const first = updates[0]!;
+      expect((first.data as { status: string }).status).toBe("running");
+      expect((first.data as { updated_at: string }).updated_at).toBeTruthy();
+
+      stream.ws.close();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("/api/jobs/stream fans out job.update to multiple clients", async () => {
+    const harness = await setupHarness();
+    try {
+      const url = new URL("/api/jobs/stream", harness.web.endpoint).toString();
+      const headers = { origin: harness.origin, cookie: harness.cookieHeader };
+      const stream1 = openJobsStream(url, headers);
+      const stream2 = openJobsStream(url, headers);
+      await Promise.all([stream1.opened, stream2.opened]);
+
+      const created = await harness.client.request<{ job: Job }>("job.create", {
+        goal: "fanout global stream",
+        cwd: harness.repo,
+      });
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error(created.error.message);
+      const jobId = created.result.job.id;
+
+      const hasUpdate = (stream: ReturnType<typeof openJobsStream>): boolean =>
+        stream.frames.some(
+          (f) => f.event === "job.update" && (f.data as { job_id: string }).job_id === jobId,
+        );
+
+      await waitFor(() => hasUpdate(stream1) && hasUpdate(stream2));
+
+      expect(hasUpdate(stream1)).toBe(true);
+      expect(hasUpdate(stream2)).toBe(true);
+
+      stream1.ws.close();
+      stream2.ws.close();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("/api/jobs/:id/stream does not deliver job.update events", async () => {
+    const harness = await setupHarness();
+    try {
+      const created = await harness.client.request<{ job: Job }>("job.create", {
+        goal: "per-job isolation test",
+        cwd: harness.repo,
+      });
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error(created.error.message);
+      const jobId = created.result.job.id;
+
+      const perJobUrl = new URL(`/api/jobs/${jobId}/stream`, harness.web.endpoint).toString();
+      const perJob = openStream(perJobUrl, {
+        origin: harness.origin,
+        cookie: harness.cookieHeader,
+      });
+      await perJob.opened;
+
+      await waitFor(() => perJob.frames.length > 0, 2000);
+
+      const jobUpdateFrames = perJob.frames.filter((f) => f.event === "job.update");
+      expect(jobUpdateFrames.length).toBe(0);
+
+      perJob.ws.close();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("/api/jobs/stream rejects unauthenticated upgrades with 401", async () => {
+    const harness = await setupHarness();
+    try {
+      const path = "/api/jobs/stream";
+
+      const response = await gatewayFetch(harness.web.endpoint, path, {
+        headers: {
+          origin: harness.origin,
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-key": randomUUID().replace(/-/g, "").slice(0, 24),
+          "sec-websocket-version": "13",
+        },
+      });
+      expect(response.status).toBe(401);
+
+      const stream = openJobsStream(new URL(path, harness.web.endpoint).toString(), {
+        origin: harness.origin,
+      });
+      await waitFor(() => stream.closedFlag || stream.erroredFlag, 1000);
+      expect(stream.openedFlag).toBe(false);
+      stream.ws.close();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("/api/jobs/stream rejects bad-origin upgrades with 403", async () => {
+    const harness = await setupHarness();
+    try {
+      const path = "/api/jobs/stream";
+
+      const response = await gatewayFetch(harness.web.endpoint, path, {
+        headers: {
+          origin: "http://evil.example",
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-key": randomUUID().replace(/-/g, "").slice(0, 24),
+          "sec-websocket-version": "13",
+        },
+      });
+      expect(response.status).toBe(403);
+
+      const stream = openJobsStream(new URL(path, harness.web.endpoint).toString(), {
+        origin: "http://evil.example",
+        cookie: harness.cookieHeader,
+      });
+      await waitFor(() => stream.closedFlag || stream.erroredFlag, 1000);
+      expect(stream.openedFlag).toBe(false);
+      stream.ws.close();
+    } finally {
+      await harness.cleanup();
+    }
+  });
+});
