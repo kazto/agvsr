@@ -265,29 +265,40 @@ export function mountApp(root: HTMLElement): void {
   sidebar.className = "sidebar";
   const sidebarInner = document.createElement("div");
   sidebarInner.className = "sidebar__inner";
+  const createDialog = document.createElement("dialog");
+  createDialog.className = "create-dialog";
   const createForm = document.createElement("form");
-  createForm.className = "create-form";
-  const goalInput = inputEl("text", "goal", "New job goal");
+  createForm.className = "create-form create-form--modal";
+  const goalInput = document.createElement("textarea");
+  goalInput.name = "goal";
+  goalInput.placeholder = "New job goal";
+  goalInput.className = "create-form__goal";
   const cwdInput = inputEl("text", "cwd", "cwd");
   const idInput = inputEl("text", "id", "optional id");
-  const createButton = buttonEl("Create job", "create-form__submit", "submit");
+  const createActions = document.createElement("div");
+  createActions.className = "create-form__actions";
+  const createCancelButton = buttonEl("Cancel", "create-form__cancel", "button");
+  const createButton = buttonEl("Confirm", "create-form__submit", "submit");
+  createActions.append(createCancelButton, createButton);
   createForm.append(
     textEl("h2", "Create job", "panel-title"),
     goalInput,
     cwdInput,
     idInput,
-    createButton,
+    createActions,
   );
+  createDialog.append(createForm);
+  const openCreateButton = buttonEl("Create job", "create-form__submit create-job-open", "button");
   const jobsHost = document.createElement("div");
   jobsHost.className = "sidebar__jobs";
-  sidebarInner.append(createForm, jobsHost);
+  sidebarInner.append(openCreateButton, jobsHost);
   sidebar.append(sidebarInner);
   const detail = document.createElement("section");
   detail.className = "detail-pane";
   const detailPlaceholder = textEl("p", "Select a job to view details.", "muted");
   detail.append(detailPlaceholder);
   content.append(sidebar, detail);
-  shell.append(banner, content);
+  shell.append(banner, content, createDialog);
   root.replaceChildren(shell);
 
   const loginForm = document.createElement("form");
@@ -353,6 +364,7 @@ export function mountApp(root: HTMLElement): void {
       detailState = null;
       closeStream();
       closeJobsStream();
+      createDialog.close();
       setBannerStatus("read-only monitoring");
       content.replaceChildren(loginForm);
       return;
@@ -576,6 +588,19 @@ export function mountApp(root: HTMLElement): void {
     ensureStream(id);
   }
 
+  openCreateButton.addEventListener("click", () => {
+    createDialog.showModal();
+    goalInput.focus();
+  });
+
+  createCancelButton.addEventListener("click", () => {
+    createDialog.close();
+  });
+
+  createDialog.addEventListener("click", (event) => {
+    if (event.target === createDialog) createDialog.close();
+  });
+
   createForm.addEventListener("submit", async (event: SubmitEvent) => {
     event.preventDefault();
     const goal = goalInput.value.trim();
@@ -595,6 +620,7 @@ export function mountApp(root: HTMLElement): void {
       cwdInput.value = "";
       idInput.value = "";
       currentJobId = created.job.id;
+      createDialog.close();
       await refreshJobs();
       await refreshDetail(created.job.id);
       setBannerStatus("authenticated");
