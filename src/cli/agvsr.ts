@@ -496,6 +496,11 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
 
+      if (subCmd) {
+        console.error(`unknown daemon subcommand: ${subCmd}\n\n${USAGE}`);
+        process.exit(1);
+      }
+
       const { startDaemon } = await import("../daemon/daemon.ts");
       const { createPushNotifier } = await import("../web/push.ts");
       const { storePath: getStorePath } = await import("../paths.ts");
