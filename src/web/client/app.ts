@@ -284,6 +284,8 @@ export function mountApp(root: HTMLElement): void {
   sidebar.append(sidebarInner);
   const detail = document.createElement("section");
   detail.className = "detail-pane";
+  const detailPlaceholder = textEl("p", "Select a job to view details.", "muted");
+  detail.append(detailPlaceholder);
   content.append(sidebar, detail);
   shell.append(banner, content);
   root.replaceChildren(shell);
