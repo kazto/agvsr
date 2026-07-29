@@ -1,7 +1,3 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { ADAPTERS, type Adapter, parseTeam } from "./team.ts";
 
 export const BUNDLED_CHARTER_ROLES = new Set(["supervisor", "design", "implementation", "qa"]);
@@ -13,23 +9,6 @@ export const DEFAULT_MODELS: Record<Adapter, string> = {
 };
 
 export const DEFAULT_ROLES = ["supervisor", "design", "implementation", "qa"] as const;
-export const VALID_SKILL_TARGETS = ["claude", "gemini", "codex"] as const;
-export type SkillTarget = (typeof VALID_SKILL_TARGETS)[number];
-export const DEFAULT_SKILL_TARGETS = ["claude"] as const;
-
-const BUNDLED_SKILL_SOURCE_PATH = fileURLToPath(
-  new URL("../../skills/agvsr/SKILL.md", import.meta.url),
-);
-
-// Codex has no user-definable custom-command mechanism (its own `/skills` and
-// `/skill-installer` slash commands are built-in CLI directives for managing
-// skills, not something a package can install) — only claude and gemini get
-// a bundled command file. Codex users invoke the installed skill explicitly
-// with `$agvsr` or browse via `/skills` instead of a `/agvsr` command.
-const BUNDLED_COMMAND_SOURCE_PATHS: Partial<Record<SkillTarget, string>> = {
-  claude: fileURLToPath(new URL("../../commands/agvsr.md", import.meta.url)),
-  gemini: fileURLToPath(new URL("../../commands/agvsr.toml", import.meta.url)),
-};
 
 export interface RoleSpec {
   role: string;
@@ -47,73 +26,6 @@ export class InitError extends Error {
     super(message);
     this.name = "InitError";
   }
-}
-
-export function readBundledSkillSource(): string {
-  return readFileSync(BUNDLED_SKILL_SOURCE_PATH, "utf8");
-}
-
-export function resolveSkillTargetPath(target: SkillTarget, targetDir: string): string {
-  switch (target) {
-    case "claude":
-      return resolve(targetDir, ".claude/skills/agvsr/SKILL.md");
-    case "gemini":
-      return resolve(targetDir, ".gemini/skills/agvsr/SKILL.md");
-    case "codex": {
-      const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-      return resolve(codexHome, "skills/agvsr/SKILL.md");
-    }
-  }
-}
-
-/** Reads the bundled `/agvsr` command source for a target, or null if that
- * target has no custom-command mechanism (codex). */
-export function readBundledCommandSource(target: SkillTarget): string | null {
-  const path = BUNDLED_COMMAND_SOURCE_PATHS[target];
-  return path === undefined ? null : readFileSync(path, "utf8");
-}
-
-/** Resolves where the bundled `/agvsr` command installs for a target, or
- * null if that target has no custom-command mechanism (codex). */
-export function resolveCommandTargetPath(target: SkillTarget, targetDir: string): string | null {
-  switch (target) {
-    case "claude":
-      return resolve(targetDir, ".claude/commands/agvsr.md");
-    case "gemini":
-      return resolve(targetDir, ".gemini/commands/agvsr.toml");
-    case "codex":
-      return null;
-  }
-}
-
-export function parseSkillTargets(rawTargets: readonly string[] | undefined): SkillTarget[] {
-  if (rawTargets === undefined) return [...DEFAULT_SKILL_TARGETS];
-
-  const seen = new Set<SkillTarget>();
-  const targets: SkillTarget[] = [];
-  for (const raw of rawTargets) {
-    for (const part of raw.split(",")) {
-      const target = part.trim();
-      if (!target) {
-        throw new InitError("empty --skill-target entry");
-      }
-      if (!(VALID_SKILL_TARGETS as readonly string[]).includes(target)) {
-        throw new InitError(
-          `unknown --skill-target "${target}". Valid targets: ${VALID_SKILL_TARGETS.join(", ")}`,
-        );
-      }
-      const typed = target as SkillTarget;
-      if (seen.has(typed)) continue;
-      seen.add(typed);
-      targets.push(typed);
-    }
-  }
-
-  if (targets.length === 0) {
-    throw new InitError("empty --skill-target list");
-  }
-
-  return targets;
 }
 
 export function buildTeamYaml(spec: InitSpec): string {

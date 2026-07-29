@@ -36,12 +36,13 @@ agvsr cleanup [--apply]                  Report (or remove) job worktrees/branch
 agvsr ping / team / doctor               Daemon health / configured roles / adapter checks
 ```
 
-If a project was set up with `agvsr init`, Claude Code and Gemini/Antigravity
-also get a `/agvsr` command that bootstraps the daemon for the current
-project (checks it's running with the right `team.yaml`, runs `agvsr doctor`,
-starts it if needed) — run that first if the daemon isn't up yet. Codex has
-no user-definable slash-command mechanism; invoke this skill there explicitly
-with `$agvsr` or browse via `/skills` instead of expecting a `/agvsr` command.
+`agvsr skill install` (run once, globally) also installs a `/agvsr` command
+for Claude Code and Gemini/Antigravity that bootstraps the daemon for the
+current project (checks it's running with the right `team.yaml`, runs
+`agvsr doctor`, starts it if needed) — run that first if the daemon isn't up
+yet. Codex has no user-definable slash-command mechanism; invoke this skill
+there explicitly with `$agvsr` or browse via `/skills` instead of expecting a
+`/agvsr` command.
 
 ## 1. Writing the job prompt — always include a constraint block
 

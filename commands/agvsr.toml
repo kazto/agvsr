@@ -8,7 +8,10 @@ Background: agvsr runs one daemon per machine, but `job.create` resolves each
 job's own `team.yaml` from its target repo first (if that repo has one)
 before falling back to whatever `team.yaml` the daemon was started with. So
 an already-running daemon almost always works correctly for a new project
-too, as long as that project has its own `team.yaml`.
+too, as long as that project has its own `team.yaml`. This skill and this
+`/agvsr` command are themselves installed once, globally, via
+`agvsr skill install` — separate from `agvsr init`, which only generates a
+project's `team.yaml` and is run again for every new project.
 
 1. Confirm `./team.yaml` exists for this project. If it doesn't, tell the
    user to run `agvsr init` first — do not generate it yourself — and stop

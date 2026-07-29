@@ -12,7 +12,7 @@ import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import type { Adapter } from "../config/team.ts";
-import type { SkillTarget } from "../config/init.ts";
+import type { SkillTarget } from "../config/skill-install.ts";
 import type {
   Job,
   JobRuntime,
@@ -27,6 +27,7 @@ const USAGE = `agvsr ${VERSION}
 
 Usage:
   agvsr init [options]              Generate a team.yaml without hand editing
+  agvsr skill install [options]     Install the bundled skill + /agvsr command (once, globally by default)
   agvsr daemon [--team F]           Run the agvsrd daemon in the foreground
   agvsr daemon start [--team F]     Start the daemon in the background
   agvsr daemon stop                 Stop the running daemon gracefully
@@ -990,8 +991,6 @@ Usage: agvsr web [options]
           output: { type: "string", short: "o" },
           stdout: { type: "boolean" },
           force: { type: "boolean", short: "f" },
-          "no-skill": { type: "boolean" },
-          "skill-target": { type: "string", multiple: true },
           roles: { type: "string" },
           adapter: { type: "string" },
           model: { type: "string" },
@@ -1011,37 +1010,21 @@ Usage: agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
-      --no-skill        Skip installing the bundled skill and /agvsr command
-      --skill-target    Agent integration target(s): claude, gemini, codex
-                        Repeatable or comma-separated. Default: claude.
-                        Installs the skill for every target, plus a /agvsr
-                        command for claude and gemini (codex has no custom-
-                        command mechanism; invoke the skill there with
-                        $agvsr or browse via /skills instead).
-                        Codex writes globally to $CODEX_HOME/skills/agvsr/SKILL.md
-                        or ~/.codex/skills/agvsr/SKILL.md when unset.
       --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
       --model <m>       Default model for every role
       --role <spec>     Per-role override, repeatable. Form: name:adapter:model
       --no-comments     Emit bare YAML without header/hooks comments
   -h, --help            Show this help
+
+Run \`agvsr skill install\` separately (once, globally) to install the
+bundled skill and /agvsr command.
 `);
         return;
       }
 
-      const {
-        buildTeamYaml,
-        resolveRoleSpecs,
-        DEFAULT_ROLES,
-        BUNDLED_CHARTER_ROLES,
-        InitError,
-        parseSkillTargets,
-        resolveSkillTargetPath,
-        readBundledSkillSource,
-        resolveCommandTargetPath,
-        readBundledCommandSource,
-      } = await import("../config/init.ts");
+      const { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, BUNDLED_CHARTER_ROLES, InitError } =
+        await import("../config/init.ts");
 
       const VALID_ADAPTERS = ["claude-code", "codex", "agy"] as const;
 
@@ -1116,37 +1099,106 @@ Usage: agvsr init [options]
       }
 
       const outputPath = resolve(initOpts.output ?? "team.yaml");
-      const installSkills = !initOpts["no-skill"];
-      const rawSkillTargets = initOpts["skill-target"];
-      const skillTargets = installSkills
-        ? parseSkillTargets(
-            rawSkillTargets === undefined
-              ? undefined
-              : Array.isArray(rawSkillTargets)
-                ? rawSkillTargets
-                : [rawSkillTargets],
-          )
-        : [];
-      const targetDir = dirname(outputPath);
-      const skillContents = installSkills ? readBundledSkillSource() : "";
-      const skillDestinations = skillTargets.map((target) => ({
+
+      if (!initOpts.force && existsSync(outputPath)) {
+        console.error(`${outputPath} already exists; pass --force to overwrite`);
+        process.exit(1);
+      }
+
+      mkdirSync(dirname(outputPath), { recursive: true });
+      writeFileSync(outputPath, yaml, "utf8");
+
+      console.log(`wrote ${outputPath}`);
+      return;
+    }
+
+    case "skill": {
+      const { values: skillOpts, positionals: skillArgs } = parseArgs({
+        args: rest,
+        options: {
+          target: { type: "string", multiple: true },
+          project: { type: "string" },
+          force: { type: "boolean", short: "f" },
+          help: { type: "boolean", short: "h" },
+        },
+        allowPositionals: true,
+        strict: true,
+      });
+      const subCmd = skillArgs[0];
+
+      if (skillOpts.help || subCmd === undefined) {
+        console.log(`agvsr skill install — install the bundled skill + /agvsr command
+
+Usage: agvsr skill install [options]
+
+      --target <t>      Agent integration target(s): claude, gemini, codex
+                        Repeatable or comma-separated. Default: claude.
+                        Installs the skill for every target, plus a /agvsr
+                        command for claude and gemini (codex has no custom-
+                        command mechanism; invoke the skill there with
+                        $agvsr or browse via /skills instead).
+      --project <dir>   Install into <dir> instead of the global location
+                        (default: global, e.g. ~/.claude/skills/agvsr/SKILL.md).
+                        Codex always installs globally to
+                        $CODEX_HOME/skills/agvsr/SKILL.md or
+                        ~/.codex/skills/agvsr/SKILL.md, ignoring --project.
+  -f, --force           Overwrite existing skill/command files
+  -h, --help            Show this help
+`);
+        return;
+      }
+
+      if (subCmd !== "install") {
+        console.error(`unknown skill subcommand: ${subCmd}\n\n${USAGE}`);
+        process.exit(1);
+      }
+
+      const {
+        parseSkillTargets,
+        resolveSkillTargetPath,
+        readBundledSkillSource,
+        resolveCommandTargetPath,
+        readBundledCommandSource,
+        SkillInstallError,
+      } = await import("../config/skill-install.ts");
+
+      const rawTargets = skillOpts.target;
+      let targets: SkillTarget[];
+      try {
+        targets = parseSkillTargets(
+          rawTargets === undefined
+            ? undefined
+            : Array.isArray(rawTargets)
+              ? rawTargets
+              : [rawTargets],
+        );
+      } catch (err) {
+        if (err instanceof SkillInstallError) {
+          console.error(err.message);
+          process.exit(1);
+        }
+        throw err;
+      }
+
+      const scope = skillOpts.project === undefined ? ("global" as const) : ("project" as const);
+      const projectDir = skillOpts.project === undefined ? undefined : resolve(skillOpts.project);
+
+      const skillContents = readBundledSkillSource();
+      const skillDestinations = targets.map((target) => ({
         target,
-        path: resolveSkillTargetPath(target, targetDir),
+        path: resolveSkillTargetPath(target, scope, projectDir),
       }));
       // Not every target has a custom-command mechanism (codex does not);
       // resolveCommandTargetPath/readBundledCommandSource return null there.
-      const commandDestinations = installSkills
-        ? skillTargets
-            .map((target) => ({ target, path: resolveCommandTargetPath(target, targetDir) }))
-            .filter((dest): dest is { target: SkillTarget; path: string } => dest.path !== null)
-        : [];
+      const commandDestinations = targets
+        .map((target) => ({ target, path: resolveCommandTargetPath(target, scope, projectDir) }))
+        .filter((dest): dest is { target: SkillTarget; path: string } => dest.path !== null);
       const intendedPaths = [
-        outputPath,
         ...skillDestinations.map((dest) => dest.path),
         ...commandDestinations.map((dest) => dest.path),
       ];
 
-      if (!initOpts.force) {
+      if (!skillOpts.force) {
         const existing = intendedPaths.find((path) => existsSync(path));
         if (existing) {
           console.error(`${existing} already exists; pass --force to overwrite`);
@@ -1154,23 +1206,19 @@ Usage: agvsr init [options]
         }
       }
 
-      mkdirSync(dirname(outputPath), { recursive: true });
-      writeFileSync(outputPath, yaml, "utf8");
-
-      if (installSkills) {
-        for (const { path } of skillDestinations) {
-          mkdirSync(dirname(path), { recursive: true });
-          writeFileSync(path, skillContents, "utf8");
-        }
-        for (const { target, path } of commandDestinations) {
-          const contents = readBundledCommandSource(target);
-          if (contents === null) continue; // unreachable given the filter above
-          mkdirSync(dirname(path), { recursive: true });
-          writeFileSync(path, contents, "utf8");
-        }
+      for (const { path } of skillDestinations) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, skillContents, "utf8");
+        console.log(`installed ${path}`);
+      }
+      for (const { target, path } of commandDestinations) {
+        const contents = readBundledCommandSource(target);
+        if (contents === null) continue; // unreachable given the filter above
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, contents, "utf8");
+        console.log(`installed ${path}`);
       }
 
-      console.log(`wrote ${outputPath}`);
       return;
     }
 
