@@ -281,6 +281,21 @@ Merged into main alongside Phase 19 (Turn-Failure Diagnostics): **303 passing te
 
 Current validation: **322 passing tests, 0 failing**; `bun run typecheck`, `bunx oxlint src test`, and `bunx oxfmt src` all pass.
 
+### Phase 22 — v1.1.0 release, Web UI polish, charter tightening ✅
+
+Small follow-up work merged directly to `main` after Phase 21; no phase branch.
+
+| Commit / area                                       | What it does                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `08de75d` — `package.json`, `src/version.ts`        | Version bump **1.0.0 → 1.1.0**, covering Web UI Phases 1–5 (read-only monitoring, WebSocket live messages, operations API, Web Push, `job.update` lifecycle push) plus the codex adapter sandbox/resume fixes. `test/package.test.ts` asserts the version string. No git tag was cut.                                  |
+| `3884383` — `src/cli/agvsr.ts`                      | `agvsr daemon <unknown>` now errors instead of falling through to starting the daemon.                                                                                                                                                                                                                                |
+| `d6f4f3a` — `src/web/client/{app.ts,styles.css}`    | `.job-list` / `.detail` / `.messages` were implicit single-column grids with no track size, so long text (real job goals routinely exceed 1000 chars) blew the column past its pane instead of wrapping — fixed with an explicit `grid-template-columns: minmax(0, 1fr)`. The detail pane also shows a "Select a job to view details." placeholder before a job is selected. |
+| `b0aa600` — `docs/design-create-job-modal.md`       | Design for moving the Create-job form out of the sidebar into a modal.                                                                                                                                                                                                                                                |
+| `5a39a1a` — `src/web/client/{app.ts,styles.css}`    | Implements that design: the sidebar shows only a "Create job" opener button; it opens a native `<dialog>` with a larger goal textarea, cwd/id inputs, and Cancel/Confirm. Esc and backdrop click cancel (native `<dialog>` behavior); Confirm reuses the existing `POST /api/jobs` handler verbatim and closes on success. |
+| `7cfa659` — `charters/defaults/supervisor{,.ja}.md` | Supervisor now **elaborates terse goals itself** — expanding a one-line Web UI goal into scope / acceptance criteria / constraints / non-goals, recording the assumptions it filled in, and going to the human only for genuinely unresolvable decisions (batched into one round). Also codifies that the design must be human-approved before delegating to `implementation`, matching the daemon's `approval_required` enforcement (`docs/design-approval-gate.md`). |
+
+Current validation: **322 passing tests, 0 failing** (unchanged — this phase added behavior fixes and charter prose, no new test files); `bun test` re-verified on 2026-07-28.
+
 Remaining next work:
 
 1. **Real CLI smoke tests**
@@ -348,6 +363,6 @@ examples/
 
 ## Branch Status
 
-| Branch | Status                           |
-| ------ | -------------------------------- |
-| `main` | Phase 0–16 merged, 60 tests pass |
+| Branch | Status                                    |
+| ------ | ----------------------------------------- |
+| `main` | Phase 0–22 merged, v1.1.0, 322 tests pass |
