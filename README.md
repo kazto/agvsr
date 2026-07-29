@@ -132,6 +132,7 @@ Per-role fields:
 | `instances`       | Number of instances of this role (default `1`)              |
 | `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default    |
 | `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default |
+| `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
 
 The team must define a `supervisor` role. The daemon's default team file is
 resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml` (relative

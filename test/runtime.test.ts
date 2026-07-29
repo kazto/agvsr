@@ -192,3 +192,93 @@ roles:
     c.close();
   });
 });
+
+describe("role-level network_access dispatch plumbing", () => {
+  it("passes a role's network_access: true through to the turn dispatch", async () => {
+    const tmp = join(tmpdir(), `agvsr-netaccess-${randomUUID()}`);
+    const sock = `${tmp}.sock`;
+    const store = `${tmp}.sqlite`;
+    const repo = `${tmp}-repo`;
+    mkdirSync(repo, { recursive: true });
+    cleanups.push(() => {
+      for (const f of [sock, store, `${store}-wal`, `${store}-shm`, repo]) {
+        try {
+          rmSync(f, { recursive: true });
+        } catch {}
+      }
+    });
+
+    let seen: boolean | undefined;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    daemon = await startDaemon({
+      endpoint: sock,
+      storeFile: store,
+      team: parseTeam(`
+roles:
+  supervisor: { adapter: codex, model: fake-model, network_access: true }
+`),
+      turnRunner: async (dispatch: TurnDispatch) => {
+        seen = dispatch.networkAccess;
+        return {
+          events: [{ kind: "result", ok: true, text: "ok" }],
+          outcome: { sessionId: "s1", finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "net test", cwd: repo });
+    expect(created.ok).toBe(true);
+
+    for (let i = 0; i < 100 && seen === undefined; i++) {
+      await Bun.sleep(5);
+    }
+    expect(seen).toBe(true);
+
+    c.close();
+  });
+
+  it("leaves network_access undefined when the role omits it (adapter defaults to false)", async () => {
+    const tmp = join(tmpdir(), `agvsr-netaccess-default-${randomUUID()}`);
+    const sock = `${tmp}.sock`;
+    const store = `${tmp}.sqlite`;
+    const repo = `${tmp}-repo`;
+    mkdirSync(repo, { recursive: true });
+    cleanups.push(() => {
+      for (const f of [sock, store, `${store}-wal`, `${store}-shm`, repo]) {
+        try {
+          rmSync(f, { recursive: true });
+        } catch {}
+      }
+    });
+
+    let called = false;
+    let seen: boolean | undefined;
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    daemon = await startDaemon({
+      endpoint: sock,
+      storeFile: store,
+      team: TEAM, // supervisor role has no network_access field
+      turnRunner: async (dispatch: TurnDispatch) => {
+        called = true;
+        seen = dispatch.networkAccess;
+        return {
+          events: [{ kind: "result", ok: true, text: "ok" }],
+          outcome: { sessionId: "s1", finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "no net", cwd: repo });
+    expect(created.ok).toBe(true);
+
+    for (let i = 0; i < 100 && !called; i++) {
+      await Bun.sleep(5);
+    }
+    expect(called).toBe(true);
+    expect(seen).toBeUndefined();
+
+    c.close();
+  });
+});

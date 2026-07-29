@@ -32,6 +32,24 @@ describe("parseTeam", () => {
   it("rejects a role missing a model", () => {
     expect(() => parseTeam(`roles:\n  supervisor: { adapter: codex }`)).toThrow(TeamConfigError);
   });
+
+  it("network_access defaults to undefined (opt-in, not required)", () => {
+    const team = parseTeam(VALID);
+    expect(team.roles.qa!.network_access).toBeUndefined();
+  });
+
+  it("accepts an explicit network_access: true on a role", () => {
+    const team = parseTeam(
+      `roles:\n  supervisor: { adapter: codex, model: m }\n  qa: { adapter: codex, model: m, network_access: true }`,
+    );
+    expect(team.roles.qa!.network_access).toBe(true);
+  });
+
+  it("rejects a non-boolean network_access", () => {
+    expect(() =>
+      parseTeam(`roles:\n  supervisor: { adapter: codex, model: m, network_access: "yes" }`),
+    ).toThrow(TeamConfigError);
+  });
 });
 
 describe("allowedTargets (star topology, D10)", () => {

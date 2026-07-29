@@ -26,6 +26,14 @@ const RoleSchema = z.object({
   hard_timeout_ms: z.number().int().positive().optional(),
   /** No-progress turn time limit in ms (overrides env/default). */
   idle_timeout_ms: z.number().int().positive().optional(),
+  /**
+   * Opt-in network access inside the adapter's sandbox (currently only
+   * codex's `sandbox_workspace_write.network_access` respects this; other
+   * adapters ignore it). Default false keeps the existing network-denied
+   * posture; set true for roles that must reach services on the host
+   * (e.g. a QA role verifying against a local database).
+   */
+  network_access: z.boolean().optional(),
 });
 
 const HooksSchema = z

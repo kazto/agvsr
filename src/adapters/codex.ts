@@ -103,7 +103,7 @@ export const codexDriver: CliDriver = {
       "-c",
       `sandbox_workspace_write.writable_roots=${JSON.stringify(writableRoots)}`,
       "-c",
-      "sandbox_workspace_write.network_access=false",
+      `sandbox_workspace_write.network_access=${spec.networkAccess ?? false}`,
       ...codexMcpConfigArgs({ cwd: spec.cwd, env: spec.env }),
       "-m",
       spec.model,

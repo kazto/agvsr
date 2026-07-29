@@ -82,6 +82,8 @@ export interface TurnDispatch {
   adapter: string;
   /** Model string from the job's team snapshot (D17). */
   model: string;
+  /** From the role's `network_access` in team.yaml (default false). */
+  networkAccess?: boolean;
   job: Job;
   message: string;
   sessionId: string | null;
@@ -317,6 +319,7 @@ function defaultTurnRunner(): TurnRunner {
     role,
     adapter,
     model,
+    networkAccess,
     effectiveCwd,
     message,
     sessionId,
@@ -334,6 +337,7 @@ function defaultTurnRunner(): TurnRunner {
         role,
         adapter: adapter as import("../config/team.ts").Adapter,
         model,
+        networkAccess,
         cwd: effectiveCwd,
         systemPrompt,
         env,
@@ -620,6 +624,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         role,
         adapter: roleConfig.adapter,
         model: roleConfig.model,
+        networkAccess: roleConfig.network_access,
         job,
         effectiveCwd,
         message,

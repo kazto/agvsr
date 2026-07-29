@@ -208,6 +208,20 @@ describe("codex driver", () => {
     );
   });
 
+  it("defaults network_access to false when the spec doesn't set networkAccess", () => {
+    const s = codexDriver.buildSpawn(spec("codex"), null, "do it");
+    expect(s.args).toEqual(
+      expect.arrayContaining(["-c", "sandbox_workspace_write.network_access=false"]),
+    );
+  });
+
+  it("opts in to network_access=true when the spec's networkAccess is true", () => {
+    const s = codexDriver.buildSpawn({ ...spec("codex"), networkAccess: true }, null, "do it");
+    expect(s.args).toEqual(
+      expect.arrayContaining(["-c", "sandbox_workspace_write.network_access=true"]),
+    );
+  });
+
   it("parses thread/item/turn events", () => {
     const p = codexDriver.createParser();
     const events = drain(p, [

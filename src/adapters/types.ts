@@ -21,6 +21,9 @@ export interface AgentSpec {
   systemPrompt: string;
   /** Daemon-provided runtime environment, mainly for the MCP stdio shim (D19). */
   env?: Record<string, string>;
+  /** From the role's `network_access` in team.yaml (default false). Only codex's
+   * sandbox currently respects this; other adapters ignore it. */
+  networkAccess?: boolean;
 }
 
 /** Structured events surfaced from a turn (observability; routing is via MCP). */
