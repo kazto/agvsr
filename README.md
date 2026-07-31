@@ -150,9 +150,6 @@ agvsr init [options]
   -o, --output <path>   Write to this file (default: ./team.yaml)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
-      --no-skill        Skip installing the bundled skill and /agvsr command
-      --skill-target    Agent integration target(s): claude, gemini, codex
-                        Repeatable or comma-separated. Default: claude
       --roles <list>    Comma-separated role names
                         (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
@@ -171,16 +168,38 @@ agvsr init \
   --role qa:agy:gemini-3-pro
 ```
 
-By default, `agvsr init` also installs the bundled `agvsr` skill and a
-`/agvsr` slash command for Claude under the generated project directory.
-`gemini` installs the skill and an equivalent `/agvsr` command under the
-generated project directory as well. `codex` installs only the skill —
-globally to `$CODEX_HOME/skills/agvsr/SKILL.md` or
-`~/.codex/skills/agvsr/SKILL.md` when `CODEX_HOME` is unset, and only when
-explicitly selected — since Codex has no user-definable custom-command
+`agvsr init` only ever generates `team.yaml` — run it again for every new
+project. Skills and their commands are installed separately, once per
+machine, with `agvsr skill install` (below).
+
+### `agvsr skill install` options
+
+```
+agvsr skill install [options]
+
+      --skill <s>       Skill(s) to install: agvsr, self-improve.
+                        Repeatable or comma-separated. Default: agvsr.
+      --target <t>      Agent integration target(s): claude, gemini, codex
+                        Repeatable or comma-separated. Default: claude.
+      --project <dir>   Install into <dir> instead of the global location
+                        (default: global, e.g. ~/.claude/skills/agvsr/SKILL.md).
+                        Codex always installs globally, ignoring --project.
+  -f, --force           Overwrite existing skill/command files
+  -h, --help            Show this help
+```
+
+By default, `agvsr skill install` installs the bundled `agvsr` skill and a
+`/agvsr` slash command for Claude, globally (`~/.claude/skills/agvsr/SKILL.md`,
+`~/.claude/commands/agvsr.md`). `gemini` installs the skill and an equivalent
+`/agvsr` command as well. `codex` installs only the skill — to
+`$CODEX_HOME/skills/agvsr/SKILL.md` or `~/.codex/skills/agvsr/SKILL.md` when
+`CODEX_HOME` is unset — since Codex has no user-definable custom-command
 mechanism; invoke the skill there with `$agvsr` or browse via `/skills`
-instead. Use `--skill-target` to add Gemini or Codex targets, or `--no-skill`
-to skip installation entirely.
+instead. Pass `--skill self-improve` to also install the `self-improve`
+skill (`skills/self-improve/SKILL.md`, no command file for any target — it's
+discovered via its own description), which turns an explicitly-flagged
+mistake or lesson-learned into a durable guardrail in the user's global
+`~/.claude/CLAUDE.md`.
 
 The `/agvsr` command only bootstraps the daemon (confirms this project has
 its own `team.yaml`, runs `agvsr doctor`, and starts the daemon if it isn't

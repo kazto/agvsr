@@ -3,12 +3,16 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  DEFAULT_SKILL_NAMES,
   DEFAULT_SKILL_TARGETS,
+  parseSkillNames,
   parseSkillTargets,
   readBundledCommandSource,
+  readBundledSkillSource,
   resolveCommandTargetPath,
   resolveSkillTargetPath,
   SkillInstallError,
+  VALID_SKILL_NAMES,
   VALID_SKILL_TARGETS,
 } from "../src/config/skill-install.ts";
 
@@ -41,43 +45,43 @@ describe("skill target helpers", () => {
   });
 
   it("resolves global destination paths under the real home directory", () => {
-    expect(resolveSkillTargetPath("claude", "global")).toBe(
+    expect(resolveSkillTargetPath("agvsr", "claude", "global")).toBe(
       join(homedir(), ".claude", "skills", "agvsr", "SKILL.md"),
     );
-    expect(resolveSkillTargetPath("gemini", "global")).toBe(
+    expect(resolveSkillTargetPath("agvsr", "gemini", "global")).toBe(
       join(homedir(), ".gemini", "skills", "agvsr", "SKILL.md"),
     );
   });
 
   it("resolves project-scoped destination paths under the given projectDir", () => {
     const projectDir = join("/tmp", "agvsr-skill-install-target");
-    expect(resolveSkillTargetPath("claude", "project", projectDir)).toBe(
+    expect(resolveSkillTargetPath("agvsr", "claude", "project", projectDir)).toBe(
       join(projectDir, ".claude", "skills", "agvsr", "SKILL.md"),
     );
-    expect(resolveSkillTargetPath("gemini", "project", projectDir)).toBe(
+    expect(resolveSkillTargetPath("agvsr", "gemini", "project", projectDir)).toBe(
       join(projectDir, ".gemini", "skills", "agvsr", "SKILL.md"),
     );
   });
 
   it("throws when project scope is requested without a projectDir", () => {
-    expect(() => resolveSkillTargetPath("claude", "project")).toThrow(SkillInstallError);
-    expect(() => resolveCommandTargetPath("claude", "project")).toThrow(SkillInstallError);
+    expect(() => resolveSkillTargetPath("agvsr", "claude", "project")).toThrow(SkillInstallError);
+    expect(() => resolveCommandTargetPath("agvsr", "claude", "project")).toThrow(SkillInstallError);
   });
 
   it("codex always resolves via CODEX_HOME regardless of scope", () => {
     process.env.CODEX_HOME = "/tmp/agvsr-codex-home";
     const projectDir = join("/tmp", "agvsr-skill-install-target");
-    expect(resolveSkillTargetPath("codex", "global")).toBe(
+    expect(resolveSkillTargetPath("agvsr", "codex", "global")).toBe(
       join("/tmp/agvsr-codex-home", "skills", "agvsr", "SKILL.md"),
     );
-    expect(resolveSkillTargetPath("codex", "project", projectDir)).toBe(
+    expect(resolveSkillTargetPath("agvsr", "codex", "project", projectDir)).toBe(
       join("/tmp/agvsr-codex-home", "skills", "agvsr", "SKILL.md"),
     );
   });
 
   it("codex falls back to the real home directory when CODEX_HOME is unset", () => {
     delete process.env.CODEX_HOME;
-    expect(resolveSkillTargetPath("codex", "global")).toBe(
+    expect(resolveSkillTargetPath("agvsr", "codex", "global")).toBe(
       join(homedir(), ".codex", "skills", "agvsr", "SKILL.md"),
     );
   });
@@ -86,30 +90,77 @@ describe("skill target helpers", () => {
 describe("command target helpers", () => {
   it("resolves claude and gemini command destinations for both scopes, and null for codex", () => {
     const projectDir = join("/tmp", "agvsr-skill-install-target");
-    expect(resolveCommandTargetPath("claude", "global")).toBe(
+    expect(resolveCommandTargetPath("agvsr", "claude", "global")).toBe(
       join(homedir(), ".claude", "commands", "agvsr.md"),
     );
-    expect(resolveCommandTargetPath("gemini", "global")).toBe(
+    expect(resolveCommandTargetPath("agvsr", "gemini", "global")).toBe(
       join(homedir(), ".gemini", "commands", "agvsr.toml"),
     );
-    expect(resolveCommandTargetPath("claude", "project", projectDir)).toBe(
+    expect(resolveCommandTargetPath("agvsr", "claude", "project", projectDir)).toBe(
       join(projectDir, ".claude", "commands", "agvsr.md"),
     );
-    expect(resolveCommandTargetPath("gemini", "project", projectDir)).toBe(
+    expect(resolveCommandTargetPath("agvsr", "gemini", "project", projectDir)).toBe(
       join(projectDir, ".gemini", "commands", "agvsr.toml"),
     );
     // Codex has no user-definable custom-command mechanism.
-    expect(resolveCommandTargetPath("codex", "global")).toBeNull();
+    expect(resolveCommandTargetPath("agvsr", "codex", "global")).toBeNull();
   });
 
   it("reads the bundled command source for claude and gemini, and null for codex", () => {
     const root = join(import.meta.dir, "..");
-    expect(readBundledCommandSource("claude")).toBe(
+    expect(readBundledCommandSource("agvsr", "claude")).toBe(
       readFileSync(join(root, "commands/agvsr.md"), "utf8"),
     );
-    expect(readBundledCommandSource("gemini")).toBe(
+    expect(readBundledCommandSource("agvsr", "gemini")).toBe(
       readFileSync(join(root, "commands/agvsr.toml"), "utf8"),
     );
-    expect(readBundledCommandSource("codex")).toBeNull();
+    expect(readBundledCommandSource("agvsr", "codex")).toBeNull();
+  });
+});
+
+describe("skill name helpers", () => {
+  it("defaults to agvsr only", () => {
+    expect(DEFAULT_SKILL_NAMES).toEqual(["agvsr"]);
+    expect(parseSkillNames(undefined)).toEqual(["agvsr"]);
+  });
+
+  it("parses comma-separated and repeated skill names with first-seen dedupe", () => {
+    expect(parseSkillNames(["agvsr,self-improve", "self-improve", "agvsr"])).toEqual([
+      "agvsr",
+      "self-improve",
+    ]);
+  });
+
+  it("rejects empty and unknown skill names", () => {
+    expect(() => parseSkillNames([""])).toThrow("empty --skill entry");
+    expect(() => parseSkillNames(["agvsr,,self-improve"])).toThrow("empty --skill entry");
+    expect(() => parseSkillNames(["banana"])).toThrow('unknown --skill "banana"');
+    expect(VALID_SKILL_NAMES).toEqual(["agvsr", "self-improve"]);
+  });
+});
+
+describe("self-improve skill", () => {
+  it("resolves global and project-scoped destination paths", () => {
+    const projectDir = join("/tmp", "agvsr-skill-install-target");
+    expect(resolveSkillTargetPath("self-improve", "claude", "global")).toBe(
+      join(homedir(), ".claude", "skills", "self-improve", "SKILL.md"),
+    );
+    expect(resolveSkillTargetPath("self-improve", "claude", "project", projectDir)).toBe(
+      join(projectDir, ".claude", "skills", "self-improve", "SKILL.md"),
+    );
+  });
+
+  it("has no bundled command for any target", () => {
+    expect(resolveCommandTargetPath("self-improve", "claude", "global")).toBeNull();
+    expect(resolveCommandTargetPath("self-improve", "gemini", "global")).toBeNull();
+    expect(resolveCommandTargetPath("self-improve", "codex", "global")).toBeNull();
+    expect(readBundledCommandSource("self-improve", "claude")).toBeNull();
+  });
+
+  it("reads the bundled skill source from skills/self-improve/SKILL.md", () => {
+    const root = join(import.meta.dir, "..");
+    expect(readBundledSkillSource("self-improve")).toBe(
+      readFileSync(join(root, "skills/self-improve/SKILL.md"), "utf8"),
+    );
   });
 });
