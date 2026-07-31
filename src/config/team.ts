@@ -21,7 +21,13 @@ const RoleSchema = z.object({
   charter: z.string().optional(),
   /** Append to the bundled default charter (D25, most common). */
   charter_append: z.string().optional(),
-  instances: z.number().int().positive().default(1),
+  /**
+   * Which bundled `charters/defaults/<name>.md` to use, independent of this
+   * role's own key in `roles:`. Auto-set to "implementation" for entries
+   * expanded from an `implementation:` array (D27); settable explicitly for
+   * a custom-named role that wants to borrow a bundled charter.
+   */
+  charter_role: z.string().optional(),
   /** Absolute turn time limit in ms (overrides env/default). */
   hard_timeout_ms: z.number().int().positive().optional(),
   /** No-progress turn time limit in ms (overrides env/default). */
@@ -49,21 +55,60 @@ const HooksSchema = z
   })
   .optional();
 
-const TeamSchema = z.object({
-  roles: z.record(z.string(), RoleSchema),
+export type RoleConfig = z.infer<typeof RoleSchema>;
+
+/** Public shape: always a flat map, even though `implementation:` may be
+ * authored as an array in team.yaml (expanded by `parseTeam` before this
+ * type is ever handed to a caller). */
+export interface TeamConfig {
+  roles: Record<string, RoleConfig>;
+  hooks?: z.infer<typeof HooksSchema>;
+}
+
+/** Raw shape as authored: `implementation:` may be a single role or an
+ * array of roles (D27 — multiple concurrent, worktree-isolated instances). */
+const RawTeamSchema = z.object({
+  roles: z.record(z.string(), z.union([RoleSchema, z.array(RoleSchema).min(1)])),
   hooks: HooksSchema,
 });
 
-export type RoleConfig = z.infer<typeof RoleSchema>;
-export type TeamConfig = z.infer<typeof TeamSchema>;
-
 export const SUPERVISOR = "supervisor";
+
+/** The only role key allowed to be array-valued in team.yaml (D27, v1). */
+const ARRAYABLE_ROLE = "implementation";
 
 export class TeamConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TeamConfigError";
   }
+}
+
+/**
+ * Expand any array-valued role entries into flat, individually-addressable
+ * keys (`implementation-1`, `implementation-2`, ...). Only `implementation`
+ * may be array-valued (v1 restriction — other roles have no worktree
+ * isolation or singular-role assumptions elsewhere that make concurrent
+ * instances safe yet).
+ */
+function expandRoles(raw: Record<string, RoleConfig | RoleConfig[]>): Record<string, RoleConfig> {
+  const expanded: Record<string, RoleConfig> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!Array.isArray(value)) {
+      expanded[key] = value;
+      continue;
+    }
+    if (key !== ARRAYABLE_ROLE) {
+      throw new TeamConfigError(
+        `team.yaml: "${key}" may not be array-valued (only "${ARRAYABLE_ROLE}" supports multiple, worktree-isolated instances).`,
+      );
+    }
+    value.forEach((cfg, i) => {
+      const name = `${key}-${i + 1}`;
+      expanded[name] = { charter_role: key, ...cfg };
+    });
+  }
+  return expanded;
 }
 
 export function parseTeam(text: string): TeamConfig {
@@ -74,7 +119,7 @@ export function parseTeam(text: string): TeamConfig {
     throw new TeamConfigError(`team.yaml is not valid YAML: ${(err as Error).message}`);
   }
 
-  const parsed = TeamSchema.safeParse(raw);
+  const parsed = RawTeamSchema.safeParse(raw);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
@@ -82,7 +127,10 @@ export function parseTeam(text: string): TeamConfig {
     throw new TeamConfigError(`team.yaml is invalid:\n${issues}`);
   }
 
-  const team = parsed.data;
+  const team: TeamConfig = {
+    roles: expandRoles(parsed.data.roles),
+    hooks: parsed.data.hooks,
+  };
   if (Object.keys(team.roles).length === 0) {
     throw new TeamConfigError("team.yaml defines no roles.");
   }

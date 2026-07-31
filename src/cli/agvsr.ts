@@ -21,6 +21,7 @@ import type {
   PushFrame,
   Response,
   RoleSummary,
+  RoleWorktree,
 } from "../protocol.ts";
 
 const USAGE = `agvsr ${VERSION}
@@ -212,6 +213,11 @@ function assessWorktree(
   entry: WorktreeEntry,
   job: Job | null,
   mainWorktreePath: string,
+  // "main" for a job's own worktree (unchanged default); an instance
+  // worktree's correct merge target is its owning job's own branch, not
+  // main — an instance can be fully reconciled into the job branch long
+  // before the job itself is merged to main by the human (D27).
+  baseRef: string = "main",
 ): WorktreeAssessment {
   if (job?.status === "running") {
     return {
@@ -239,7 +245,7 @@ function assessWorktree(
 
   let aheadOfMain: number | null = null;
   if (entry.branch) {
-    const count = git(mainWorktreePath, ["rev-list", "--count", `main..${entry.branch}`]);
+    const count = git(mainWorktreePath, ["rev-list", "--count", `${baseRef}..${entry.branch}`]);
     aheadOfMain = count.ok ? Number(count.stdout) : null;
   }
 
@@ -270,7 +276,7 @@ function assessWorktree(
       dirty,
       aheadOfMain,
       classification: "NEEDS_REVIEW",
-      reason: `${aheadOfMain} commit(s) not yet merged into main`,
+      reason: `${aheadOfMain} commit(s) not yet merged into ${baseRef}`,
     };
   }
   return {
@@ -280,7 +286,7 @@ function assessWorktree(
     aheadOfMain,
     classification: "SAFE_TO_REMOVE",
     reason: job
-      ? `job ${job.status}, clean, fully merged`
+      ? `job ${job.status}, clean, fully merged into ${baseRef}`
       : "orphaned (no job record), clean, fully merged",
   };
 }
@@ -890,18 +896,38 @@ async function main(argv: string[]): Promise<void> {
 
       await withClient(async (c) => {
         const { jobs } = unwrap(await c.request<{ jobs: Job[] }>("job.list"));
-        const jobByWorktree = new Map(
-          jobs.filter((j) => j.worktree).map((j) => [j.worktree as string, j]),
+        const { roleWorktrees } = unwrap(
+          await c.request<{ roleWorktrees: RoleWorktree[] }>("job.roleWorktrees"),
         );
-        const jobByBranch = new Map(
-          jobs.filter((j) => j.branch).map((j) => [j.branch as string, j]),
-        );
+        const jobsById = new Map(jobs.map((j) => [j.id, j]));
+
+        // A job's own worktree merges toward main (unchanged); an instance
+        // worktree (D27) merges toward its owning job's own branch instead —
+        // it can be fully reconciled into the job branch long before the job
+        // itself is merged to main by a human.
+        interface Match {
+          job: Job;
+          baseRef: string;
+        }
+        const matchByWorktree = new Map<string, Match>();
+        const matchByBranch = new Map<string, Match>();
+        for (const j of jobs) {
+          if (j.worktree) matchByWorktree.set(j.worktree, { job: j, baseRef: "main" });
+          if (j.branch) matchByBranch.set(j.branch, { job: j, baseRef: "main" });
+        }
+        for (const rw of roleWorktrees) {
+          const job = jobsById.get(rw.job_id);
+          if (!job) continue; // orphaned instance record; entry falls through as ORPHAN below
+          const baseRef = job.branch ?? "main";
+          matchByWorktree.set(rw.worktree, { job, baseRef });
+          matchByBranch.set(rw.branch, { job, baseRef });
+        }
 
         const assessments = entries.map((entry) => {
-          const job =
-            jobByWorktree.get(entry.path) ??
-            (entry.branch ? (jobByBranch.get(entry.branch) ?? null) : null);
-          return assessWorktree(entry, job, mainWorktreePath);
+          const match =
+            matchByWorktree.get(entry.path) ??
+            (entry.branch ? matchByBranch.get(entry.branch) : undefined);
+          return assessWorktree(entry, match?.job ?? null, mainWorktreePath, match?.baseRef);
         });
 
         for (const a of assessments) console.log(formatWorktreeLine(a));

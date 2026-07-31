@@ -18,6 +18,15 @@ export interface Job {
   updated_at: string;
 }
 
+/** A role instance's dedicated worktree/branch (D27 — array-expanded
+ * `implementation-N` instances, each isolated from the job's shared one). */
+export interface RoleWorktree {
+  job_id: string;
+  role: string;
+  worktree: string;
+  branch: string;
+}
+
 /**
  * Live execution state of a job, computed at request time (not persisted).
  * Lets a client distinguish "running and actively working" from "running but
@@ -66,6 +75,7 @@ export type Request =
       params: { goal: string; cwd: string; id?: string };
     }
   | { id: string; type: "request"; method: "job.list"; params?: Record<string, never> }
+  | { id: string; type: "request"; method: "job.roleWorktrees"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "job.get"; params: { id: string } }
   | { id: string; type: "request"; method: "team.get"; params?: Record<string, never> }
   | {
@@ -103,6 +113,12 @@ export type Request =
   | { id: string; type: "request"; method: "job.tell"; params: { job_id: string; body: string } }
   | { id: string; type: "request"; method: "job.stop"; params: { job_id: string } }
   | { id: string; type: "request"; method: "job.kill"; params: { job_id: string } }
+  | {
+      id: string;
+      type: "request";
+      method: "job.mergeInstance";
+      params: { job_id: string; role: string };
+    }
   | { id: string; type: "request"; method: "daemon.stop"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 

@@ -8,6 +8,7 @@ import { dirname, resolve, join } from "node:path";
 import { serve, type PushFn } from "../ipc/transport.ts";
 import { provisionWorktree } from "../git/worktree.ts";
 import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../git/commit-gate.ts";
+import { mergeInstanceBranch } from "../git/merge.ts";
 import { Store } from "./store.ts";
 import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, resolveUserPath, storePath } from "../paths.ts";
@@ -229,8 +230,12 @@ function turnFailureDiagnostics(
   ].join("\n\n");
 }
 
-function appendRecoverableDirtyWorktreeNote(job: Job, reason: string): string {
-  const note = recoverableDirtyWorktreeNote(job);
+function appendRecoverableDirtyWorktreeNote(
+  job: Job,
+  reason: string,
+  extraWorktrees: Array<{ worktree: string; branch: string }> = [],
+): string {
+  const note = recoverableDirtyWorktreeNote(job, extraWorktrees);
   return note ? `${reason}\n${note}` : reason;
 }
 
@@ -592,13 +597,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
     const messageCountBeforeTurn = store.listMessages(job.id).length;
     const sessionId = sessionFor(job.id, role);
-    const effectiveCwd = job.worktree ?? job.cwd;
+    // A role with its own isolated worktree (D27 — an array-expanded
+    // implementation instance) dispatches there instead of the job's shared
+    // worktree; every other role is unaffected (roleWt is null for them).
+    const roleWt = store.getRoleWorktree(job.id, role);
+    const effectiveCwd = roleWt?.worktree ?? job.worktree ?? job.cwd;
+    const effectiveBranch = roleWt?.branch ?? job.branch;
     const systemPrompt = sessionId
       ? ""
       : composeCharter(
           jobTeam,
           role,
-          { jobId: job.id, cwd: effectiveCwd, branch: job.branch },
+          {
+            jobId: job.id,
+            cwd: effectiveCwd,
+            branch: effectiveBranch,
+            isolatedWorktree: !!roleWt,
+          },
           { baseDir: dirname(process.env.AGVSR_TEAM ?? process.cwd()) },
         );
 
@@ -640,7 +655,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           AGVSR_ROLE: role,
           AGVSR_JOB_ID: job.id,
           AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
-          AGVSR_JOB_BRANCH: job.branch ?? "",
+          AGVSR_JOB_BRANCH: effectiveBranch ?? "",
         },
       });
     } finally {
@@ -732,7 +747,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         } else {
           reason = `${role} turn failed.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`;
         }
-        reason = appendRecoverableDirtyWorktreeNote(job, reason);
+        reason = appendRecoverableDirtyWorktreeNote(job, reason, store.listRoleWorktrees(job.id));
         setStatus(job.id, "failed");
         createMsg({
           job_id: job.id,
@@ -767,6 +782,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           const reason = appendRecoverableDirtyWorktreeNote(
             job,
             `${role} failed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`,
+            store.listRoleWorktrees(job.id),
           );
           setStatus(job.id, "failed");
           createMsg({
@@ -800,6 +816,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           const reason = appendRecoverableDirtyWorktreeNote(
             job,
             `${loopMsg} (${escalations} loop escalations reached threshold ${maxLoop}; Tier2 watchdog hard-fail).`,
+            store.listRoleWorktrees(job.id),
           );
           setStatus(job.id, "failed");
           createMsg({
@@ -836,7 +853,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       .catch((e) => {
         const message = (e as Error).message;
         if (role === SUPERVISOR) {
-          const reason = appendRecoverableDirtyWorktreeNote(job, message);
+          const reason = appendRecoverableDirtyWorktreeNote(
+            job,
+            message,
+            store.listRoleWorktrees(job.id),
+          );
           setStatus(job.id, "failed");
           createMsg({
             job_id: job.id,
@@ -858,6 +879,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             const reason = appendRecoverableDirtyWorktreeNote(
               job,
               `${role} crashed ${failures} consecutive times (threshold ${threshold}); job hard-failed (Tier2 watchdog).`,
+              store.listRoleWorktrees(job.id),
             );
             setStatus(job.id, "failed");
             createMsg({
@@ -1058,6 +1080,41 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           return err(req.id, "provisioning_failed", (e as Error).message);
         }
 
+        // Provision one isolated worktree per array-expanded implementation
+        // instance (D27) — identified by charter_role, not by re-deriving the
+        // naming convention. Same fail-the-whole-job.create pattern as above.
+        // Skipped when the job itself has no worktree (non-git/unborn cwd).
+        if (job.worktree) {
+          for (const [instanceRole, cfg] of Object.entries(jobTeam.roles)) {
+            if (cfg.charter_role !== "implementation" || instanceRole === "implementation") {
+              continue;
+            }
+            const instanceBranch = `${job.branch}--${instanceRole}`;
+            try {
+              const instanceWorktree = await provisionWorktree(
+                normalizedCwd,
+                `${job.id}--${instanceRole}`,
+                instanceBranch,
+              );
+              if (instanceWorktree) {
+                store.setRoleWorktree(job.id, instanceRole, instanceWorktree, instanceBranch);
+              }
+            } catch (e) {
+              setStatus(job.id, "failed");
+              store.createMessage({
+                job_id: job.id,
+                from_role: "daemon",
+                to_role: "user",
+                kind: "failure",
+                body:
+                  `Worktree provisioning failed for instance "${instanceRole}": ${(e as Error).message}. ` +
+                  `Run \`agvsr cleanup\` to check for worktrees left behind by this job.`,
+              });
+              return err(req.id, "provisioning_failed", (e as Error).message);
+            }
+          }
+        }
+
         debug("job created", { job: job.id, goal: job.goal, worktree: job.worktree });
         jobTeamSnapshots.set(job.id, jobTeam);
         createMsg({
@@ -1074,6 +1131,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
       case "job.list":
         return ok(req.id, { jobs: store.listJobs() });
+
+      case "job.roleWorktrees":
+        return ok(req.id, { roleWorktrees: store.listAllRoleWorktrees() });
 
       case "job.get": {
         const job = store.getJob(req.params.id);
@@ -1206,7 +1266,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "job.complete": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
-        const gate = checkJobCommitGate(job);
+        const gate = checkJobCommitGate(
+          job,
+          store.listRoleWorktrees(job.id).map((r) => r.worktree),
+        );
         if (!gate.ok) {
           createMsg({
             job_id: job.id,
@@ -1234,10 +1297,42 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         return ok(req.id, { done: true });
       }
 
+      case "job.mergeInstance": {
+        const job = store.getJob(req.params.job_id);
+        if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
+        if (!job.worktree) return err(req.id, "bad_request", "job has no worktree to merge into");
+
+        const roleWt = store.getRoleWorktree(job.id, req.params.role);
+        if (!roleWt) {
+          return err(
+            req.id,
+            "not_found",
+            `no instance worktree for role "${req.params.role}" on job ${job.id}`,
+          );
+        }
+
+        const instanceGate = checkJobCommitGate({ id: job.id, worktree: roleWt.worktree });
+        if (!instanceGate.ok) {
+          return err(
+            req.id,
+            instanceGate.code,
+            `Instance "${req.params.role}" has uncommitted work — commit it before merging.\n${instanceGate.message}`,
+          );
+        }
+
+        const result = mergeInstanceBranch(job.worktree, roleWt.branch);
+        if (!result.ok) return err(req.id, result.code, result.message);
+        return ok(req.id, { summary: result.summary });
+      }
+
       case "job.fail": {
         const job = store.getJob(req.params.job_id);
         if (!job) return err(req.id, "not_found", `no job ${req.params.job_id}`);
-        const reason = appendRecoverableDirtyWorktreeNote(job, req.params.reason);
+        const reason = appendRecoverableDirtyWorktreeNote(
+          job,
+          req.params.reason,
+          store.listRoleWorktrees(job.id),
+        );
         setStatus(req.params.job_id, "failed");
         createMsg({
           job_id: req.params.job_id,

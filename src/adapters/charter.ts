@@ -16,6 +16,25 @@ export interface CharterContext {
   cwd: string;
   branch?: string | null;
   allowedTargets: string[];
+  /** True when this role has its own dedicated worktree/branch (D27 —
+   * array-expanded `implementation-N` instances), false for roles sharing
+   * the job's own worktree. */
+  isolatedWorktree?: boolean;
+}
+
+function workspaceNote(ctx: Pick<CharterContext, "cwd" | "branch" | "isolatedWorktree">): string {
+  if (ctx.isolatedWorktree) {
+    return (
+      `You have your own dedicated working tree at \`${ctx.cwd}\`, isolated from the job's ` +
+      `shared workspace and any sibling instances. Commit your work on your own branch ` +
+      `(\`${ctx.branch ?? "(not set)"}\`) — the supervisor merges it into the job branch once ` +
+      `you report completion.`
+    );
+  }
+  return (
+    `All roles operate on the same working tree at \`${ctx.cwd}\`. You do not have exclusive ` +
+    `ownership of it.`
+  );
 }
 
 export interface CharterDirs {
@@ -47,6 +66,7 @@ export function fillScaffold(scaffold: string, ctx: CharterContext): string {
     branch: ctx.branch ?? "(not set)",
     allowed_targets: ctx.allowedTargets.join(", "),
     completion_tools: isSupervisor ? COMPLETION_TOOLS : "",
+    workspace_note: workspaceNote(ctx),
   };
   return scaffold.replace(/\{\{(\w+)\}\}/g, (whole, key: string) =>
     key in subs ? subs[key]! : whole,
@@ -61,7 +81,7 @@ function readRoleCharter(role: string, cfg: RoleConfig, dirs: CharterDirs): stri
   if (cfg.charter) {
     return readFileSync(resolvePath(cfg.charter), "utf8"); // wholesale replace
   }
-  const def = readFileSync(join(chartersDir, "defaults", `${role}.md`), "utf8");
+  const def = readFileSync(join(chartersDir, "defaults", `${cfg.charter_role ?? role}.md`), "utf8");
   if (cfg.charter_append) {
     return `${def}\n\n${readFileSync(resolvePath(cfg.charter_append), "utf8")}`;
   }
@@ -82,13 +102,17 @@ export function composeCharter(
 
   const chartersDir = dirs.chartersDir ?? BUNDLED;
   const scaffold = stripHtmlComments(readFileSync(join(chartersDir, "scaffold.md"), "utf8"));
-  const filled = fillScaffold(scaffold, {
+  const roleCharter = readRoleCharter(role, cfg, dirs);
+  // Fill placeholders across the combined text in one pass, not just the
+  // scaffold — the bundled implementation.md itself contains `{{cwd}}`,
+  // which must resolve too, not leak into the agent's prompt verbatim.
+  const combined = `${scaffold.trimEnd()}\n\n${roleCharter.trimEnd()}\n`;
+  return fillScaffold(combined, {
     role,
     jobId: ctx.jobId,
     cwd: ctx.cwd,
     branch: ctx.branch,
     allowedTargets: allowedTargets(team, role),
+    isolatedWorktree: ctx.isolatedWorktree,
   });
-  const roleCharter = readRoleCharter(role, cfg, dirs);
-  return `${filled.trimEnd()}\n\n${roleCharter.trimEnd()}\n`;
 }

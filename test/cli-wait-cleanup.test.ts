@@ -54,7 +54,7 @@ interface Harness {
   oldWorktreesEnv: string | undefined;
 }
 
-async function setupHarness(): Promise<Harness> {
+async function setupHarness(team = TEAM): Promise<Harness> {
   const base = mkdtempSync(join(tmpdir(), "agvsr-cli-wait-cleanup-"));
   const repo = makeRepo(base);
   const worktrees = join(base, "worktrees");
@@ -79,7 +79,7 @@ async function setupHarness(): Promise<Harness> {
   const daemon = await startDaemon({
     endpoint: sock,
     storeFile: db,
-    team: TEAM,
+    team,
     interruptRunningJobsOnStart: false,
     turnRunner: async (dispatch) => {
       dispatches.push(dispatch);
@@ -295,5 +295,48 @@ describe("agvsr cleanup", () => {
     await runCli(["cleanup", "--apply"], harness, harness.repo);
     const list = git(harness.repo, ["worktree", "list"]);
     expect(list.stdout).not.toContain(orphanPath);
+  });
+
+  it("classifies an instance worktree against its owning job's branch, not main (D27)", async () => {
+    const MULTI_TEAM = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: fake-model }
+  implementation:
+    - { adapter: codex, model: fake-model }
+`);
+    harness = await setupHarness(MULTI_TEAM);
+    const job = await createJob(harness);
+    const instanceWorktree = join(harness.worktrees, `${job.id}--implementation-1`);
+    const instanceBranch = `${job.branch}--implementation-1`;
+
+    // Advance the job's own branch beyond main (simulating earlier progress on
+    // the job worktree itself) — the job worktree is now NEEDS_REVIEW relative
+    // to main, which is expected and irrelevant to the instance's own status.
+    writeFileSync(join(job.worktree!, "job-progress.txt"), "job branch work");
+    git(job.worktree!, ["add", "job-progress.txt"]);
+    git(job.worktree!, ["commit", "-m", "job branch progress"]);
+
+    // Fast-forward the instance branch to match the job branch exactly — the
+    // instance is fully reconciled into the job branch, even though the job
+    // branch itself is not yet merged into main.
+    git(instanceWorktree, ["merge", "--ff-only", job.branch!]);
+
+    await completeJob(harness, job.id);
+
+    const report = await runCli(["cleanup"], harness, harness.repo);
+    expect(report.err).toBe("");
+    expect(report.out).toContain(`${job.worktree}\tNEEDS_REVIEW`);
+    expect(report.out).toContain("commit(s) not yet merged into main");
+    expect(report.out).toContain(`${instanceWorktree}\tSAFE_TO_REMOVE\t${job.id}\tdone`);
+    expect(report.out).toContain(`fully merged into ${job.branch}`);
+    expect(report.out).not.toContain(`${instanceWorktree}\tNEEDS_REVIEW`);
+
+    expect(report.out).toContain(instanceBranch);
+
+    const applied = await runCli(["cleanup", "--apply"], harness, harness.repo);
+    expect(applied.out).toContain(`removed ${instanceWorktree} (branch ${instanceBranch})`);
+    const list = git(harness.repo, ["worktree", "list"]);
+    expect(list.stdout).not.toContain(instanceWorktree);
+    expect(list.stdout).toContain(job.worktree!); // job worktree stays: NEEDS_REVIEW is never auto-removed
   });
 });

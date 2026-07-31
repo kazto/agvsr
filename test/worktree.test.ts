@@ -144,6 +144,61 @@ describe("Store — worktree migration", () => {
       } catch {}
     }
   });
+
+  it("job_role_worktrees: setRoleWorktree/getRoleWorktree/listRoleWorktrees/listAllRoleWorktrees round-trip (D27)", () => {
+    const dbPath = join(tmpdir(), `agvsr-role-worktree-${randomUUID()}.sqlite`);
+    const store = new Store(dbPath);
+    const job = store.createJob("multi-instance test", "/repo", "job-1");
+
+    expect(store.getRoleWorktree(job.id, "implementation-1")).toBeNull();
+
+    store.setRoleWorktree(
+      job.id,
+      "implementation-1",
+      "/wt/job-1--implementation-1",
+      "agvsr/job-1--implementation-1",
+    );
+    store.setRoleWorktree(
+      job.id,
+      "implementation-2",
+      "/wt/job-1--implementation-2",
+      "agvsr/job-1--implementation-2",
+    );
+
+    expect(store.getRoleWorktree(job.id, "implementation-1")).toEqual({
+      worktree: "/wt/job-1--implementation-1",
+      branch: "agvsr/job-1--implementation-1",
+    });
+
+    const listed = store.listRoleWorktrees(job.id);
+    expect(listed).toHaveLength(2);
+    expect(listed.map((r) => r.role).sort()).toEqual(["implementation-1", "implementation-2"]);
+
+    // Upsert: re-setting the same (job_id, role) overwrites, not duplicates.
+    store.setRoleWorktree(job.id, "implementation-1", "/wt/moved", "agvsr/job-1--implementation-1");
+    expect(store.getRoleWorktree(job.id, "implementation-1")?.worktree).toBe("/wt/moved");
+    expect(store.listRoleWorktrees(job.id)).toHaveLength(2);
+
+    const other = store.createJob("other job", "/repo2", "job-2");
+    store.setRoleWorktree(
+      other.id,
+      "implementation-1",
+      "/wt/job-2--implementation-1",
+      "agvsr/job-2--implementation-1",
+    );
+
+    const all = store.listAllRoleWorktrees();
+    expect(all).toHaveLength(3);
+    expect(all.filter((r) => r.job_id === job.id)).toHaveLength(2);
+    expect(all.filter((r) => r.job_id === other.id)).toHaveLength(1);
+
+    store.close();
+    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

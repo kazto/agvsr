@@ -34,6 +34,30 @@ describe("fillScaffold", () => {
     expect(out).toContain("branch=(not set)");
   });
 
+  it("renders the shared-workspace note by default", () => {
+    const out = fillScaffold("note: {{workspace_note}}", {
+      role: "implementation",
+      jobId: "J1",
+      cwd: "/w",
+      allowedTargets: ["supervisor"],
+    });
+    expect(out).toContain("All roles operate on the same working tree at `/w`");
+  });
+
+  it("renders the isolated-workspace note when isolatedWorktree is true", () => {
+    const out = fillScaffold("note: {{workspace_note}}", {
+      role: "implementation-1",
+      jobId: "J1",
+      cwd: "/w-instance-1",
+      branch: "agvsr/J1--implementation-1",
+      allowedTargets: ["supervisor"],
+      isolatedWorktree: true,
+    });
+    expect(out).toContain("your own dedicated working tree at `/w-instance-1`");
+    expect(out).toContain("agvsr/J1--implementation-1");
+    expect(out).not.toContain("{{");
+  });
+
   it("injects completion tools only for the supervisor", () => {
     const worker = fillScaffold(scaffold, {
       role: "qa",
@@ -131,6 +155,25 @@ describe("composeCharter (bundled charters)", () => {
     }).replace(/\s+/g, " ");
     expect(implementation).toContain("Complete only after committing the work");
     expect(implementation).toContain("Uncommitted work can be lost");
+  });
+
+  it("resolves an array-expanded implementation instance's bundled charter via charter_role", () => {
+    const multiTeam = parseTeam(`
+roles:
+  supervisor: { adapter: claude-code, model: m }
+  implementation:
+    - { adapter: codex, model: m }
+    - { adapter: claude-code, model: m }
+`);
+    const prompt = composeCharter(multiTeam, "implementation-1", {
+      jobId: "JOB-7",
+      cwd: "/work/instance-1",
+      branch: "agvsr/deadbeef--implementation-1",
+      isolatedWorktree: true,
+    });
+    expect(prompt).toContain("Role: implementation"); // bundled implementation.md, not implementation-1.md
+    expect(prompt).toContain("your own dedicated working tree");
+    expect(prompt).not.toContain("{{");
   });
 
   it("tells qa that mocking the core is not validation", () => {

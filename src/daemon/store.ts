@@ -6,7 +6,7 @@
  */
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { Job, JobStatus, Message, MessageKind } from "../protocol.ts";
+import type { Job, JobStatus, Message, MessageKind, RoleWorktree } from "../protocol.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   role       TEXT NOT NULL,
   session_id TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, role),
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE TABLE IF NOT EXISTS job_role_worktrees (
+  job_id     TEXT NOT NULL,
+  role       TEXT NOT NULL,
+  worktree   TEXT NOT NULL,
+  branch     TEXT NOT NULL,
+  created_at TEXT NOT NULL,
   PRIMARY KEY (job_id, role),
   FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
@@ -187,6 +196,45 @@ export class Store {
            updated_at = excluded.updated_at`,
       )
       .run({ $job_id: jobId, $role: role, $session_id: sessionId, $updated_at: now() });
+  }
+
+  setRoleWorktree(jobId: string, role: string, worktree: string, branch: string): void {
+    this.db
+      .query(
+        `INSERT INTO job_role_worktrees (job_id, role, worktree, branch, created_at)
+         VALUES ($job_id, $role, $worktree, $branch, $created_at)
+         ON CONFLICT(job_id, role) DO UPDATE SET
+           worktree = excluded.worktree,
+           branch = excluded.branch`,
+      )
+      .run({
+        $job_id: jobId,
+        $role: role,
+        $worktree: worktree,
+        $branch: branch,
+        $created_at: now(),
+      });
+  }
+
+  getRoleWorktree(jobId: string, role: string): { worktree: string; branch: string } | null {
+    const row = this.db
+      .query(
+        `SELECT worktree, branch FROM job_role_worktrees WHERE job_id = $job_id AND role = $role`,
+      )
+      .get({ $job_id: jobId, $role: role }) as { worktree: string; branch: string } | null;
+    return row ?? null;
+  }
+
+  listRoleWorktrees(jobId: string): Array<{ role: string; worktree: string; branch: string }> {
+    return this.db
+      .query(`SELECT role, worktree, branch FROM job_role_worktrees WHERE job_id = $job_id`)
+      .all({ $job_id: jobId }) as Array<{ role: string; worktree: string; branch: string }>;
+  }
+
+  listAllRoleWorktrees(): RoleWorktree[] {
+    return this.db
+      .query(`SELECT job_id, role, worktree, branch FROM job_role_worktrees`)
+      .all() as RoleWorktree[];
   }
 
   close(): void {

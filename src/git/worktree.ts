@@ -35,20 +35,23 @@ function hasCommits(root: string): boolean {
 }
 
 /**
- * Provision a git worktree for a job.
+ * Provision a git worktree at `worktreesDir()/<worktreeKey>`.
  * Returns the worktree path on success, null for non-git / unborn repos.
  * Throws for real git repos where worktree creation fails.
+ *
+ * `worktreeKey` is the job id for a job's own worktree, or `<jobId>--<role>`
+ * for a role instance's dedicated worktree (D27).
  */
 export async function provisionWorktree(
   cwd: string,
-  jobId: string,
+  worktreeKey: string,
   branch: string,
 ): Promise<string | null> {
   const root = repoRoot(cwd);
   if (!root) return null;
   if (!hasCommits(root)) return null;
 
-  const dest = join(worktreesDir(), jobId);
+  const dest = join(worktreesDir(), worktreeKey);
   mkdirSync(dirname(dest), { recursive: true });
 
   const add = git(root, ["worktree", "add", "-b", branch, dest, "HEAD"]);

@@ -46,45 +46,69 @@ export interface CommitGateBlocked {
 
 export type CommitGateOutcome = CommitGateResult | CommitGateBlocked;
 
-export function checkJobCommitGate(job: Pick<Job, "id" | "worktree">): CommitGateOutcome {
+/**
+ * Checks the job's own worktree plus any extra worktrees (e.g. array-expanded
+ * implementation instances' isolated worktrees, D27) — an instance's
+ * uncommitted work must block completion exactly like the job worktree's
+ * own dirty state does, not go unnoticed.
+ */
+export function checkJobCommitGate(
+  job: Pick<Job, "id" | "worktree">,
+  extraWorktrees: string[] = [],
+): CommitGateOutcome {
   if (!commitGateEnabled()) return { ok: true };
-  if (!job.worktree) return { ok: true };
 
-  const status = gitStatus(job.worktree);
-  if (!status.ok) {
-    return {
-      ok: false,
-      code: "commit_check_failed",
-      message:
-        `Unable to verify the job worktree for completion. Commit the work on the job branch first.\n` +
-        `worktree: ${job.worktree}\n` +
-        (status.stderr ? `git status error: ${status.stderr}` : "git status failed"),
-    };
+  const worktrees = [job.worktree, ...extraWorktrees].filter((w): w is string => !!w);
+  if (worktrees.length === 0) return { ok: true };
+
+  const dirtySections: string[] = [];
+  for (const worktree of worktrees) {
+    const status = gitStatus(worktree);
+    if (!status.ok) {
+      return {
+        ok: false,
+        code: "commit_check_failed",
+        message:
+          `Unable to verify the job worktree for completion. Commit the work on the job branch first.\n` +
+          `worktree: ${worktree}\n` +
+          (status.stderr ? `git status error: ${status.stderr}` : "git status failed"),
+      };
+    }
+    if (status.stdout.length > 0) {
+      dirtySections.push(
+        `worktree: ${worktree}\ngit status --porcelain=v1 --untracked-files=normal:\n${status.stdout}`,
+      );
+    }
   }
 
-  if (status.stdout.length > 0) {
+  if (dirtySections.length > 0) {
     return {
       ok: false,
       code: "commit_required",
-      message:
-        `${COMMIT_GATE_BLOCK_MESSAGE}\n` +
-        `worktree: ${job.worktree}\n` +
-        `git status --porcelain=v1 --untracked-files=normal:\n${status.stdout}`,
+      message: `${COMMIT_GATE_BLOCK_MESSAGE}\n${dirtySections.join("\n\n")}`,
     };
   }
 
   return { ok: true };
 }
 
-export function recoverableDirtyWorktreeNote(job: Pick<Job, "branch" | "worktree">): string | null {
-  if (!job.worktree) return null;
+export function recoverableDirtyWorktreeNote(
+  job: Pick<Job, "branch" | "worktree">,
+  extraWorktrees: Array<{ worktree: string; branch: string }> = [],
+): string | null {
+  const entries = [{ worktree: job.worktree, branch: job.branch }, ...extraWorktrees];
 
-  const status = gitStatus(job.worktree);
-  if (!status.ok || !status.stdout) return null;
-
-  const changedFileCount = countPorcelainEntries(status.stdout);
-  if (changedFileCount <= 0) return null;
-
-  const branch = job.branch ?? "(unknown)";
-  return `未コミットの作業が worktree に残存: ${job.worktree}, 変更ファイル数 ${changedFileCount}, ブランチ ${branch}。git でコミットして回収可`;
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (!entry.worktree) continue;
+    const status = gitStatus(entry.worktree);
+    if (!status.ok || !status.stdout) continue;
+    const changedFileCount = countPorcelainEntries(status.stdout);
+    if (changedFileCount <= 0) continue;
+    const branch = entry.branch ?? "(unknown)";
+    lines.push(
+      `未コミットの作業が worktree に残存: ${entry.worktree}, 変更ファイル数 ${changedFileCount}, ブランチ ${branch}。git でコミットして回収可`,
+    );
+  }
+  return lines.length > 0 ? lines.join("\n") : null;
 }

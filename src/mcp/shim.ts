@@ -147,6 +147,28 @@ if (role === "supervisor") {
   );
 
   server.registerTool(
+    "agvsr_merge_instance",
+    {
+      title: "Merge an implementation instance's branch into the job branch",
+      description:
+        'For an array-expanded implementation instance (e.g. "implementation-1") running in ' +
+        "its own isolated worktree/branch: once it reports completion, call this to merge its " +
+        "branch into the job's own branch. The merge itself is performed by the daemon (not a " +
+        "shell command) for safety. On a conflict, this returns the conflicting files instead " +
+        "of leaving a half-merged state — escalate non-trivial conflicts to the human via " +
+        "agvsr_escalate rather than attempting to resolve them blind.",
+      inputSchema: {
+        job_id: z.string().describe(`The job id — must be exactly "${jobId}"`),
+        role: z.string().describe('The instance role to merge, e.g. "implementation-1"'),
+      },
+    },
+    async ({ job_id, role }) => {
+      const result = await relayGet<{ summary: string }>("job.mergeInstance", { job_id, role });
+      return { content: [{ type: "text" as const, text: `merged ${role}: ${result.summary}` }] };
+    },
+  );
+
+  server.registerTool(
     "agvsr_fail",
     {
       title: "Declare the job failed",

@@ -280,6 +280,70 @@ describe("agvsr-mcp shim", () => {
     }
   });
 
+  it("relays agvsr_merge_instance to daemon as job.mergeInstance", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
+    const sockPath = join(dir, "test.sock");
+    const stub = await startStub(sockPath, (req: any) => ({
+      id: req.id,
+      type: "response",
+      ok: true,
+      result: { summary: "1 file changed" },
+    }));
+
+    try {
+      const responses = await callShim(
+        sockPath,
+        { AGVSR_ROLE: "supervisor", AGVSR_JOB_ID: "job-5" },
+        "agvsr_merge_instance",
+        { job_id: "job-5", role: "implementation-1" },
+      );
+
+      const relay = stub.received.find((r: any) => r.method === "job.mergeInstance") as any;
+      expect(relay).toBeDefined();
+      expect(relay.params.job_id).toBe("job-5");
+      expect(relay.params.role).toBe("implementation-1");
+
+      const callResp = responses.find((r: any) => r.id === 2) as any;
+      const text = callResp?.result?.content?.[0]?.text ?? "";
+      expect(text).toContain("implementation-1");
+      expect(text).toContain("1 file changed");
+    } finally {
+      await stub.close();
+      try {
+        unlinkSync(sockPath);
+      } catch {}
+    }
+  });
+
+  it("does not register agvsr_merge_instance for non-supervisor roles", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
+    const sockPath = join(dir, "test.sock");
+    const stub = await startStub(sockPath, (req: any) => ({
+      id: req.id,
+      type: "response",
+      ok: true,
+      result: { summary: "should not be called" },
+    }));
+
+    try {
+      const responses = await callShim(
+        sockPath,
+        { AGVSR_ROLE: "implementation-1", AGVSR_JOB_ID: "job-6" },
+        "agvsr_merge_instance",
+        { job_id: "job-6", role: "implementation-1" },
+      );
+
+      expect(stub.received.some((r: any) => r.method === "job.mergeInstance")).toBe(false);
+      const callResp = responses.find((r: any) => r.id === 2) as any;
+      expect(callResp?.error ?? callResp?.result?.isError).toBeTruthy();
+    } finally {
+      await stub.close();
+      try {
+        unlinkSync(sockPath);
+      } catch {}
+    }
+  });
+
   it("registers agvsr_complete only for supervisor role", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
     const sockPath = join(dir, "test.sock");
