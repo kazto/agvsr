@@ -95,7 +95,8 @@ Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite
 ## Configuration: `team.yaml`
 
 `team.yaml` is the source of truth for a team. Generate one with `agvsr init` or
-write it by hand:
+write it by hand. `team.toml` is also supported (`agvsr init --format toml`) for
+the same content in TOML syntax — see [Configuration formats](#configuration-formats-yaml-vs-toml).
 
 ```yaml
 roles:
@@ -135,27 +136,46 @@ Per-role fields:
 | `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
 
 The team must define a `supervisor` role. The daemon's default team file is
-resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml` (relative
-to wherever the daemon was started). One daemon serves every project on the
-machine, but each job resolves its own team from `<job-target-repo>/team.yaml`
+resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml`, falling
+back to `./team.toml` if no `team.yaml` is present (relative to wherever the
+daemon was started). One daemon serves every project on the machine, but each
+job resolves its own team from `<job-target-repo>/team.yaml` (or `team.toml`)
 first if that repo has one, before falling back to the daemon's default — so
 a single always-running daemon correctly serves multiple projects with
 different roles/adapters/models, as long as each has run `agvsr init`.
+
+### Configuration formats: YAML vs TOML
+
+Both formats describe the exact same schema; pick whichever syntax you
+prefer. If a project has both `team.yaml` and `team.toml`, `team.yaml`
+always wins — the daemon never merges the two.
+
+```toml
+[roles.supervisor]
+adapter = "claude-code"
+model = "claude-opus-4-8"
+
+[roles.implementation]
+adapter = "codex"
+model = "gpt-5-codex"
+```
 
 ### `agvsr init` options
 
 ```
 agvsr init [options]
 
-  -o, --output <path>   Write to this file (default: ./team.yaml)
+  -o, --output <path>   Write to this file (default: ./team.yaml or ./team.toml,
+                        depending on --format)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
+      --format <f>      Output format: yaml, toml (default: yaml)
       --roles <list>    Comma-separated role names
                         (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
       --model <m>       Default model for every role
       --role <spec>     Per-role override, repeatable. Form: name:adapter:model
-      --no-comments     Emit bare YAML without header/hooks comments
+      --no-comments     Emit bare output without header/hooks comments
   -h, --help            Show this help
 ```
 
@@ -168,9 +188,10 @@ agvsr init \
   --role qa:agy:gemini-3-pro
 ```
 
-`agvsr init` only ever generates `team.yaml` — run it again for every new
-project. Skills and their commands are installed separately, once per
-machine, with `agvsr skill install` (below).
+`agvsr init` only ever generates a team config (`team.yaml` by default, or
+`team.toml` with `--format toml`) — run it again for every new project.
+Skills and their commands are installed separately, once per machine, with
+`agvsr skill install` (below).
 
 ### `agvsr skill install` options
 
@@ -262,7 +283,7 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 - `~/.config/agvsr/inbox.sqlite` — message + job store
 - `~/.config/agvsr/worktrees/<job-id>` — per-job git worktree
 - `~/.config/agvsr/agvsrd.sock` — daemon IPC socket (POSIX; named pipe on Windows)
-- `team.yaml` — team configuration (per project, or via `$AGVSR_TEAM`)
+- `team.yaml` / `team.toml` — team configuration (per project, or via `$AGVSR_TEAM`; `team.yaml` wins if both exist)
 
 Paths honor `XDG_CONFIG_HOME` / `XDG_RUNTIME_DIR` on POSIX and `%APPDATA%` on Windows.
 

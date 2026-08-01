@@ -7,25 +7,27 @@ once it reports ready, use the `agvsr` skill for submitting jobs, approvals,
 monitoring, and cleanup.
 
 Background: agvsr runs one daemon per machine, but `job.create` resolves each
-job's own `team.yaml` from its target repo first (if that repo has one)
-before falling back to whatever `team.yaml` the daemon was started with. So
-an already-running daemon almost always works correctly for a new project
-too, as long as that project has its own `team.yaml`. This skill and this
-`/agvsr` command are themselves installed once, globally, via
+job's own `team.yaml`/`team.toml` from its target repo first (if that repo
+has one) before falling back to whatever team config the daemon was started
+with. So an already-running daemon almost always works correctly for a new
+project too, as long as that project has its own team config. This skill and
+this `/agvsr` command are themselves installed once, globally, via
 `agvsr skill install` — separate from `agvsr init`, which only generates a
-project's `team.yaml` and is run again for every new project.
+project's team config and is run again for every new project.
 
-1. Confirm `./team.yaml` exists for this project. If it doesn't, tell the
-   user to run `agvsr init` first — do not generate it yourself — and stop
-   here. Without a project-local `team.yaml`, jobs submitted from this
-   directory would silently fall back to the daemon's global default config,
-   which may belong to a different project entirely.
+1. Confirm `./team.yaml` or `./team.toml` exists for this project (`team.yaml`
+   wins if both are present). If neither does, tell the user to run
+   `agvsr init` first — do not generate it yourself — and stop here. Without
+   a project-local team config, jobs submitted from this directory would
+   silently fall back to the daemon's global default config, which may
+   belong to a different project entirely.
 2. Run `agvsr ping`.
    - If it responds `pong`, the daemon is already running — skip to step 4.
    - Otherwise continue to step 3.
-3. Run `agvsr doctor --team ./team.yaml`. If it reports failures, show them
-   to the user and stop; do not start the daemon on top of a broken
-   adapter/auth setup. Otherwise run `agvsr daemon start --team ./team.yaml`
-   (this only needs to happen once per machine — later projects with their
-   own `team.yaml` don't need to restart the daemon).
+3. Run `agvsr doctor --team ./team.yaml` (or `./team.toml`, whichever exists).
+   If it reports failures, show them to the user and stop; do not start the
+   daemon on top of a broken adapter/auth setup. Otherwise run
+   `agvsr daemon start --team ./team.yaml` (or `./team.toml`) (this only
+   needs to happen once per machine — later projects with their own team
+   config don't need to restart the daemon).
 4. Tell the user it's ready.

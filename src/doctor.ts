@@ -7,7 +7,7 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { parseTeam, type Adapter, type TeamConfig } from "./config/team.ts";
+import { formatFromPath, parseTeam, type Adapter, type TeamConfig } from "./config/team.ts";
 import { ADAPTER_BIN } from "./adapters/index.ts";
 import { validateTeamModels } from "./adapters/validate.ts";
 import { resolveUserPath } from "./paths.ts";
@@ -251,7 +251,7 @@ export async function runDoctor(
   let team: TeamConfig;
   try {
     const text = deps.readFile(teamFile);
-    team = parseTeam(text);
+    team = parseTeam(text, formatFromPath(teamFile));
   } catch (err) {
     teamGroup.checks.push({ label: "team file", level: "fail", message: (err as Error).message });
     return { teamFile, groups };

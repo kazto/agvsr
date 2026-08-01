@@ -42,6 +42,12 @@ roles:
   supervisor: { adapter: codex, model: project-specific-model }
 `;
 
+const PROJECT_TEAM_TOML = `
+[roles.supervisor]
+adapter = "codex"
+model = "project-specific-model"
+`;
+
 interface Harness {
   base: string;
   daemon: Daemon;
@@ -115,6 +121,45 @@ describe("per-job team resolution across projects", () => {
     const before = harness.dispatches.length;
     const created = await harness.client.request<{ job: Job }>("job.create", {
       goal: "use my own team.yaml",
+      cwd: projectRepo,
+    });
+    expect(created.ok).toBe(true);
+
+    const dispatch = await waitForDispatch(harness.dispatches, before);
+    expect(dispatch.adapter).toBe("codex");
+    expect(dispatch.model).toBe("project-specific-model");
+  });
+
+  it("uses the job's own project team.toml when no team.yaml is present", async () => {
+    harness = await setupHarness();
+    const projectRepo = makeRepo(harness.base, "project-with-own-team-toml");
+    writeFileSync(join(projectRepo, "team.toml"), PROJECT_TEAM_TOML, "utf8");
+
+    const before = harness.dispatches.length;
+    const created = await harness.client.request<{ job: Job }>("job.create", {
+      goal: "use my own team.toml",
+      cwd: projectRepo,
+    });
+    expect(created.ok).toBe(true);
+
+    const dispatch = await waitForDispatch(harness.dispatches, before);
+    expect(dispatch.adapter).toBe("codex");
+    expect(dispatch.model).toBe("project-specific-model");
+  });
+
+  it("prefers team.yaml over team.toml when both exist in the job's cwd", async () => {
+    harness = await setupHarness();
+    const projectRepo = makeRepo(harness.base, "project-with-both-team-files");
+    writeFileSync(join(projectRepo, "team.yaml"), PROJECT_TEAM_YAML, "utf8");
+    writeFileSync(
+      join(projectRepo, "team.toml"),
+      `\n[roles.supervisor]\nadapter = "agy"\nmodel = "toml-should-be-ignored"\n`,
+      "utf8",
+    );
+
+    const before = harness.dispatches.length;
+    const created = await harness.client.request<{ job: Job }>("job.create", {
+      goal: "yaml wins",
       cwd: projectRepo,
     });
     expect(created.ok).toBe(true);

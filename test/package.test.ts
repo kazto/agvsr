@@ -59,6 +59,7 @@ describe("package surface", () => {
     expect(files.has("commands/agvsr.md")).toBe(true);
     expect(files.has("commands/agvsr.toml")).toBe(true);
     expect(files.has("examples/team.yaml")).toBe(true);
+    expect(files.has("examples/team.toml")).toBe(true);
     expect(files.has("skills/agvsr/SKILL.md")).toBe(true);
     expect(files.has("README.md")).toBe(true);
     expect([...files].some((path) => path.startsWith("test/"))).toBe(false);

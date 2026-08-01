@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, InitError } from "../src/config/init.ts";
+import {
+  buildTeamToml,
+  buildTeamYaml,
+  resolveRoleSpecs,
+  DEFAULT_ROLES,
+  InitError,
+} from "../src/config/init.ts";
 import { parseTeam } from "../src/config/team.ts";
 
 function defaults() {
@@ -134,6 +140,84 @@ describe("buildTeamYaml", () => {
         "  qa:\n" +
         "    adapter: claude-code\n" +
         "    model: claude-opus-4-8\n",
+    );
+  });
+});
+
+describe("buildTeamToml", () => {
+  it("defaults: valid team with 4 roles, supervisor first", () => {
+    const toml = buildTeamToml({ roles: defaults(), comments: true });
+    const team = parseTeam(toml, "toml");
+    const roleKeys = Object.keys(team.roles);
+    expect(roleKeys[0]).toBe("supervisor");
+    expect(roleKeys).toHaveLength(4);
+    expect(team.roles.supervisor).toBeDefined();
+  });
+
+  it("--no-comments: header-free doc still parses", () => {
+    const toml = buildTeamToml({ roles: defaults(), comments: false });
+    expect(toml).not.toContain("# Generated");
+    expect(toml).not.toContain("# [hooks]");
+    const team = parseTeam(toml, "toml");
+    expect(team.roles.supervisor).toBeDefined();
+  });
+
+  it("supervisor is moved first regardless of input order", () => {
+    const reversed = [...defaults()].reverse();
+    const toml = buildTeamToml({ roles: reversed, comments: false });
+    const tableLines = toml.split("\n").filter((l) => l.startsWith("[roles."));
+    expect(tableLines[0]).toBe("[roles.supervisor]");
+  });
+
+  it("--role overrides adapter and model for specific role", () => {
+    const overrides = new Map([["design", { adapter: "codex" as const, model: "gpt-5.5" }]]);
+    const roles = resolveRoleSpecs({
+      roleNames: [...DEFAULT_ROLES],
+      defaultAdapter: "claude-code",
+      roleOverrides: overrides,
+    });
+    const toml = buildTeamToml({ roles, comments: false });
+    const team = parseTeam(toml, "toml");
+    expect(team.roles.design?.adapter).toBe("codex");
+    expect(team.roles.design?.model).toBe("gpt-5.5");
+    expect(team.roles.supervisor?.adapter).toBe("claude-code");
+  });
+
+  it("throws InitError for unknown adapter", () => {
+    const roles = [{ role: "supervisor", adapter: "unknown-ai" as "claude-code", model: "m1" }];
+    expect(() => buildTeamToml({ roles, comments: false })).toThrow(InitError);
+  });
+
+  it("throws InitError for empty model", () => {
+    const roles = [{ role: "supervisor", adapter: "claude-code" as const, model: "" }];
+    expect(() => buildTeamToml({ roles, comments: false })).toThrow(InitError);
+  });
+
+  it("non-bundled charter role emits TODO comment and valid file", () => {
+    const roles = [
+      { role: "supervisor", adapter: "claude-code" as const, model: "m" },
+      { role: "custom-role", adapter: "claude-code" as const, model: "m" },
+    ];
+    const toml = buildTeamToml({ roles, comments: true });
+    expect(toml).toContain("TODO");
+    expect(toml).toContain("custom-role");
+    const team = parseTeam(toml, "toml");
+    expect(team.roles["custom-role"]).toBeDefined();
+  });
+
+  it("output ends with a single newline", () => {
+    const toml = buildTeamToml({ roles: defaults(), comments: false });
+    expect(toml.endsWith("\n")).toBe(true);
+    expect(toml.endsWith("\n\n")).toBe(false);
+  });
+
+  it("snapshot: default --no-comments output is stable", () => {
+    const toml = buildTeamToml({ roles: defaults(), comments: false });
+    expect(toml).toBe(
+      '[roles.supervisor]\nadapter = "claude-code"\nmodel = "claude-opus-4-8"\n\n' +
+        '[roles.design]\nadapter = "claude-code"\nmodel = "claude-opus-4-8"\n\n' +
+        '[roles.implementation]\nadapter = "claude-code"\nmodel = "claude-opus-4-8"\n\n' +
+        '[roles.qa]\nadapter = "claude-code"\nmodel = "claude-opus-4-8"\n',
     );
   });
 });

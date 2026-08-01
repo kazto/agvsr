@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { allowedTargets, parseTeam, TeamConfigError } from "../src/config/team.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { allowedTargets, findTeamFile, parseTeam, TeamConfigError } from "../src/config/team.ts";
 
 const VALID = `
 roles:
@@ -110,6 +113,121 @@ roles:
       ["implementation-1", "implementation-2", "user"].sort(),
     );
     expect(allowedTargets(team, "implementation-1")).toEqual(["supervisor"]);
+  });
+});
+
+describe("parseTeam (TOML)", () => {
+  const VALID_TOML = `
+[roles.supervisor]
+adapter = "claude-code"
+model = "claude-opus-4-8"
+
+[roles.design]
+adapter = "claude-code"
+model = "claude-sonnet-4-6"
+
+[roles.qa]
+adapter = "agy"
+model = "gemini-3-pro"
+`;
+
+  it("parses a valid team", () => {
+    const team = parseTeam(VALID_TOML, "toml");
+    expect(Object.keys(team.roles)).toEqual(["supervisor", "design", "qa"]);
+    expect(team.roles.design!.adapter).toBe("claude-code");
+  });
+
+  it("expands array-valued implementation (array of tables)", () => {
+    const team = parseTeam(
+      `
+[roles.supervisor]
+adapter = "claude-code"
+model = "m"
+
+[[roles.implementation]]
+adapter = "codex"
+model = "gpt-5.5"
+
+[[roles.implementation]]
+adapter = "claude-code"
+model = "m"
+`,
+      "toml",
+    );
+    expect(Object.keys(team.roles)).toEqual(["supervisor", "implementation-1", "implementation-2"]);
+    expect(team.roles["implementation-1"]!.adapter).toBe("codex");
+    expect(team.roles["implementation-1"]!.charter_role).toBe("implementation");
+  });
+
+  it("requires a supervisor role", () => {
+    expect(() => parseTeam(`[roles.design]\nadapter = "codex"\nmodel = "m"\n`, "toml")).toThrow(
+      TeamConfigError,
+    );
+  });
+
+  it("rejects unknown adapters", () => {
+    expect(() =>
+      parseTeam(`[roles.supervisor]\nadapter = "cursor"\nmodel = "m"\n`, "toml"),
+    ).toThrow(TeamConfigError);
+  });
+
+  it("reports errors with team.toml in the message, not team.yaml", () => {
+    expect(() => parseTeam(`not valid toml =`, "toml")).toThrow(/team\.toml/);
+  });
+
+  it("rejects invalid TOML syntax", () => {
+    expect(() => parseTeam(`[roles.supervisor\nadapter = "codex"`, "toml")).toThrow(
+      TeamConfigError,
+    );
+  });
+});
+
+describe("findTeamFile", () => {
+  let dir: string;
+
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+
+  it("returns null when neither file exists", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-find-team-"));
+    try {
+      expect(findTeamFile(dir)).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("finds team.toml when only it exists", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-find-team-"));
+    try {
+      const tomlPath = join(dir, "team.toml");
+      writeFileSync(tomlPath, "", "utf8");
+      expect(findTeamFile(dir)).toBe(tomlPath);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("finds team.yaml when only it exists", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-find-team-"));
+    try {
+      const yamlPath = join(dir, "team.yaml");
+      writeFileSync(yamlPath, "", "utf8");
+      expect(findTeamFile(dir)).toBe(yamlPath);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("prefers team.yaml when both exist", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-find-team-"));
+    try {
+      const yamlPath = join(dir, "team.yaml");
+      writeFileSync(yamlPath, "", "utf8");
+      writeFileSync(join(dir, "team.toml"), "", "utf8");
+      expect(findTeamFile(dir)).toBe(yamlPath);
+    } finally {
+      cleanup();
+    }
   });
 });
 

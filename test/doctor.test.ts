@@ -116,6 +116,60 @@ describe("resolveTeamFile (team source precedence)", () => {
   });
 });
 
+describe("resolveTeamFile / findTeamFile (yaml/toml precedence)", () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds team.toml when only it exists in the directory", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-doctor-team-"));
+    const tomlPath = join(dir, "team.toml");
+    writeFileSync(tomlPath, "", "utf8");
+    const oldCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      expect(resolveTeamFile()).toBe(tomlPath);
+    } finally {
+      process.chdir(oldCwd);
+    }
+  });
+
+  it("prefers team.yaml over team.toml when both exist in the directory", () => {
+    dir = mkdtempSync(join(tmpdir(), "agvsr-doctor-team-"));
+    const yamlPath = join(dir, "team.yaml");
+    writeFileSync(yamlPath, "", "utf8");
+    writeFileSync(join(dir, "team.toml"), "", "utf8");
+    const oldCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      expect(resolveTeamFile()).toBe(yamlPath);
+    } finally {
+      process.chdir(oldCwd);
+    }
+  });
+});
+
+describe("runDoctor with a .toml team file", () => {
+  it("parses team.toml via extension-based format detection", async () => {
+    const deps = makeDeps({
+      readFile: (_path) =>
+        `[roles.supervisor]\nadapter = "claude-code"\nmodel = "claude-opus-4-8"\n\n` +
+        `[roles.implementation]\nadapter = "codex"\nmodel = "gpt-5-codex"\n`,
+    });
+    const report = await runDoctor("/resolved/team.toml", deps);
+    expect(report.groups[0]?.checks[0]?.level).toBe("ok");
+  });
+
+  it("reports a team.toml-labeled error on invalid TOML", async () => {
+    const deps = makeDeps({ readFile: (_path) => "not valid = [" });
+    const report = await runDoctor("/resolved/team.toml", deps);
+    expect(report.groups[0]?.checks[0]?.level).toBe("fail");
+    expect(report.groups[0]?.checks[0]?.message).toContain("team.toml");
+  });
+});
+
 // ── QA 2: PATH resolution ─────────────────────────────────────────────────────
 
 describe("PATH resolution", () => {

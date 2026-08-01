@@ -1017,6 +1017,7 @@ Usage: agvsr web [options]
           output: { type: "string", short: "o" },
           stdout: { type: "boolean" },
           force: { type: "boolean", short: "f" },
+          format: { type: "string" },
           roles: { type: "string" },
           adapter: { type: "string" },
           model: { type: "string" },
@@ -1029,18 +1030,20 @@ Usage: agvsr web [options]
       });
 
       if (initOpts.help) {
-        console.log(`agvsr init — generate a team.yaml without hand editing
+        console.log(`agvsr init — generate a team.yaml/team.toml without hand editing
 
 Usage: agvsr init [options]
 
-  -o, --output <path>   Write to this file (default: ./team.yaml)
+  -o, --output <path>   Write to this file (default: ./team.yaml or ./team.toml,
+                        depending on --format)
       --stdout          Write to stdout instead of a file
   -f, --force           Overwrite the output file if it already exists
+      --format <f>      Output format: yaml, toml (default: yaml)
       --roles <list>    Comma-separated role names (default: supervisor,design,implementation,qa)
       --adapter <a>     Default adapter for every role (default: claude-code)
       --model <m>       Default model for every role
       --role <spec>     Per-role override, repeatable. Form: name:adapter:model
-      --no-comments     Emit bare YAML without header/hooks comments
+      --no-comments     Emit bare output without header/hooks comments
   -h, --help            Show this help
 
 Run \`agvsr skill install\` separately (once, globally) to install the
@@ -1049,8 +1052,20 @@ bundled skill and /agvsr command.
         return;
       }
 
-      const { buildTeamYaml, resolveRoleSpecs, DEFAULT_ROLES, BUNDLED_CHARTER_ROLES, InitError } =
-        await import("../config/init.ts");
+      const {
+        buildTeamYaml,
+        buildTeamToml,
+        resolveRoleSpecs,
+        DEFAULT_ROLES,
+        BUNDLED_CHARTER_ROLES,
+        InitError,
+      } = await import("../config/init.ts");
+
+      const format = initOpts.format ?? "yaml";
+      if (format !== "yaml" && format !== "toml") {
+        console.error(`unknown --format "${format}". Valid formats: yaml, toml`);
+        process.exit(1);
+      }
 
       const VALID_ADAPTERS = ["claude-code", "codex", "agy"] as const;
 
@@ -1108,9 +1123,10 @@ bundled skill and /agvsr command.
         roleOverrides,
       });
 
-      let yaml: string;
+      const build = format === "toml" ? buildTeamToml : buildTeamYaml;
+      let output: string;
       try {
-        yaml = buildTeamYaml({ roles, comments: !initOpts["no-comments"] });
+        output = build({ roles, comments: !initOpts["no-comments"] });
       } catch (err) {
         if (err instanceof InitError) {
           console.error(err.message);
@@ -1120,11 +1136,12 @@ bundled skill and /agvsr command.
       }
 
       if (initOpts.stdout) {
-        process.stdout.write(yaml);
+        process.stdout.write(output);
         return;
       }
 
-      const outputPath = resolve(initOpts.output ?? "team.yaml");
+      const defaultName = format === "toml" ? "team.toml" : "team.yaml";
+      const outputPath = resolve(initOpts.output ?? defaultName);
 
       if (!initOpts.force && existsSync(outputPath)) {
         console.error(`${outputPath} already exists; pass --force to overwrite`);
@@ -1132,7 +1149,7 @@ bundled skill and /agvsr command.
       }
 
       mkdirSync(dirname(outputPath), { recursive: true });
-      writeFileSync(outputPath, yaml, "utf8");
+      writeFileSync(outputPath, output, "utf8");
 
       console.log(`wrote ${outputPath}`);
       return;

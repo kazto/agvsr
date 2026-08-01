@@ -6,10 +6,12 @@
  * Heuristic model warnings live in the adapter layer; here we validate
  * structure only so future model IDs keep working.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+
+export type TeamFormat = "yaml" | "toml";
 
 export const ADAPTERS = ["claude-code", "codex", "agy"] as const;
 export type Adapter = (typeof ADAPTERS)[number];
@@ -111,12 +113,16 @@ function expandRoles(raw: Record<string, RoleConfig | RoleConfig[]>): Record<str
   return expanded;
 }
 
-export function parseTeam(text: string): TeamConfig {
+export function parseTeam(text: string, format: TeamFormat = "yaml"): TeamConfig {
+  const label = format === "toml" ? "team.toml" : "team.yaml";
+
   let raw: unknown;
   try {
-    raw = parseYaml(text);
+    raw = format === "toml" ? Bun.TOML.parse(text) : parseYaml(text);
   } catch (err) {
-    throw new TeamConfigError(`team.yaml is not valid YAML: ${(err as Error).message}`);
+    throw new TeamConfigError(
+      `${label} is not valid ${format === "toml" ? "TOML" : "YAML"}: ${(err as Error).message}`,
+    );
   }
 
   const parsed = RawTeamSchema.safeParse(raw);
@@ -124,7 +130,7 @@ export function parseTeam(text: string): TeamConfig {
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n");
-    throw new TeamConfigError(`team.yaml is invalid:\n${issues}`);
+    throw new TeamConfigError(`${label} is invalid:\n${issues}`);
   }
 
   const team: TeamConfig = {
@@ -132,22 +138,42 @@ export function parseTeam(text: string): TeamConfig {
     hooks: parsed.data.hooks,
   };
   if (Object.keys(team.roles).length === 0) {
-    throw new TeamConfigError("team.yaml defines no roles.");
+    throw new TeamConfigError(`${label} defines no roles.`);
   }
   if (!team.roles[SUPERVISOR]) {
     throw new TeamConfigError(
-      `team.yaml must define a "${SUPERVISOR}" role (the star-topology hub, D10).`,
+      `${label} must define a "${SUPERVISOR}" role (the star-topology hub, D10).`,
     );
   }
   return team;
 }
 
+/** `.toml` is TOML; everything else (`.yaml`, `.yml`, no extension, or any
+ * custom path passed via `--team`/`$AGVSR_TEAM`) is treated as YAML, the
+ * long-standing default. */
+export function formatFromPath(path: string): TeamFormat {
+  return path.endsWith(".toml") ? "toml" : "yaml";
+}
+
+/** Finds the team config file in `dir`, preferring `team.yaml` over
+ * `team.toml` when both exist. Returns null if neither is present. */
+export function findTeamFile(dir: string): string | null {
+  const yamlPath = join(dir, "team.yaml");
+  if (existsSync(yamlPath)) return yamlPath;
+  const tomlPath = join(dir, "team.toml");
+  if (existsSync(tomlPath)) return tomlPath;
+  return null;
+}
+
 /**
- * Resolve the team file path: explicit arg ?? $AGVSR_TEAM ?? <cwd>/team.yaml.
- * Matches the daemon's team file resolution (D9).
+ * Resolve the team file path: explicit arg ?? $AGVSR_TEAM ?? <cwd>/team.yaml
+ * or team.toml (yaml preferred when both exist). Matches the daemon's team
+ * file resolution (D9).
  */
 export function resolveTeamFile(explicit?: string): string {
-  return explicit ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
+  const candidate = explicit ?? process.env.AGVSR_TEAM;
+  if (candidate) return candidate;
+  return findTeamFile(process.cwd()) ?? join(process.cwd(), "team.yaml");
 }
 
 export function loadTeam(path: string): TeamConfig {
@@ -157,7 +183,7 @@ export function loadTeam(path: string): TeamConfig {
   } catch (err) {
     throw new TeamConfigError(`cannot read team config at ${path}: ${(err as Error).message}`);
   }
-  return parseTeam(text);
+  return parseTeam(text, formatFromPath(path));
 }
 
 /**

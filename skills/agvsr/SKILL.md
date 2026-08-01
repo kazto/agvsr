@@ -38,7 +38,7 @@ agvsr ping / team / doctor               Daemon health / configured roles / adap
 
 `agvsr skill install` (run once, globally) also installs a `/agvsr` command
 for Claude Code and Gemini/Antigravity that bootstraps the daemon for the
-current project (checks it's running with the right `team.yaml`, runs
+current project (checks it's running with the right team config, runs
 `agvsr doctor`, starts it if needed) — run that first if the daemon isn't up
 yet. Codex has no user-definable slash-command mechanism; invoke this skill
 there explicitly with `$agvsr` or browse via `/skills` instead of expecting a

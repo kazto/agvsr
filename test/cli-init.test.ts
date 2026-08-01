@@ -92,7 +92,44 @@ describe("agvsr init CLI", () => {
     expect(stdout).toContain("agvsr init");
     expect(stdout).toContain("--stdout");
     expect(stdout).toContain("--force");
+    expect(stdout).toContain("--format");
     expect(stdout).not.toContain("--no-skill");
     expect(stdout).not.toContain("--skill-target");
+  });
+
+  it("--format toml defaults to writing team.toml", () => {
+    const cwd = makeTmpDir();
+    const { code, stdout, stderr } = runInit(["--format", "toml"], { cwd });
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("wrote ");
+
+    const out = join(cwd, "team.toml");
+    const team = loadTeam(out);
+    expect(team.roles.supervisor).toBeDefined();
+    expect(Object.keys(team.roles)).toHaveLength(4);
+  });
+
+  it("--format toml -o custom.toml writes to the given path", () => {
+    const cwd = makeTmpDir();
+    const out = join(cwd, "custom.toml");
+    const { code } = runInit(["--format", "toml", "-o", "custom.toml"], { cwd });
+    expect(code).toBe(0);
+    expect(loadTeam(out).roles.supervisor).toBeDefined();
+  });
+
+  it("--format toml --stdout prints parseable TOML", () => {
+    const cwd = makeTmpDir();
+    const { code, stdout } = runInit(["--format", "toml", "--stdout"], { cwd });
+    expect(code).toBe(0);
+    const team = parseTeam(stdout, "toml");
+    expect(team.roles.supervisor).toBeDefined();
+  });
+
+  it("rejects an unknown --format before writing anything", () => {
+    const cwd = makeTmpDir();
+    const { code, stderr } = runInit(["--format", "bogus"], { cwd });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain('unknown --format "bogus"');
   });
 });

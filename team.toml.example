@@ -1,0 +1,15 @@
+[roles.supervisor]
+adapter = "codex"
+model = "gpt-5.5"
+
+[roles.implementation]
+adapter = "codex"
+model = "gpt-5.4-mini"
+
+[roles.qa]
+adapter = "codex"
+model = "gpt-5.4-mini"
+
+# [hooks]
+# on_job_done = "notify-send 'agvsr' 'Job complete'"
+# on_job_failed = "notify-send 'agvsr' 'Job failed'"

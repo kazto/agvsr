@@ -10,7 +10,14 @@ import { provisionWorktree } from "../git/worktree.ts";
 import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../git/commit-gate.ts";
 import { mergeInstanceBranch } from "../git/merge.ts";
 import { Store } from "./store.ts";
-import { allowedTargets, loadTeam, SUPERVISOR, type TeamConfig } from "../config/team.ts";
+import {
+  allowedTargets,
+  findTeamFile,
+  loadTeam,
+  resolveTeamFile,
+  SUPERVISOR,
+  type TeamConfig,
+} from "../config/team.ts";
 import { ensureConfigDir, ipcEndpoint, resolveUserPath, storePath } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import {
@@ -35,7 +42,7 @@ import type {
 import type { Adapter } from "../config/team.ts";
 
 function resolveTeam(file?: string): TeamConfig | null {
-  const candidate = file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
+  const candidate = resolveTeamFile(file);
   if (!existsSync(candidate)) return null;
   return loadTeam(candidate);
 }
@@ -55,13 +62,8 @@ function resolveTeam(file?: string): TeamConfig | null {
  * that job under a different project's team.
  */
 function resolveJobTeam(jobCwd: string): TeamConfig | null {
-  const candidate = join(jobCwd, "team.yaml");
-  if (!existsSync(candidate)) return null;
-  return loadTeam(candidate);
-}
-
-function effectiveTeamFile(file?: string): string {
-  return file ?? process.env.AGVSR_TEAM ?? join(process.cwd(), "team.yaml");
+  const candidate = findTeamFile(jobCwd);
+  return candidate === null ? null : loadTeam(candidate);
 }
 
 const ok = (id: string, result: unknown): Response => ({ id, type: "response", ok: true, result });
@@ -383,7 +385,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   ensureConfigDir();
   const store = options.store ?? new Store(options.storeFile ?? storePath());
   const ownsStore = !options.store;
-  const teamFile = effectiveTeamFile(options.teamFile);
+  const teamFile = resolveTeamFile(options.teamFile);
   let team = options.team === undefined ? resolveTeam(options.teamFile) : options.team;
   const endpoint = options.endpoint ?? ipcEndpoint();
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);

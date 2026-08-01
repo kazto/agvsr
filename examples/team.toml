@@ -1,0 +1,28 @@
+# Example agvsr team (D9). One instance per role, static (v1).
+# `model` is a raw per-CLI model string; team.toml is the source of truth (D16).
+# Omit `charter` to use the bundled default; `charter_append` adds project rules;
+# `charter` replaces it wholesale (D25).
+
+[roles.supervisor]
+adapter = "claude-code"
+model = "claude-opus-4-8"
+
+[roles.design]
+adapter = "claude-code"
+model = "claude-sonnet-4-6"
+
+[roles.implementation]
+adapter = "codex"
+model = "gpt-5-codex"
+
+[roles.qa]
+adapter = "agy"
+model = "gemini-3-pro"
+
+# Optional event hooks (D26). Each value is a shell command run via `sh -c`.
+# The event JSON object is written to the command's stdin.
+# All three keys are optional — omit any you don't need.
+# [hooks]
+# on_job_done = "notify-send 'agvsr' 'Job complete'"
+# on_job_failed = "notify-send 'agvsr' 'Job failed'"
+# on_supervisor_message = "osascript -e 'display notification \"Supervisor needs input\" with title \"agvsr\"'"
