@@ -15,6 +15,19 @@ model = "claude-sonnet-4-6"
 adapter = "codex"
 model = "gpt-5-codex"
 
+# Multiple, worktree-isolated implementation instances (D27) — replace the
+# single [roles.implementation] table above with an array of tables instead.
+# Each instance gets its own git worktree and is addressable as
+# implementation-1, implementation-2, etc. Only "implementation" may be
+# array-valued; every other role must stay a single table.
+# [[roles.implementation]]
+# adapter = "codex"
+# model = "gpt-5-codex"
+#
+# [[roles.implementation]]
+# adapter = "claude-code"
+# model = "claude-opus-4-8"
+
 [roles.qa]
 adapter = "agy"
 model = "gemini-3-pro"
