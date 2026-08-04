@@ -16,6 +16,14 @@ export interface Job {
   worktree: string | null;
   created_at: string;
   updated_at: string;
+  /** herdr mode fields (null in standalone mode, D29/D30). */
+  workspace_id: string | null;
+  /** Resolved herdr workspace `label`, cached at job-create time. */
+  workspace_name: string | null;
+  /** Pane that submitted the job — the "front-desk" escalation target (D31). */
+  caller_pane_id: string | null;
+  /** HERDR_SESSION of the submitting process, passed through to herdr CLI calls. */
+  herdr_session: string | null;
 }
 
 /** A role instance's dedicated worktree/branch (D27 — array-expanded
@@ -72,7 +80,15 @@ export type Request =
       id: string;
       type: "request";
       method: "job.create";
-      params: { goal: string; cwd: string; id?: string };
+      params: {
+        goal: string;
+        cwd: string;
+        id?: string;
+        /** herdr mode fields, set by the CLI when HERDR_ENV/HERDR_WORKSPACE_ID are present (D29). */
+        workspace_id?: string;
+        caller_pane_id?: string;
+        herdr_session?: string;
+      };
     }
   | { id: string; type: "request"; method: "job.list"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "job.roleWorktrees"; params?: Record<string, never> }

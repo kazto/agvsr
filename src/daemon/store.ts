@@ -10,14 +10,18 @@ import type { Job, JobStatus, Message, MessageKind, RoleWorktree } from "../prot
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
-  id         TEXT PRIMARY KEY,
-  goal       TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'running',
-  cwd        TEXT NOT NULL,
-  branch     TEXT,
-  worktree   TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  id             TEXT PRIMARY KEY,
+  goal           TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'running',
+  cwd            TEXT NOT NULL,
+  branch         TEXT,
+  worktree       TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  workspace_id   TEXT,                  -- herdr mode only (D29/D30); NULL in standalone mode
+  workspace_name TEXT,                  -- resolved herdr workspace label, cached at create time
+  caller_pane_id TEXT,                  -- submitting pane, the front-desk escalation target (D31)
+  herdr_session  TEXT                   -- HERDR_SESSION of the submitting process
 );
 CREATE TABLE IF NOT EXISTS messages (
   id         TEXT PRIMARY KEY,
@@ -66,12 +70,28 @@ export class Store {
 
   private migrate(): void {
     const cols = this.db.query("PRAGMA table_info(jobs)").all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === "worktree")) {
+    const has = (name: string): boolean => cols.some((c) => c.name === name);
+    if (!has("worktree")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN worktree TEXT");
+    }
+    for (const col of ["workspace_id", "workspace_name", "caller_pane_id", "herdr_session"]) {
+      if (!has(col)) {
+        this.db.exec(`ALTER TABLE jobs ADD COLUMN ${col} TEXT`);
+      }
     }
   }
 
-  createJob(goal: string, cwd: string, id?: string): Job {
+  createJob(
+    goal: string,
+    cwd: string,
+    id?: string,
+    herdrInfo?: {
+      workspace_id?: string | null;
+      workspace_name?: string | null;
+      caller_pane_id?: string | null;
+      herdr_session?: string | null;
+    },
+  ): Job {
     const ts = now();
     const jobId = id ?? randomUUID();
     const branch = id ? `agvsr/${id}` : `agvsr/${jobId.slice(0, 8)}`;
@@ -84,11 +104,17 @@ export class Store {
       worktree: null,
       created_at: ts,
       updated_at: ts,
+      workspace_id: herdrInfo?.workspace_id ?? null,
+      workspace_name: herdrInfo?.workspace_name ?? null,
+      caller_pane_id: herdrInfo?.caller_pane_id ?? null,
+      herdr_session: herdrInfo?.herdr_session ?? null,
     };
     this.db
       .query(
-        `INSERT INTO jobs (id, goal, status, cwd, branch, worktree, created_at, updated_at)
-         VALUES ($id, $goal, $status, $cwd, $branch, NULL, $created_at, $updated_at)`,
+        `INSERT INTO jobs (id, goal, status, cwd, branch, worktree, created_at, updated_at,
+                            workspace_id, workspace_name, caller_pane_id, herdr_session)
+         VALUES ($id, $goal, $status, $cwd, $branch, NULL, $created_at, $updated_at,
+                 $workspace_id, $workspace_name, $caller_pane_id, $herdr_session)`,
       )
       .run({
         $id: jobId,
@@ -98,6 +124,10 @@ export class Store {
         $branch: job.branch,
         $created_at: job.created_at,
         $updated_at: job.updated_at,
+        $workspace_id: job.workspace_id,
+        $workspace_name: job.workspace_name,
+        $caller_pane_id: job.caller_pane_id,
+        $herdr_session: job.herdr_session,
       });
     return job;
   }

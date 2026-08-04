@@ -29,6 +29,7 @@ import {
 } from "../adapters/index.ts";
 import { validateTeamModels } from "../adapters/validate.ts";
 import { fireHook, noopPushNotifier, type HookEvent, type PushNotifier } from "../hooks.ts";
+import { createHerdrClient, type HerdrClient } from "../herdr/client.ts";
 import type {
   Job,
   JobRuntime,
@@ -122,6 +123,8 @@ export interface StartDaemonOptions {
   pushNotifier?: PushNotifier;
   /** Override resolved PATH (default: query $SHELL login profile). */
   userPath?: string;
+  /** herdr CLI wrapper injected for testing (default: createHerdrClient()). */
+  herdrClient?: HerdrClient;
 }
 
 const DEFAULT_MAX_WORKER_FAILURES = 3;
@@ -391,6 +394,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   let runner: TurnRunner | null = options.turnRunner ?? (team ? defaultTurnRunner() : null);
   const hookRun = options.hookRunner ?? fireHook;
   const pushNotify = options.pushNotifier ?? noopPushNotifier;
+  const herdrClient = options.herdrClient ?? createHerdrClient();
   const userPath = options.userPath ?? (await resolveUserPath());
   debug("starting", { endpoint, pid: process.pid });
 
@@ -404,6 +408,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
   };
 
+  // Best-effort delivery to the herdr pane that submitted the job — the
+  // "front-desk" agent (D31). No-op in standalone mode (caller_pane_id is
+  // null) or if herdr is unreachable; the CLI/Web/hook paths above already
+  // carry the same event independently.
+  const herdrEscalate = (jobId: string, text: string): void => {
+    const job = store.getJob(jobId);
+    if (!job?.caller_pane_id) return;
+    void herdrClient.promptAgent(job.caller_pane_id, text, job.herdr_session);
+  };
+
   // Always reads current `team` so hooks update immediately after reload.
   const hook = (hookName: keyof NonNullable<TeamConfig["hooks"]>, event: HookEvent): void => {
     const cmd = team?.hooks?.[hookName];
@@ -413,14 +427,21 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     if (!jobId) return;
     if (hookName === "on_job_done") {
       pushNotify({ job_id: jobId, status: "done" });
+      herdrEscalate(jobId, `[agvsr] job ${jobId} done: ${String(event.goal ?? "")}`);
     } else if (hookName === "on_job_stalled") {
       pushNotify({ job_id: jobId, status: "stalled" });
+      herdrEscalate(jobId, `[agvsr] job ${jobId} stalled (no progress) — agvsr status ${jobId}`);
     } else if (hookName === "on_supervisor_message") {
       pushNotify({ job_id: jobId, status: "attention" });
+      herdrEscalate(
+        jobId,
+        `[agvsr] job ${jobId} needs your input:\n\n${String(event.body ?? "")}\n\nReply: agvsr tell ${jobId} "..."`,
+      );
     } else if (hookName === "on_job_failed") {
       const job = store.getJob(jobId);
       const status = job?.status ?? "failed";
       pushNotify({ job_id: jobId, status });
+      herdrEscalate(jobId, `[agvsr] job ${jobId} failed: ${String(event.reason ?? "")}`);
     }
   };
   // Per-job team snapshots (D17): role config captured at job creation so
@@ -1022,7 +1043,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         return ok(req.id, { pong: true, version: VERSION });
 
       case "job.create": {
-        const { goal, cwd, id: customId } = req.params;
+        const {
+          goal,
+          cwd,
+          id: customId,
+          workspace_id: workspaceId,
+          caller_pane_id: callerPaneId,
+          herdr_session: herdrSession,
+        } = req.params;
         if (!goal?.trim()) return err(req.id, "bad_request", "job goal must not be empty");
         if (customId !== undefined) {
           if (!customId.trim()) return err(req.id, "bad_request", "job id must not be empty");
@@ -1060,7 +1088,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           );
         }
 
-        const job = store.createJob(goal.trim(), normalizedCwd, customId);
+        // Resolve the herdr workspace label as an additional identifier (D30).
+        // Best-effort: an unreachable/unknown herdr server just leaves the name
+        // unset, it never blocks job creation.
+        const workspaceName = workspaceId
+          ? await herdrClient.resolveWorkspaceName(workspaceId, herdrSession)
+          : null;
+        const job = store.createJob(goal.trim(), normalizedCwd, customId, {
+          workspace_id: workspaceId,
+          workspace_name: workspaceName,
+          caller_pane_id: callerPaneId,
+          herdr_session: herdrSession,
+        });
 
         // Provision git worktree for isolation. Fails the job immediately if the
         // source is a real git repo but worktree creation fails (accepted decision).

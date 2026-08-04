@@ -545,8 +545,23 @@ async function main(argv: string[]): Promise<void> {
         process.exit(1);
       }
       const cwd = normalizeCwd(values.cwd ?? process.cwd());
-      const params: { goal: string; cwd: string; id?: string } = { goal, cwd };
+      const params: {
+        goal: string;
+        cwd: string;
+        id?: string;
+        workspace_id?: string;
+        caller_pane_id?: string;
+        herdr_session?: string;
+      } = { goal, cwd };
       if (values.id) params.id = values.id;
+      // herdr mode (D29): detected from env, never required. Absent HERDR_ENV/
+      // HERDR_WORKSPACE_ID, the job is submitted as standalone with no herdr fields.
+      const herdrMode = process.env.HERDR_ENV === "1" && !!process.env.HERDR_WORKSPACE_ID;
+      if (herdrMode) {
+        params.workspace_id = process.env.HERDR_WORKSPACE_ID;
+        if (process.env.HERDR_PANE_ID) params.caller_pane_id = process.env.HERDR_PANE_ID;
+        if (process.env.HERDR_SESSION) params.herdr_session = process.env.HERDR_SESSION;
+      }
       await withClient(async (c) => {
         const { job } = unwrap(await c.request<{ job: Job }>("job.create", params));
         console.log(`job ${job.id} created (${job.status})`);

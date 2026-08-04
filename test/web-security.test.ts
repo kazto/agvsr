@@ -107,6 +107,10 @@ describe("web security helpers", () => {
       worktree: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      workspace_id: null,
+      workspace_name: null,
+      caller_pane_id: null,
+      herdr_session: null,
     };
     const baseRuntime: JobRuntime = {
       in_flight: false,

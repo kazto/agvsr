@@ -474,6 +474,7 @@ roles:
       "model warnings",
       "adapter binaries",
       "auth",
+      "herdr (optional)",
     ]);
   });
 });
@@ -593,7 +594,7 @@ describe("aggregation (warn + fail → exit 1)", () => {
     const levels = report.groups.flatMap((g) => g.checks.map((c) => c.level));
     expect(levels).toContain("fail");
     expect(levels).toContain("warn");
-    expect(report.groups.length).toBe(4);
+    expect(report.groups.length).toBe(5);
   });
 });
 
@@ -637,7 +638,7 @@ describe("JSON output parity", () => {
     expect(!reportHasFailures(report)).toBe(true);
   });
 
-  it("groups order matches: team.yaml → model warnings → adapter binaries → auth", async () => {
+  it("groups order matches: team.yaml → model warnings → adapter binaries → auth → herdr", async () => {
     const deps = makeDeps({ which: (bin) => `/usr/bin/${bin}` });
     const report = await runDoctor("/team.yaml", deps);
     expect(report.groups.map((g) => g.title)).toEqual([
@@ -645,6 +646,7 @@ describe("JSON output parity", () => {
       "model warnings",
       "adapter binaries",
       "auth",
+      "herdr (optional)",
     ]);
   });
 });

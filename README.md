@@ -18,6 +18,11 @@ the worker roles, and you review the resulting branch.
   - `codex` adapter → the `codex` CLI
   - `agy` adapter → the Antigravity / Gemini CLI
 - A **git repository** for the target project (jobs run in per-job worktrees).
+- **[herdr](https://herdr.dev) (optional)** — when `agvsr job` is run from inside a
+  herdr-managed pane (`HERDR_ENV=1` + `HERDR_WORKSPACE_ID` set), agvsr links the job to
+  that herdr workspace and can escalate to the pane's agent directly (see
+  [Messages](#messages)). Without herdr, agvsr runs in standalone mode exactly as before —
+  herdr is never required.
 
 Run `agvsr doctor` to check that the adapter CLIs are installed and authenticated.
 
@@ -91,6 +96,11 @@ worktree.
 
 Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite`.
 `agvsr watch` and `agvsr logs` read from it so you can follow the conversation.
+
+When a job is submitted from inside a herdr pane, agvsr also escalates to the human
+through that pane's agent directly — the "front-desk" agent that called `agvsr job` —
+in addition to the usual hooks/Web push (see
+[docs/design-herdr-integration.md](docs/design-herdr-integration.md)).
 
 ## Configuration: `team.yaml`
 

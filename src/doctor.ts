@@ -330,6 +330,41 @@ export async function runDoctor(
     authGroup.checks.push(checkAuth(adapter, deps));
   }
 
+  // ── section 5: herdr (optional, D29) ──────────────────────────────────────
+  // herdr is an enhancement, not a hard requirement — missing binary/env is
+  // `warn`, never `fail`; agvsr runs fine standalone without it.
+  const herdrGroup: DoctorGroup = { title: "herdr (optional)", checks: [] };
+  groups.push(herdrGroup);
+
+  const herdrBin = deps.which("herdr", pathStr);
+  if (herdrBin) {
+    herdrGroup.checks.push({ label: "herdr", level: "ok", message: herdrBin });
+  } else {
+    herdrGroup.checks.push({
+      label: "herdr",
+      level: "warn",
+      message:
+        "not found in PATH — agvsr will run in standalone mode (no workspace linking, no front-desk escalation)",
+    });
+  }
+
+  const herdrEnv = deps.getEnv("HERDR_ENV");
+  const herdrWorkspaceId = deps.getEnv("HERDR_WORKSPACE_ID");
+  if (herdrEnv === "1" && herdrWorkspaceId) {
+    herdrGroup.checks.push({
+      label: "herdr mode",
+      level: "ok",
+      message: `HERDR_WORKSPACE_ID=${herdrWorkspaceId}`,
+    });
+  } else {
+    herdrGroup.checks.push({
+      label: "herdr mode",
+      level: "warn",
+      message:
+        "HERDR_ENV/HERDR_WORKSPACE_ID not set in this shell — jobs submitted here run standalone",
+    });
+  }
+
   if (options.probe) {
     const probeGroup: DoctorGroup = { title: "model probes", checks: [] };
     groups.push(probeGroup);
