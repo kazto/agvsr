@@ -125,6 +125,13 @@ export interface StartDaemonOptions {
   userPath?: string;
   /** herdr CLI wrapper injected for testing (default: createHerdrClient()). */
   herdrClient?: HerdrClient;
+  /** Shutdown drain budget in ms (default: 10s, or AGVSR_SHUTDOWN_DRAIN_MS). */
+  shutdownDrainMs?: number;
+  /** Exit the process once an IPC `daemon.stop` has finished closing. Only the
+   * long-running `agvsr daemon` process wants this; embedders and tests do not. */
+  exitOnStop?: boolean;
+  /** Process exit, injectable for testing (default: process.exit). */
+  exit?: (code: number) => void;
 }
 
 const DEFAULT_MAX_WORKER_FAILURES = 3;
@@ -133,6 +140,31 @@ const DEFAULT_MAX_WORKER_FAILURES = 3;
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 /** Default hard (wall-clock) timeout — safety cap for long but progressing turns. */
 const DEFAULT_HARD_TIMEOUT_MS = 60 * 60 * 1000;
+
+/** How long a shutdown waits for in-flight turns before aborting them. */
+const DEFAULT_SHUTDOWN_DRAIN_MS = 10_000;
+/** Extra window for aborted turns to unwind after their subprocess is killed. */
+const ABORT_GRACE_MS = 2_000;
+
+/**
+ * Wait for the currently pending dispatches, capped at `timeoutMs`.
+ * Returns false if the budget ran out first. The timer is always cleared so a
+ * losing race never keeps the event loop (and the process) alive on its own.
+ */
+async function drainPending(pending: Set<Promise<void>>, timeoutMs: number): Promise<boolean> {
+  if (pending.size === 0) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    // allSettled iterates the Set once, now — dispatches enqueued after this
+    // point are deliberately not part of this drain.
+    return await Promise.race([Promise.allSettled(pending).then(() => true), expired]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function parseTimeoutEnv(name: string): number | null {
   const raw = process.env[name];
@@ -395,6 +427,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const hookRun = options.hookRunner ?? fireHook;
   const pushNotify = options.pushNotifier ?? noopPushNotifier;
   const herdrClient = options.herdrClient ?? createHerdrClient();
+  const drainMs =
+    options.shutdownDrainMs ??
+    parseTimeoutEnv("AGVSR_SHUTDOWN_DRAIN_MS") ??
+    DEFAULT_SHUTDOWN_DRAIN_MS;
+  const exitProcess = options.exit ?? ((code: number) => process.exit(code));
   const userPath = options.userPath ?? (await resolveUserPath());
   debug("starting", { endpoint, pid: process.pid });
 
@@ -1490,7 +1527,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
       case "daemon.stop": {
         debug("daemon.stop requested");
-        void Promise.resolve().then(() => doClose());
+        // Reply first, then shut down and — for a real `agvsr daemon` process —
+        // exit. Without the exit, anything still referencing the event loop keeps
+        // a socket-less process alive indefinitely.
+        //
+        // A macrotask, not a microtask: the transport writes this response in the
+        // continuation right after `await handler(...)`, which is itself a
+        // microtask. Closing on a microtask would end the client's socket first
+        // and the reply would never be sent, hanging `agvsr daemon stop`.
+        setTimeout(() => {
+          void (async () => {
+            await doClose();
+            if (options.exitOnStop) exitProcess(0);
+          })();
+        }, 0);
         return ok(req.id, { stopping: true });
       }
 
@@ -1527,8 +1577,21 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       clearInterval(stallWatchdog);
       stallWatchdog = null;
     }
-    await Promise.allSettled(pendingDispatches);
+    // Stop accepting work *before* draining. A turn may legitimately run for the
+    // full hard timeout (1h by default), and draining first kept the endpoint
+    // bound for that whole window after `daemon stop` had already reported
+    // success — long enough for a restart to collide with it.
     await server.close();
+    if (!(await drainPending(pendingDispatches, drainMs))) {
+      // Past the budget: abort the stragglers so their adapter subprocesses are
+      // killed rather than orphaned when the process goes away, then give the
+      // aborted turns a brief window to settle.
+      debug("drain budget exceeded, aborting in-flight turns", { pending: pendingDispatches.size });
+      for (const controllers of jobKillControllers.values()) {
+        for (const ac of controllers) ac.abort();
+      }
+      await drainPending(pendingDispatches, ABORT_GRACE_MS);
+    }
     if (ownsStore) store.close();
   };
   doClose = close;

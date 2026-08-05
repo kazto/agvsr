@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
-import { Client, DaemonNotRunningError } from "../ipc/transport.ts";
+import { Client, DaemonNotRunningError, EndpointInUseError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
 import type { Adapter } from "../config/team.ts";
@@ -519,6 +519,32 @@ export async function startDaemonDetached(
   return { alreadyRunning: false, started: true };
 }
 
+/**
+ * Poll until nothing answers at `endpoint`. `daemon.stop` acknowledges the request
+ * before the old daemon has finished closing, and a daemon now refuses to take over
+ * an endpoint that is still live — so restarting without waiting would race the old
+ * process and leave no daemon running at all.
+ */
+export async function waitForEndpointFree(
+  endpoint: string,
+  options: {
+    connect?: typeof Client.connect;
+    sleep?: (ms: number) => Promise<void>;
+    pollMs?: number;
+    timeoutMs?: number;
+  } = {},
+): Promise<boolean> {
+  const connect = options.connect ?? Client.connect;
+  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const pollMs = options.pollMs ?? 100;
+  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
+  while (Date.now() <= deadline) {
+    if (!(await probeDaemon(endpoint, connect))) return true;
+    await sleep(pollMs);
+  }
+  return false;
+}
+
 export function restartDaemonDetached(options: {
   teamFile?: string;
   bunExec?: string;
@@ -586,6 +612,13 @@ async function main(argv: string[]): Promise<void> {
           unwrap(await c.request("daemon.stop"));
           console.log("daemon stopped, restarting...");
         });
+        if (!(await waitForEndpointFree(ipcEndpoint()))) {
+          console.error(
+            `the old daemon is still listening on ${ipcEndpoint()}; not starting a second one. ` +
+              `It may be finishing an in-flight turn — retry in a moment.`,
+          );
+          process.exit(1);
+        }
         restartDaemonDetached({ teamFile: daemonOpts.team });
         console.log("daemon restarted");
         return;
@@ -600,10 +633,22 @@ async function main(argv: string[]): Promise<void> {
       const { createPushNotifier } = await import("../web/push.ts");
       const { storePath: getStorePath } = await import("../paths.ts");
       const daemonStoreFile = process.env.AGVSR_STORE ?? getStorePath();
-      const daemon = await startDaemon({
-        teamFile: daemonOpts.team,
-        pushNotifier: createPushNotifier(daemonStoreFile),
-      });
+      let daemon: Awaited<ReturnType<typeof startDaemon>>;
+      try {
+        daemon = await startDaemon({
+          teamFile: daemonOpts.team,
+          pushNotifier: createPushNotifier(daemonStoreFile),
+          // This process exists only to be the daemon, so an IPC stop must end it.
+          exitOnStop: true,
+        });
+      } catch (e) {
+        // Losing the race for the endpoint is an ordinary outcome now, not a crash.
+        if (e instanceof EndpointInUseError) {
+          console.error(e.message);
+          process.exit(1);
+        }
+        throw e;
+      }
       console.log(`agvsrd ${VERSION} listening on ${daemon.endpoint}`);
       const shutdown = async () => {
         await daemon.close();

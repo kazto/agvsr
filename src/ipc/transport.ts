@@ -38,10 +38,52 @@ export interface IpcServer {
   close(): Promise<void>;
 }
 
+/** How long a graceful close waits for client sockets to flush and end. */
+const CLOSE_GRACE_MS = 500;
+
+/** Raised instead of silently taking over an endpoint another daemon still owns. */
+export class EndpointInUseError extends Error {
+  constructor(endpoint: string) {
+    super(
+      `another agvsr daemon is already listening on ${endpoint}. ` +
+        `Stop it first with: agvsr daemon stop`,
+    );
+    this.name = "EndpointInUseError";
+  }
+}
+
+/**
+ * Is something actually accepting connections here? A socket file left behind by
+ * a crashed daemon still exists on disk but refuses connections, and only that
+ * definitive refusal makes it safe to unlink. Anything else — a successful
+ * connect, or a connect that hangs on a saturated backlog — counts as live, so
+ * an ambiguous probe never costs a running daemon its endpoint.
+ */
+function probeLiveListener(endpoint: string, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.connect(endpoint);
+    let settled = false;
+    const finish = (live: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(live);
+    };
+    const timer = setTimeout(() => finish(true), timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("error", () => finish(false));
+  });
+}
+
 /** Start a daemon-side IPC server. */
-export function serve(endpoint: string, handler: RequestHandler): Promise<IpcServer> {
+export async function serve(endpoint: string, handler: RequestHandler): Promise<IpcServer> {
   // Clear a stale POSIX socket file from a previous run (named pipes self-clean).
+  // Probing first is what keeps a restart from unlinking the *live* endpoint of a
+  // daemon that is still draining: the old process would survive holding a
+  // listener with no path, unreachable but never exiting.
   if (process.platform !== "win32" && existsSync(endpoint)) {
+    if (await probeLiveListener(endpoint)) throw new EndpointInUseError(endpoint);
     try {
       unlinkSync(endpoint);
     } catch {
@@ -94,9 +136,20 @@ export function serve(endpoint: string, handler: RequestHandler): Promise<IpcSer
         endpoint,
         close: () =>
           new Promise<void>((res) => {
-            for (const s of sockets) s.destroy();
-            sockets.clear();
-            server.close(() => res());
+            // end(), not destroy(): a `daemon.stop` reply is written to the very
+            // socket we are tearing down, moments before this runs, and destroy()
+            // discards queued writes — the client would hang waiting for a
+            // response that was silently dropped. Anything still open after the
+            // grace window (an idle `watch` client, say) is then dropped hard.
+            for (const s of sockets) s.end();
+            const hardClose = setTimeout(() => {
+              for (const s of sockets) s.destroy();
+              sockets.clear();
+            }, CLOSE_GRACE_MS);
+            server.close(() => {
+              clearTimeout(hardClose);
+              res();
+            });
           }),
       });
     });
