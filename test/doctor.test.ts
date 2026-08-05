@@ -106,7 +106,18 @@ describe("resolveTeamFile (team source precedence)", () => {
 
   it("falls back to cwd/team.yaml when neither explicit nor env is set", () => {
     delete process.env.AGVSR_TEAM;
-    expect(resolveTeamFile()).toBe(join(process.cwd(), "team.yaml"));
+    // This is the "nothing was found" path, so the directory has to actually be
+    // empty of team files — running in the repo root picks up a real team.toml
+    // (correctly, per the yaml/toml precedence tests below) and never reaches it.
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-doctor-noteam-"));
+    const oldCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      expect(resolveTeamFile()).toBe(join(dir, "team.yaml"));
+    } finally {
+      process.chdir(oldCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("runDoctor reports the resolved team path in the report", async () => {
