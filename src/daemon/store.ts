@@ -6,7 +6,18 @@
  */
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { Job, JobStatus, Message, MessageKind, RoleWorktree } from "../protocol.ts";
+import type {
+  Job,
+  JobStatus,
+  JobUsage,
+  Message,
+  MessageKind,
+  RoleWorktree,
+  UsageBreakdown,
+  UsageByJob,
+  UsageTotals,
+} from "../protocol.ts";
+import type { TurnUsage } from "../adapters/types.ts";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -51,6 +62,22 @@ CREATE TABLE IF NOT EXISTS job_role_worktrees (
   PRIMARY KEY (job_id, role),
   FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
+CREATE TABLE IF NOT EXISTS turn_usage (
+  id                 TEXT PRIMARY KEY,
+  job_id             TEXT NOT NULL,
+  role               TEXT NOT NULL,
+  adapter            TEXT NOT NULL,
+  model              TEXT NOT NULL,
+  input_tokens       INTEGER,          -- uncached input, normalized across adapters (D32)
+  output_tokens      INTEGER,
+  cache_read_tokens  INTEGER,
+  cache_write_tokens INTEGER,
+  reasoning_tokens   INTEGER,
+  cost_usd           REAL,             -- claude-code only; NULL means "not reported"
+  created_at         TEXT NOT NULL,
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_job ON turn_usage(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(to_role, read_at) WHERE read_at IS NULL;
 `;
@@ -267,7 +294,139 @@ export class Store {
       .all() as RoleWorktree[];
   }
 
+  /** Record one turn's accounting (D32). Turns whose CLI reported nothing are
+   * never passed here, so a missing row means "unmeasured", not "zero". */
+  recordTurnUsage(input: {
+    job_id: string;
+    role: string;
+    adapter: string;
+    model: string;
+    usage: TurnUsage;
+  }): void {
+    this.db
+      .query(
+        `INSERT INTO turn_usage (id, job_id, role, adapter, model, input_tokens, output_tokens,
+                                 cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                                 cost_usd, created_at)
+         VALUES ($id, $job_id, $role, $adapter, $model, $input_tokens, $output_tokens,
+                 $cache_read_tokens, $cache_write_tokens, $reasoning_tokens,
+                 $cost_usd, $created_at)`,
+      )
+      .run({
+        $id: randomUUID(),
+        $job_id: input.job_id,
+        $role: input.role,
+        $adapter: input.adapter,
+        $model: input.model,
+        $input_tokens: input.usage.input_tokens,
+        $output_tokens: input.usage.output_tokens,
+        $cache_read_tokens: input.usage.cache_read_tokens,
+        $cache_write_tokens: input.usage.cache_write_tokens,
+        $reasoning_tokens: input.usage.reasoning_tokens,
+        $cost_usd: input.usage.cost_usd,
+        $created_at: now(),
+      });
+  }
+
+  /** Totals + per-role breakdown for one job. Powers `agvsr status <id>`. */
+  jobUsage(jobId: string): JobUsage {
+    return {
+      totals: this.totalsWhere("job_id = $job_id", { $job_id: jobId }),
+      by_role: this.breakdownWhere("job_id = $job_id", { $job_id: jobId }),
+    };
+  }
+
+  /** Cross-job (or single-job) report. Powers `agvsr usage`. */
+  usageReport(jobId?: string): {
+    totals: UsageTotals;
+    by_role: UsageBreakdown[];
+    by_job: UsageByJob[];
+  } {
+    const where = jobId ? "job_id = $job_id" : "1 = 1";
+    const params: Record<string, string> = jobId ? { $job_id: jobId } : {};
+    const by_job = this.db
+      .query(
+        `SELECT u.job_id AS job_id, j.goal AS goal, j.status AS status, ${TOTALS_COLUMNS}
+         FROM turn_usage u LEFT JOIN jobs j ON j.id = u.job_id
+         WHERE ${where}
+         GROUP BY u.job_id
+         ORDER BY cost_usd DESC, turns DESC`,
+      )
+      .all(params) as Array<TotalsRow & { job_id: string; goal: string | null; status: JobStatus }>;
+
+    return {
+      totals: this.totalsWhere(where, params),
+      by_role: this.breakdownWhere(where, params),
+      by_job: by_job.map((r) => ({
+        ...toTotals(r),
+        job_id: r.job_id,
+        goal: r.goal ?? "(job deleted)",
+        status: r.status ?? "interrupted",
+      })),
+    };
+  }
+
+  private totalsWhere(where: string, params: Record<string, string>): UsageTotals {
+    const row = this.db
+      .query(`SELECT ${TOTALS_COLUMNS} FROM turn_usage u WHERE ${where}`)
+      .get(params) as TotalsRow | null;
+    return toTotals(row);
+  }
+
+  private breakdownWhere(where: string, params: Record<string, string>): UsageBreakdown[] {
+    const rows = this.db
+      .query(
+        `SELECT u.role AS role, u.adapter AS adapter, u.model AS model, ${TOTALS_COLUMNS}
+         FROM turn_usage u WHERE ${where}
+         GROUP BY u.role, u.adapter, u.model
+         ORDER BY cost_usd DESC, turns DESC, role ASC`,
+      )
+      .all(params) as Array<TotalsRow & { role: string; adapter: string; model: string }>;
+    return rows.map((r) => ({
+      ...toTotals(r),
+      role: r.role,
+      adapter: r.adapter,
+      model: r.model,
+    }));
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+/** Shared aggregate projection. `missing_cost` counts turns whose adapter reported
+ * no cost, which is what makes a group's `cost_usd` a lower bound. */
+const TOTALS_COLUMNS = `
+  COUNT(*) AS turns,
+  COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(u.cache_read_tokens), 0) AS cache_read_tokens,
+  COALESCE(SUM(u.cache_write_tokens), 0) AS cache_write_tokens,
+  COALESCE(SUM(u.reasoning_tokens), 0) AS reasoning_tokens,
+  COALESCE(SUM(u.cost_usd), 0) AS cost_usd,
+  SUM(CASE WHEN u.cost_usd IS NULL THEN 1 ELSE 0 END) AS missing_cost`;
+
+interface TotalsRow {
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  cost_usd: number;
+  missing_cost: number;
+}
+
+function toTotals(row: TotalsRow | null): UsageTotals {
+  return {
+    turns: row?.turns ?? 0,
+    input_tokens: row?.input_tokens ?? 0,
+    output_tokens: row?.output_tokens ?? 0,
+    cache_read_tokens: row?.cache_read_tokens ?? 0,
+    cache_write_tokens: row?.cache_write_tokens ?? 0,
+    reasoning_tokens: row?.reasoning_tokens ?? 0,
+    cost_usd: row?.cost_usd ?? 0,
+    cost_partial: (row?.missing_cost ?? 0) > 0,
+  };
 }

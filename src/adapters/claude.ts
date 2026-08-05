@@ -5,7 +5,7 @@
  */
 import { claudeMcpConfig } from "./mcp.ts";
 import { SUPERVISOR } from "../config/team.ts";
-import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser, TurnUsage } from "./types.ts";
 
 // Hands-on tools the supervisor must never use directly (workers do the actual work).
 const SUPERVISOR_DISALLOWED = [
@@ -19,13 +19,25 @@ const SUPERVISOR_DISALLOWED = [
   "RemoteTrigger",
 ].join(",");
 
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 interface ClaudeEvent {
   type?: string;
   subtype?: string;
   session_id?: string;
   message?: { content?: Array<{ type?: string; text?: string; name?: string; input?: unknown }> };
   result?: string;
+  /** Only on the terminal `result` event (D32). */
+  usage?: ClaudeUsage;
+  total_cost_usd?: number;
 }
+
+const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
 const CLAUDE_SHORTHAND_MODEL = /^(opus|sonnet|haiku)-\d+(?:\.\d+)?$/i;
 
@@ -48,6 +60,7 @@ function validateModel(model: string): { message: string; hint: string }[] {
 function createParser(): TurnParser {
   let session: string | null = null;
   let text = "";
+  let usage: TurnUsage | null = null;
 
   return {
     push(line: string): TurnEvent[] {
@@ -78,6 +91,15 @@ function createParser(): TurnParser {
 
       if (ev.type === "result") {
         if (ev.session_id) session = ev.session_id;
+        // claude reports input_tokens exclusive of cache reads, so no adjustment.
+        usage = {
+          input_tokens: num(ev.usage?.input_tokens),
+          output_tokens: num(ev.usage?.output_tokens),
+          cache_read_tokens: num(ev.usage?.cache_read_input_tokens),
+          cache_write_tokens: num(ev.usage?.cache_creation_input_tokens),
+          reasoning_tokens: null, // not broken out by claude-code
+          cost_usd: num(ev.total_cost_usd),
+        };
         return [{ kind: "result", ok: ev.subtype === "success", text: ev.result }];
       }
 
@@ -85,6 +107,7 @@ function createParser(): TurnParser {
     },
     sessionId: () => session,
     finalText: () => text,
+    usage: () => usage,
   };
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { runTurn } from "../src/adapters/run.ts";
-import type { AgentSpec, CliDriver, TurnParser } from "../src/adapters/types.ts";
+import type { AgentSpec, CliDriver, TurnParser, TurnUsage } from "../src/adapters/types.ts";
 
 const spec: AgentSpec = {
   role: "implementation",
@@ -274,6 +274,37 @@ describe("runTurn", () => {
       const { outcome } = await runTurn(fakeDriver({ sessionId: null }), spec, null, "go");
       expect(outcome.timedOut).toBeFalsy();
       expect(outcome.exitCode).toBe(0);
+    });
+  });
+
+  describe("usage accounting (D32)", () => {
+    const usageDriver = (usage: TurnUsage | null): CliDriver => ({
+      adapter: "claude-code",
+      buildSpawn: () => ({ bin: "bun", args: ["-e", `process.stdout.write("alpha\\n")`] }),
+      createParser: () => ({ ...textParser("S1"), usage: () => usage }),
+    });
+
+    it("copies the parser's usage onto the outcome", async () => {
+      const usage: TurnUsage = {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_read_tokens: 30,
+        cache_write_tokens: 40,
+        reasoning_tokens: null,
+        cost_usd: 0.5,
+      };
+      const { outcome } = await runTurn(usageDriver(usage), spec, null, "go");
+      expect(outcome.usage).toEqual(usage);
+    });
+
+    it("omits usage entirely when the parser reports none", async () => {
+      const { outcome } = await runTurn(usageDriver(null), spec, null, "go");
+      expect(outcome.usage).toBeUndefined();
+    });
+
+    it("omits usage for drivers that never implement the hook (agy)", async () => {
+      const { outcome } = await runTurn(fakeDriver({ sessionId: null }), spec, null, "go");
+      expect(outcome.usage).toBeUndefined();
     });
   });
 });

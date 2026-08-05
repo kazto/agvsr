@@ -26,6 +26,25 @@ export interface AgentSpec {
   networkAccess?: boolean;
 }
 
+/**
+ * Per-turn token/cost accounting (D32). Adapters report wildly different subsets,
+ * so every field is nullable and the shape is normalized here rather than at the
+ * aggregation layer:
+ *   - `input_tokens` is *uncached* input only. codex reports a cache-inclusive
+ *     total, so its driver subtracts the cached part before filling this in.
+ *   - `cost_usd` is only reported by claude-code. It is a list-price estimate and
+ *     is emitted even for subscription-authenticated turns, which makes it a usable
+ *     proxy for plan-quota burn — not an invoice.
+ */
+export interface TurnUsage {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
+  cost_usd: number | null;
+}
+
 /** Structured events surfaced from a turn (observability; routing is via MCP). */
 export type TurnEvent =
   | { kind: "text"; text: string }
@@ -50,6 +69,8 @@ export interface TurnOutcome {
   timedOut?: boolean;
   /** Which timeout fired: "hard" for wall-clock limit, "idle" for no-progress limit. */
   timeoutKind?: "hard" | "idle";
+  /** Token/cost accounting for this turn (D32). Absent when the CLI reports none. */
+  usage?: TurnUsage;
 }
 
 /** Result of driving one turn: collected events + the outcome. */
@@ -73,6 +94,9 @@ export interface TurnParser {
   sessionId(): string | null;
   /** Accumulated assistant text. */
   finalText(): string;
+  /** Token/cost accounting scraped from the turn's terminal event (D32).
+   * Missing method (or null) means this adapter reports nothing. */
+  usage?(): TurnUsage | null;
 }
 
 /** Per-CLI driver: the only place adapter-specific knowledge lives. */

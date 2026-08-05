@@ -16,12 +16,16 @@ import type { SkillName, SkillTarget } from "../config/skill-install.ts";
 import type {
   Job,
   JobRuntime,
+  JobUsage,
   Message,
   PingResult,
   PushFrame,
   Response,
   RoleSummary,
   RoleWorktree,
+  UsageBreakdown,
+  UsageByJob,
+  UsageTotals,
 } from "../protocol.ts";
 
 const USAGE = `agvsr ${VERSION}
@@ -45,6 +49,7 @@ Usage:
                                     Block until each job needs approval or finishes
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
+  agvsr usage [job-id] [--json]     Show token/cost accounting per job and per role
   agvsr cleanup [--apply]           Report (or remove) job worktrees/branches safe to delete
   agvsr web [--host H] [--port N] [--socket P]  Run the local web gateway
   agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
@@ -55,6 +60,89 @@ function normalizeCwd(input: string): string {
   const expanded =
     input === "~" ? home : input.startsWith("~/") ? join(home, input.slice(2)) : input;
   return resolve(expanded);
+}
+
+/** Compact token count: 812, 12.3k, 1.24M — keeps the usage columns narrow. */
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+/**
+ * Cost with an explicit "this is a floor" marker. A trailing `+` means at least one
+ * turn in the group came from an adapter that reports no cost (codex/agy), so the
+ * real figure is higher — printing a bare number there would be a lie (D32).
+ */
+export function formatCost(totals: UsageTotals): string {
+  const base = `$${totals.cost_usd.toFixed(2)}`;
+  return totals.cost_partial ? `${base}+` : base;
+}
+
+function usageTotalsLine(t: UsageTotals): string {
+  const parts = [
+    `${t.turns} turns`,
+    `in ${formatTokens(t.input_tokens)}`,
+    `out ${formatTokens(t.output_tokens)}`,
+    `cache_r ${formatTokens(t.cache_read_tokens)}`,
+  ];
+  if (t.reasoning_tokens > 0) parts.push(`reasoning ${formatTokens(t.reasoning_tokens)}`);
+  parts.push(formatCost(t));
+  return parts.join("  ");
+}
+
+/** Usage block appended to `agvsr status <id>`. Empty when nothing was accounted. */
+export function formatJobUsage(usage: JobUsage): string[] {
+  if (usage.totals.turns === 0) return ["usage: (none recorded)"];
+  const lines = [`usage: ${usageTotalsLine(usage.totals)}`];
+  for (const r of usage.by_role) {
+    lines.push(
+      `  ${r.role.padEnd(18)} ${r.adapter.padEnd(12)} ${r.model.padEnd(22)} ` +
+        `${String(r.turns).padStart(4)} turns  ${formatCost(r).padStart(9)}`,
+    );
+  }
+  return lines;
+}
+
+/** Full `agvsr usage` rendering: totals, then role and job breakdowns. */
+export function formatUsageReport(
+  report: { totals: UsageTotals; by_role: UsageBreakdown[]; by_job: UsageByJob[] },
+  jobId?: string,
+): string[] {
+  const lines = [`${jobId ? `job ${jobId}` : "TOTAL"}  ${usageTotalsLine(report.totals)}`];
+  if (report.totals.cost_partial) {
+    lines.push("(+ = lower bound: codex/agy turns report tokens but no cost)");
+  }
+
+  lines.push("", "by role:");
+  lines.push(
+    `  ${"ROLE".padEnd(18)} ${"ADAPTER".padEnd(12)} ${"MODEL".padEnd(22)} ` +
+      `${"TURNS".padStart(5)} ${"INPUT".padStart(8)} ${"OUTPUT".padStart(8)} ` +
+      `${"CACHE_R".padStart(8)} ${"COST".padStart(9)}`,
+  );
+  for (const r of report.by_role) {
+    lines.push(
+      `  ${r.role.padEnd(18)} ${r.adapter.padEnd(12)} ${r.model.padEnd(22)} ` +
+        `${String(r.turns).padStart(5)} ${formatTokens(r.input_tokens).padStart(8)} ` +
+        `${formatTokens(r.output_tokens).padStart(8)} ` +
+        `${formatTokens(r.cache_read_tokens).padStart(8)} ${formatCost(r).padStart(9)}`,
+    );
+  }
+
+  if (!jobId) {
+    lines.push("", "by job:");
+    lines.push(
+      `  ${"JOB".padEnd(36)} ${"STATUS".padEnd(11)} ${"TURNS".padStart(5)} ` +
+        `${"COST".padStart(9)}  GOAL`,
+    );
+    for (const j of report.by_job) {
+      lines.push(
+        `  ${j.job_id.padEnd(36)} ${j.status.padEnd(11)} ${String(j.turns).padStart(5)} ` +
+          `${formatCost(j).padStart(9)}  ${j.goal.split("\n")[0]}`,
+      );
+    }
+  }
+  return lines;
 }
 
 /** Compact human duration: 45s, 12m, 1h03m. */
@@ -573,8 +661,10 @@ async function main(argv: string[]): Promise<void> {
       await withClient(async (c) => {
         const jobId = rest[0];
         if (jobId) {
-          const { job, runtime } = unwrap(
-            await c.request<{ job: Job; runtime: JobRuntime }>("job.get", { id: jobId }),
+          const { job, runtime, usage } = unwrap(
+            await c.request<{ job: Job; runtime: JobRuntime; usage: JobUsage }>("job.get", {
+              id: jobId,
+            }),
           );
           const { messages } = unwrap(
             await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId }),
@@ -588,6 +678,7 @@ async function main(argv: string[]): Promise<void> {
           console.log(`created_at: ${job.created_at}`);
           console.log(`updated_at: ${job.updated_at}`);
           console.log(`messages: ${messages.length}`);
+          for (const line of formatJobUsage(usage)) console.log(line);
           if (last) {
             console.log(`last_message_at: ${last.created_at}`);
             console.log(
@@ -881,6 +972,36 @@ async function main(argv: string[]): Promise<void> {
         }
       });
       return;
+
+    case "usage": {
+      const { values: usageOpts, positionals: usageArgs } = parseArgs({
+        args: rest,
+        options: { json: { type: "boolean", default: false } },
+        allowPositionals: true,
+      });
+      const jobId = usageArgs[0];
+      await withClient(async (c) => {
+        const report = unwrap(
+          await c.request<{
+            totals: UsageTotals;
+            by_role: UsageBreakdown[];
+            by_job: UsageByJob[];
+          }>("usage.report", jobId ? { job_id: jobId } : {}),
+        );
+        if (usageOpts.json) {
+          console.log(JSON.stringify(report, null, 2));
+          return;
+        }
+        if (report.totals.turns === 0) {
+          console.log(
+            jobId ? `no accounted turns for job ${jobId}` : "no accounted turns recorded yet",
+          );
+          return;
+        }
+        for (const line of formatUsageReport(report, jobId)) console.log(line);
+      });
+      return;
+    }
 
     case "cleanup": {
       const { values: cleanupOpts } = parseArgs({

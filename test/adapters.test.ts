@@ -100,6 +100,48 @@ describe("claude driver", () => {
     expect(p.finalText()).toBe("hi ");
   });
 
+  it("scrapes token/cost accounting off the result event (D32)", () => {
+    const p = claudeDriver.createParser();
+    expect(p.usage?.()).toBeNull(); // nothing until the terminal event arrives
+    drain(p, [
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        result: "ok",
+        session_id: "S1",
+        total_cost_usd: 0.0159549,
+        usage: {
+          input_tokens: 10,
+          output_tokens: 41,
+          cache_read_input_tokens: 11609,
+          cache_creation_input_tokens: 7014,
+        },
+      }),
+    ]);
+    // claude already reports input exclusive of cache reads, so it passes through as-is.
+    expect(p.usage?.()).toEqual({
+      input_tokens: 10,
+      output_tokens: 41,
+      cache_read_tokens: 11609,
+      cache_write_tokens: 7014,
+      reasoning_tokens: null,
+      cost_usd: 0.0159549,
+    });
+  });
+
+  it("reports null fields rather than zeros when the result event omits usage", () => {
+    const p = claudeDriver.createParser();
+    drain(p, [JSON.stringify({ type: "result", subtype: "success", result: "ok" })]);
+    expect(p.usage?.()).toEqual({
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
+      reasoning_tokens: null,
+      cost_usd: null,
+    });
+  });
+
   it("warns on obvious Claude shorthand model typos but not canonical IDs", () => {
     expect(claudeDriver.validateModel?.("opus-4.8")).toEqual([
       expect.objectContaining({
@@ -236,6 +278,41 @@ describe("codex driver", () => {
     ]);
     expect(p.sessionId()).toBe("T9");
   });
+
+  it("normalizes cache-inclusive input tokens down to uncached input (D32)", () => {
+    const p = codexDriver.createParser();
+    drain(p, [
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 14832,
+          cached_input_tokens: 11008,
+          cache_write_input_tokens: 0,
+          output_tokens: 5,
+          reasoning_output_tokens: 128,
+        },
+      }),
+    ]);
+    expect(p.usage?.()).toEqual({
+      input_tokens: 14832 - 11008,
+      output_tokens: 5,
+      cache_read_tokens: 11008,
+      cache_write_tokens: 0,
+      reasoning_tokens: 128,
+      cost_usd: null, // codex reports no cost at all
+    });
+  });
+
+  it("never produces a negative input count if cached exceeds the reported total", () => {
+    const p = codexDriver.createParser();
+    drain(p, [
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 100, cached_input_tokens: 500 },
+      }),
+    ]);
+    expect(p.usage?.()?.input_tokens).toBe(0);
+  });
 });
 
 describe("agy driver", () => {
@@ -259,6 +336,8 @@ describe("agy driver", () => {
     expect(events).toEqual([{ kind: "text", text: "BANANA" }]);
     expect(p.sessionId()).toBeNull();
     expect(p.finalText()).toBe("BANANA");
+    // agy reports no accounting at all — the optional hook stays unimplemented (D32).
+    expect(p.usage).toBeUndefined();
   });
 
   it("resolves a new conversation id by diffing the conversations dir", () => {

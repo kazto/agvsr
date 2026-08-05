@@ -102,6 +102,22 @@ through that pane's agent directly — the "front-desk" agent that called `agvsr
 in addition to the usual hooks/Web push (see
 [docs/design-herdr-integration.md](docs/design-herdr-integration.md)).
 
+### Cost visibility
+
+A job's supervisor turns once per worker message, so one job burns far more of your
+plan quota than an interactive session does. agvsr records every turn's token counts
+(and, for claude-code, its reported cost) and aggregates them by role:
+
+```sh
+agvsr status <job-id>   # usage block for that one job
+agvsr usage             # totals plus per-role and per-job breakdowns, costliest first
+agvsr usage --json      # same data, machine-readable
+```
+
+Costs are only reported by claude-code and are list-price estimates, so a `+` suffix
+(`$4.20+`) marks a figure that is a lower bound because codex/agy turns contributed
+tokens but no cost. See [docs/design-cost-visibility.md](docs/design-cost-visibility.md).
+
 ## Configuration: `team.yaml`
 
 `team.yaml` is the source of truth for a team. Generate one with `agvsr init` or
@@ -257,6 +273,7 @@ by the skill.
 | `agvsr wait <job-id>... [--poll-sec N] [--timeout-sec N]` | Block until each job needs approval or reaches a terminal status |
 | `agvsr reload`                                            | Reload `team.yaml` without restarting the daemon                 |
 | `agvsr team`                                              | Show configured roles                                            |
+| `agvsr usage [job-id] [--json]`                           | Token/cost accounting per job and per role                       |
 | `agvsr cleanup [--apply]`                                 | Report (or remove) job worktrees/branches safe to delete         |
 | `agvsr doctor [--team F] [--json] [--probe]`              | Check adapter CLIs and auth; exit 0 if all pass                  |
 

@@ -59,6 +59,43 @@ export interface JobRuntime {
   idle_since_progress_ms?: Record<string, number>;
 }
 
+/**
+ * Aggregated turn accounting (D32). Token counts are normalized across adapters
+ * (`input_tokens` is always uncached input). `cost_usd` only accumulates what the
+ * adapters actually report — today that is claude-code alone — so `cost_partial`
+ * marks a group whose cost is a lower bound rather than a full figure.
+ */
+export interface UsageTotals {
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  cost_usd: number;
+  /** True when at least one turn in the group reported no cost. */
+  cost_partial: boolean;
+}
+
+/** Per role/adapter/model slice of a `UsageTotals` aggregate. */
+export interface UsageBreakdown extends UsageTotals {
+  role: string;
+  adapter: string;
+  model: string;
+}
+
+/** Per-job slice, used by the cross-job `usage.report`. */
+export interface UsageByJob extends UsageTotals {
+  job_id: string;
+  goal: string;
+  status: JobStatus;
+}
+
+export interface JobUsage {
+  totals: UsageTotals;
+  by_role: UsageBreakdown[];
+}
+
 export type MessageKind = "message" | "escalation" | "completion" | "failure" | "note";
 
 export interface Message {
@@ -135,6 +172,7 @@ export type Request =
       method: "job.mergeInstance";
       params: { job_id: string; role: string };
     }
+  | { id: string; type: "request"; method: "usage.report"; params?: { job_id?: string } }
   | { id: string; type: "request"; method: "daemon.stop"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 

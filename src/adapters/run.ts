@@ -187,6 +187,10 @@ export async function runTurn(
     parser.sessionId() ??
     (driver.resolveSessionId && before ? driver.resolveSessionId(spec, before) : null);
 
+  // Present only if the CLI emitted its terminal accounting event. A killed or
+  // timed-out turn usually never gets there, so usage is legitimately absent (D32).
+  const usage = parser.usage?.() ?? null;
+
   return {
     events,
     outcome: {
@@ -196,6 +200,7 @@ export async function runTurn(
       exitCode,
       timedOut,
       ...(timeoutKind ? { timeoutKind } : {}),
+      ...(usage ? { usage } : {}),
     },
   };
 }

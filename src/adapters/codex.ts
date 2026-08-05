@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { codexMcpConfigArgs } from "./mcp.ts";
-import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser } from "./types.ts";
+import type { AgentSpec, CliDriver, SpawnSpec, TurnEvent, TurnParser, TurnUsage } from "./types.ts";
 
 /**
  * A job's cwd is a linked git worktree: its `.git` is a file pointing at the real
@@ -39,11 +39,24 @@ function resolveGitWritableRoots(cwd: string): string[] {
   }
 }
 
+interface CodexUsage {
+  /** Cache-inclusive total, unlike claude's exclusive input_tokens. */
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  cache_write_input_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+}
+
 interface CodexEvent {
   type?: string;
   thread_id?: string;
   item?: { type?: string; text?: string };
+  /** Only on the terminal `turn.completed` event (D32). */
+  usage?: CodexUsage;
 }
+
+const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
 export function withCharterPreamble(systemPrompt: string, message: string): string {
   return `${systemPrompt}\n\n---\n\n${message}`;
@@ -52,6 +65,7 @@ export function withCharterPreamble(systemPrompt: string, message: string): stri
 function createParser(): TurnParser {
   let session: string | null = null;
   let text = "";
+  let usage: TurnUsage | null = null;
 
   return {
     push(line: string): TurnEvent[] {
@@ -77,6 +91,17 @@ function createParser(): TurnParser {
       }
 
       if (ev.type === "turn.completed") {
+        const total = num(ev.usage?.input_tokens);
+        const cached = num(ev.usage?.cached_input_tokens);
+        usage = {
+          // Normalize to uncached input so totals are comparable with claude's (D32).
+          input_tokens: total === null ? null : Math.max(0, total - (cached ?? 0)),
+          output_tokens: num(ev.usage?.output_tokens),
+          cache_read_tokens: cached,
+          cache_write_tokens: num(ev.usage?.cache_write_input_tokens),
+          reasoning_tokens: num(ev.usage?.reasoning_output_tokens),
+          cost_usd: null, // codex reports no cost
+        };
         return [{ kind: "result", ok: true, text }];
       }
 
@@ -84,6 +109,7 @@ function createParser(): TurnParser {
     },
     sessionId: () => session,
     finalText: () => text,
+    usage: () => usage,
   };
 }
 

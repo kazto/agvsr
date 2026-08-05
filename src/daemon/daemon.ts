@@ -690,6 +690,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
     debug("dispatch done", { job: job.id, role, exitCode: result.outcome.exitCode });
 
+    // Record accounting before the kill check below: the tokens were spent even if
+    // the job was stopped mid-turn, and hiding that would understate the real cost (D32).
+    if (result.outcome.usage) {
+      store.recordTurnUsage({
+        job_id: job.id,
+        role,
+        adapter: roleConfig.adapter,
+        model: roleConfig.model,
+        usage: result.outcome.usage,
+      });
+    }
+
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
 
     // If the job was killed or stopped during the turn, skip further processing.
@@ -1179,8 +1191,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "job.get": {
         const job = store.getJob(req.params.id);
         return job
-          ? ok(req.id, { job, runtime: computeRuntime(job) })
+          ? ok(req.id, { job, runtime: computeRuntime(job), usage: store.jobUsage(job.id) })
           : err(req.id, "not_found", `no job ${req.params.id}`);
+      }
+
+      case "usage.report": {
+        const jobId = req.params?.job_id;
+        if (jobId && !store.getJob(jobId)) return err(req.id, "not_found", `no job ${jobId}`);
+        return ok(req.id, store.usageReport(jobId));
       }
 
       case "team.get": {
