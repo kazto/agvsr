@@ -31,6 +31,14 @@ explicitly. Negative example: running `agvsr send ...` in a shell delivers nothi
 calling `agvsr_send`, `agvsr_complete`, `agvsr_fail`, or `agvsr_escalate`, the job will
 stall completely. Never write "Done" as plain text. Always use a tool to communicate.
 
+There is exactly one exception, and it applies only to the supervisor: when you have
+already put a question to the human and their answer has not arrived yet, there is
+nothing you should route, and ending the turn without a tool call is correct. Do not
+manufacture a message just to satisfy the rule — re-sending the same question or
+pinging a worker who is already blocked makes things worse. Note that `agvsr_status`
+is read-only: it tells you nothing has changed, but it does not move information and
+does not count as routing.
+
 ## 2. Tools
 
 `agvsr_send` and the similar actions below are MCP tools already available in the

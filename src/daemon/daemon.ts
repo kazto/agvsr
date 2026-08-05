@@ -141,6 +141,13 @@ const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 /** Default hard (wall-clock) timeout — safety cap for long but progressing turns. */
 const DEFAULT_HARD_TIMEOUT_MS = 60 * 60 * 1000;
 
+/**
+ * Consecutive supervisor turns that route nothing before the job is failed (D36).
+ * Earlier turns get an explanatory nudge instead — and a supervisor waiting on an
+ * unanswered question to the human is never counted at all.
+ */
+const MAX_SUPERVISOR_IDLE_TURNS = 3;
+
 /** How long a shutdown waits for in-flight turns before aborting them. */
 const DEFAULT_SHUTDOWN_DRAIN_MS = 10_000;
 /** Extra window for aborted turns to unwind after their subprocess is killed. */
@@ -501,6 +508,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const noProgressCounts = new Map<string, Map<string, number>>();
   const loopFingerprints = new Map<string, Map<string, { fp: string; count: number }>>();
   const loopEscalationCounts = new Map<string, number>();
+  // Consecutive supervisor turns that routed nothing, keyed by job id (D36).
+  const supervisorIdleTurns = new Map<string, number>();
   const inflight = new Map<string, Promise<void>>();
   const pendingDispatches = new Set<Promise<void>>();
   const stallNotified = new Set<string>();
@@ -518,6 +527,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const jobWatchers = new Set<(frame: PushFrame) => boolean>();
   // Deferred close trigger for daemon.stop.
   let doClose: () => Promise<void> = async () => {};
+  // Set the moment shutdown begins, so no new turns are queued behind the drain.
+  let closing = false;
 
   if (team) {
     emitTeamModelWarnings(team, "startup");
@@ -587,6 +598,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   const resetFailure = (jobId: string, role: string): void => {
     failureCounts.get(jobId)?.set(role, 0);
+  };
+
+  /**
+   * True when the supervisor has put a question to the human that is still
+   * unanswered (D36). In that state the supervisor has nothing it *should* route
+   * — the correct move is to wait — so a turn ending without routing is normal.
+   */
+  const isAwaitingUserReply = (jobId: string): boolean => {
+    let askedAt = -1;
+    let answeredAt = -1;
+    const messages = store.listMessages(jobId); // ascending by created_at
+    for (const [i, m] of messages.entries()) {
+      if (m.from_role === SUPERVISOR && m.to_role === "user") askedAt = i;
+      else if (m.from_role === "user") answeredAt = i;
+    }
+    return askedAt > answeredAt;
   };
 
   const byRole = <V>(map: Map<string, Map<string, V>>, jobId: string): Map<string, V> => {
@@ -762,6 +789,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       });
     }
 
+    if (role === SUPERVISOR && routedByRole) supervisorIdleTurns.delete(job.id);
+
     if (
       role === SUPERVISOR &&
       result.outcome.exitCode === 0 &&
@@ -769,9 +798,45 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       finalText &&
       !routedByRole
     ) {
+      // A supervisor waiting on the human has nothing it should route, and the
+      // charter explicitly tells it to wait for approval — so this is a normal
+      // place for a turn to end, not a dead job (D36). It used to hard-fail here,
+      // stranding work that was otherwise fine. The job simply idles; if the human
+      // never answers, the stall watchdog is what reports it.
+      if (isAwaitingUserReply(job.id)) {
+        debug("supervisor idle while awaiting user reply", { job: job.id });
+        return;
+      }
+
+      const idleTurns = (supervisorIdleTurns.get(job.id) ?? 0) + 1;
+      supervisorIdleTurns.set(job.id, idleTurns);
+
+      if (idleTurns < MAX_SUPERVISOR_IDLE_TURNS) {
+        // Nudge instead of failing. One unproductive turn is not a dead job, and
+        // worker roles have always been given exactly this second chance below.
+        const body =
+          `Your last turn ended with assistant text but routed no message, and no ` +
+          `question to the human is outstanding, so nothing will happen until you act ` +
+          `(${idleTurns}/${MAX_SUPERVISOR_IDLE_TURNS} before the job is failed).\n\n` +
+          `Route the work forward: delegate with agvsr_send, ask the human with ` +
+          `agvsr_escalate, or finish with agvsr_complete/agvsr_fail. Note that ` +
+          `agvsr_status is read-only and does not count as routing.\n\n` +
+          `Your last text:\n${finalText}`;
+        createMsg({
+          job_id: job.id,
+          from_role: "daemon",
+          to_role: SUPERVISOR,
+          kind: "escalation",
+          body,
+        });
+        enqueueDispatch(job, SUPERVISOR, body);
+        return;
+      }
+
       const reason =
-        "supervisor turn ended with assistant text but no agvsr tool call was recorded; " +
-        "the text was saved to the audit log, but no work was routed and the job cannot progress.";
+        `supervisor ended ${idleTurns} consecutive turns with assistant text but routed no ` +
+        "message, with no question to the human outstanding; the text was saved to the audit " +
+        "log, but no work was routed and the job cannot progress.";
       setStatus(job.id, "failed");
       createMsg({
         job_id: job.id,
@@ -916,6 +981,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   };
 
   const enqueueDispatch = (job: Job, role: string, message: string): void => {
+    // Shutdown drains the dispatches that exist when it starts; anything queued
+    // after that would outlive store.close() and blow up on a closed database.
+    // Several result paths enqueue follow-up turns (the worker no-route escalation,
+    // the supervisor idle nudge), so the guard belongs here rather than at each site.
+    if (closing) {
+      debug("dispatch refused, daemon closing", { job: job.id, role });
+      return;
+    }
     const key = `${job.id}:${role}`;
     stallNotified.delete(job.id);
     const previous = inflight.get(key) ?? Promise.resolve();
@@ -1573,6 +1646,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
   const close = async (): Promise<void> => {
     debug("closing");
+    closing = true;
     if (stallWatchdog) {
       clearInterval(stallWatchdog);
       stallWatchdog = null;

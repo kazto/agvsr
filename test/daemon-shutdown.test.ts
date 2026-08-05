@@ -161,6 +161,53 @@ describe("bounded shutdown drain (fix B)", () => {
     cleanup(h.sock, h.db, `${h.db}-wal`, `${h.db}-shm`, h.repo);
   });
 
+  it("refuses to queue follow-up turns once shutdown has begun", async () => {
+    // Several result paths enqueue a follow-up turn (the worker no-route escalation,
+    // the supervisor idle nudge). One queued after the drain snapshot would run past
+    // store.close() and throw "Cannot use a closed database" from a detached promise.
+    const base = tmpBase("closing");
+    const sock = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const repo = `${base}-repo`;
+    mkdirSync(repo, { recursive: true });
+
+    let calls = 0;
+    let release = (): void => {};
+    const gate = new Promise<void>((r) => (release = r));
+
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const daemon = await startDaemon({
+      endpoint: sock,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      shutdownDrainMs: 5000,
+      turnRunner: async (d: TurnDispatch) => {
+        calls++;
+        await gate;
+        // Text but no routing: normally this queues a nudge turn.
+        return {
+          events: [],
+          outcome: { sessionId: `${d.role}-s`, finalText: "thinking out loud", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sock);
+    await c.request<{ job: Job }>("job.create", { goal: "queues a follow-up", cwd: repo });
+    for (let i = 0; i < 100 && calls < 1; i++) await Bun.sleep(5);
+    expect(calls).toBe(1);
+    c.close();
+
+    const closed = daemon.close(); // sets the closing flag, then drains
+    release();
+    await closed;
+
+    await Bun.sleep(100);
+    expect(calls).toBe(1); // the nudge turn was refused, not queued behind the drain
+    cleanup(sock, db, `${db}-wal`, `${db}-shm`, repo);
+  });
+
   it("closes immediately when nothing is in flight", async () => {
     const h = await makeHangingDaemon({ shutdownDrainMs: 5000 });
     const t0 = Date.now();

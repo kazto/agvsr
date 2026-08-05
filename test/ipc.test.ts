@@ -754,7 +754,7 @@ describe("CLI <-> daemon over local IPC", () => {
     }
   });
 
-  it("fails a supervisor turn that ends with text but no agvsr tool call", async () => {
+  it("fails a supervisor that keeps ending turns without routing anything", async () => {
     const base = join(tmpdir(), `agvsr-no-tool-test-${randomUUID()}`);
     const sockLocal = `${base}.sock`;
     const db = `${base}.sqlite`;
@@ -798,9 +798,16 @@ describe("CLI <-> daemon over local IPC", () => {
           m.body.includes("tool call was cancelled"),
       ),
     ).toBe(true);
+    // Nudged first, failed only once the supervisor kept going idle (D36).
     expect(
       logs.result.messages.some(
-        (m) => m.kind === "failure" && m.body.includes("no agvsr tool call"),
+        (m) =>
+          m.kind === "escalation" && m.to_role === "supervisor" && m.body.includes("routed no"),
+      ),
+    ).toBe(true);
+    expect(
+      logs.result.messages.some(
+        (m) => m.kind === "failure" && m.body.includes("consecutive turns"),
       ),
     ).toBe(true);
 

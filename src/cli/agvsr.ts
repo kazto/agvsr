@@ -91,11 +91,18 @@ function usageTotalsLine(t: UsageTotals): string {
   return parts.join("  ");
 }
 
-/** Usage block appended to `agvsr status <id>`. Empty when nothing was accounted. */
-export function formatJobUsage(usage: JobUsage): string[] {
-  if (usage.totals.turns === 0) return ["usage: (none recorded)"];
+/**
+ * Usage block appended to `agvsr status <id>`.
+ *
+ * `usage` is optional because a daemon older than the accounting feature answers
+ * `job.get` without it, and a CLI is routinely newer than the daemon it talks to
+ * (the daemon only picks up new code on restart). Treat a missing payload the same
+ * as an empty one rather than crashing the whole status command.
+ */
+export function formatJobUsage(usage: JobUsage | undefined): string[] {
+  if (!usage?.totals || usage.totals.turns === 0) return ["usage: (none recorded)"];
   const lines = [`usage: ${usageTotalsLine(usage.totals)}`];
-  for (const r of usage.by_role) {
+  for (const r of usage.by_role ?? []) {
     lines.push(
       `  ${r.role.padEnd(18)} ${r.adapter.padEnd(12)} ${r.model.padEnd(22)} ` +
         `${String(r.turns).padStart(4)} turns  ${formatCost(r).padStart(9)}`,
@@ -707,7 +714,8 @@ async function main(argv: string[]): Promise<void> {
         const jobId = rest[0];
         if (jobId) {
           const { job, runtime, usage } = unwrap(
-            await c.request<{ job: Job; runtime: JobRuntime; usage: JobUsage }>("job.get", {
+            // usage is optional on the wire: an older daemon does not send it.
+            await c.request<{ job: Job; runtime: JobRuntime; usage?: JobUsage }>("job.get", {
               id: jobId,
             }),
           );
