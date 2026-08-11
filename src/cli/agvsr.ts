@@ -1249,15 +1249,27 @@ Usage: agvsr web [options]
   --port <port>     TCP bind port (default: random free port)
   --socket <path>   Unix socket path (default on POSIX: ${process.env.AGVSR_WEB_SOCK ?? "configDir()/web.sock"})
   -h, --help        Show this help
+
+Environment:
+  AGVSR_WEB_EXTRA_ORIGINS  Comma-separated extra Origins to accept on
+                           state-changing requests (e.g. a public hostname
+                           fronted by a reverse proxy you trust, such as a
+                           Cloudflare Tunnel). Bare loopback origins are
+                           always accepted regardless of this setting.
 `);
         return;
       }
 
       const { startWebGateway } = await import("../web/server.ts");
+      const extraOrigins = (process.env.AGVSR_WEB_EXTRA_ORIGINS ?? "")
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean);
       const web = await startWebGateway({
         host: values.host,
         port: values.port ? Number(values.port) : undefined,
         socket: values.socket,
+        extraOrigins,
       });
       console.log(`agvsr web listening on ${web.endpoint}`);
       console.log(`startup token: ${web.startupToken}`);

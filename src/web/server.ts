@@ -14,6 +14,16 @@ export interface WebGatewayOptions {
   host?: string;
   port?: number;
   socket?: string;
+  /**
+   * Additional Origin values to accept on state-changing requests, beyond the
+   * loopback origins derived from the bind address. For a gateway reached only
+   * via localhost this stays empty; it exists for the case where a reverse
+   * proxy the operator trusts (e.g. a Cloudflare Tunnel terminating TLS for a
+   * public hostname) forwards requests whose Origin reflects that public
+   * hostname rather than the loopback address the gateway is bound to. Each
+   * value must be a full origin (`https://agvsr.example.com`, no path).
+   */
+  extraOrigins?: string[];
 }
 
 export interface WebGateway {
@@ -48,9 +58,20 @@ function loopbackOrigins(port?: number): Set<string> {
   return new Set([`http://localhost:${p}`, `http://127.0.0.1:${p}`, `http://[::1]:${p}`]);
 }
 
-function originsForUrl(url: URL): Set<string> {
-  if (url.protocol === "unix:") return loopbackOrigins();
-  return loopbackOrigins(Number(url.port));
+function originsForUrl(url: URL, extra: string[] = []): Set<string> {
+  const base = url.protocol === "unix:" ? loopbackOrigins() : loopbackOrigins(Number(url.port));
+  for (const raw of extra) {
+    // Reject anything that doesn't parse to a bare origin (no path/query/hash) —
+    // this allowlist gates CSRF protection, so a malformed entry should be
+    // dropped rather than silently widened into something broader than intended.
+    try {
+      const parsed = new URL(raw);
+      if (parsed.origin === raw) base.add(parsed.origin);
+    } catch {
+      // ignore malformed entries
+    }
+  }
+  return base;
 }
 
 async function loadClientSource(path: string): Promise<string> {
@@ -230,7 +251,7 @@ export async function startWebGateway(options: WebGatewayOptions = {}): Promise<
       });
       endpoint = server.url.toString();
     }
-    ctx.originAllowlist = originsForUrl(server.url);
+    ctx.originAllowlist = originsForUrl(server.url, options.extraOrigins ?? []);
   } catch (err) {
     await daemon.close();
     await stream?.close();
