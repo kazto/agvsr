@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { runTurn } from "../src/adapters/run.ts";
+import { childProcessEnv, runTurn } from "../src/adapters/run.ts";
 import type { AgentSpec, CliDriver, TurnParser, TurnUsage } from "../src/adapters/types.ts";
 
 const spec: AgentSpec = {
@@ -131,6 +131,45 @@ function slowDriver(): CliDriver {
 }
 
 describe("runTurn", () => {
+  it("removes the daemon's Herdr location before applying the job context", () => {
+    const env = childProcessEnv(
+      {
+        PATH: "/bin",
+        HERDR_ENV: "1",
+        HERDR_WORKSPACE_ID: "daemon-workspace",
+        HERDR_PANE_ID: "daemon-pane",
+        HERDR_TAB_ID: "daemon-tab",
+        HERDR_STARTUP_CWD: "/daemon/cwd",
+        HERDR_SESSION: "daemon-session",
+        HERDR_SOCKET_PATH: "/shared/herdr.sock",
+      },
+      {
+        HERDR_ENV: "1",
+        HERDR_WORKSPACE_ID: "job-workspace",
+        HERDR_PANE_ID: "job-pane",
+      },
+    );
+
+    expect(env.HERDR_WORKSPACE_ID).toBe("job-workspace");
+    expect(env.HERDR_PANE_ID).toBe("job-pane");
+    expect(env.HERDR_SESSION).toBeUndefined();
+    expect(env.HERDR_TAB_ID).toBeUndefined();
+    expect(env.HERDR_STARTUP_CWD).toBeUndefined();
+    expect(env.HERDR_SOCKET_PATH).toBe("/shared/herdr.sock");
+  });
+
+  it("does not expose the daemon's Herdr location to a standalone job", () => {
+    const env = childProcessEnv({
+      HERDR_ENV: "1",
+      HERDR_WORKSPACE_ID: "daemon-workspace",
+      HERDR_PANE_ID: "daemon-pane",
+    });
+
+    expect(env.HERDR_ENV).toBeUndefined();
+    expect(env.HERDR_WORKSPACE_ID).toBeUndefined();
+    expect(env.HERDR_PANE_ID).toBeUndefined();
+  });
+
   it("streams parsed events and synthesizes a result", async () => {
     const { events, outcome } = await runTurn(fakeDriver({ sessionId: "SID" }), spec, null, "go");
     expect(events.filter((e) => e.kind === "text").map((e) => (e as any).text)).toEqual([

@@ -8,6 +8,29 @@ import type { AgentSpec, CliDriver, TurnEvent, TurnResult } from "./types.ts";
 
 const STDERR_TAIL_CAP = 8192;
 
+// These values describe the pane/workspace that launched the daemon. A daemon
+// serves jobs from multiple Herdr workspaces, so blindly inheriting them makes
+// every worker believe it belongs to the daemon's own workspace. The daemon
+// supplies the submitting job's context explicitly through spec.env instead.
+const HERDR_CONTEXT_KEYS = [
+  "HERDR_ENV",
+  "HERDR_WORKSPACE_ID",
+  "HERDR_PANE_ID",
+  "HERDR_TAB_ID",
+  "HERDR_STARTUP_CWD",
+  "HERDR_SESSION",
+] as const;
+
+export function childProcessEnv(
+  parent: Record<string, string | undefined>,
+  runtime: Record<string, string> = {},
+  adapter: Record<string, string> = {},
+): Record<string, string | undefined> {
+  const env = { ...parent };
+  for (const key of HERDR_CONTEXT_KEYS) delete env[key];
+  return { ...env, ...runtime, ...adapter };
+}
+
 function appendTailChunk(chunks: Uint8Array[], chunk: Uint8Array, cap: number): number {
   if (chunk.length >= cap) {
     chunks.length = 0;
@@ -61,7 +84,7 @@ export async function runTurn(
   try {
     proc = Bun.spawn([bin, ...args], {
       cwd: spec.cwd,
-      env: { ...process.env, ...spec.env, ...env },
+      env: childProcessEnv(process.env, spec.env, env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
