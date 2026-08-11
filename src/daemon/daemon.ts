@@ -807,6 +807,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           AGVSR_JOB_ID: job.id,
           AGVSR_ALLOWED: allowedTargets(jobTeam, role).join(","),
           AGVSR_JOB_BRANCH: effectiveBranch ?? "",
+          ...(job.workspace_id
+            ? {
+                HERDR_ENV: "1",
+                HERDR_WORKSPACE_ID: job.workspace_id,
+                ...(job.caller_pane_id ? { HERDR_PANE_ID: job.caller_pane_id } : {}),
+                ...(job.herdr_session ? { HERDR_SESSION: job.herdr_session } : {}),
+              }
+            : {}),
         },
       });
     } finally {

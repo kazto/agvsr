@@ -76,10 +76,11 @@ async function makeDaemon(
 describe("herdr integration (D29-D31)", () => {
   it("resolves and stores the herdr workspace name at job creation", async () => {
     const { client, calls } = makeFakeHerdrClient("agvsr");
-    const { daemon, sock, db, repo } = await makeDaemon(client, async (d) => ({
-      events: [],
-      outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
-    }));
+    const seen: TurnDispatch[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(client, async (d) => {
+      seen.push(d);
+      return { events: [], outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 } };
+    });
     const c = await Client.connect(sock);
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "herdr mode job",
@@ -95,6 +96,11 @@ describe("herdr integration (D29-D31)", () => {
     expect(job?.caller_pane_id).toBe("w1:p1");
     expect(job?.herdr_session).toBe("work");
     expect(calls.resolveWorkspaceName).toEqual([{ workspaceId: "w1", session: "work" }]);
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    expect(seen[0]?.env.HERDR_ENV).toBe("1");
+    expect(seen[0]?.env.HERDR_WORKSPACE_ID).toBe("w1");
+    expect(seen[0]?.env.HERDR_PANE_ID).toBe("w1:p1");
+    expect(seen[0]?.env.HERDR_SESSION).toBe("work");
 
     c.close();
     await daemon.close();
@@ -103,10 +109,11 @@ describe("herdr integration (D29-D31)", () => {
 
   it("leaves workspace fields null in standalone mode (no herdr params)", async () => {
     const { client, calls } = makeFakeHerdrClient("agvsr");
-    const { daemon, sock, db, repo } = await makeDaemon(client, async (d) => ({
-      events: [],
-      outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 },
-    }));
+    const seen: TurnDispatch[] = [];
+    const { daemon, sock, db, repo } = await makeDaemon(client, async (d) => {
+      seen.push(d);
+      return { events: [], outcome: { sessionId: `${d.role}-s`, finalText: "", exitCode: 0 } };
+    });
     const c = await Client.connect(sock);
     const created = await c.request<{ job: Job }>("job.create", {
       goal: "standalone job",
@@ -118,6 +125,10 @@ describe("herdr integration (D29-D31)", () => {
     expect(job?.workspace_name).toBeNull();
     expect(job?.caller_pane_id).toBeNull();
     expect(calls.resolveWorkspaceName).toEqual([]);
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+    expect(seen[0]?.env.HERDR_ENV).toBeUndefined();
+    expect(seen[0]?.env.HERDR_WORKSPACE_ID).toBeUndefined();
+    expect(seen[0]?.env.HERDR_PANE_ID).toBeUndefined();
 
     c.close();
     await daemon.close();
