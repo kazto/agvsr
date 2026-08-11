@@ -23,8 +23,7 @@ import type {
   Response,
   RoleSummary,
   RoleWorktree,
-  UsageBreakdown,
-  UsageByJob,
+  UsageReport,
   UsageTotals,
 } from "../protocol.ts";
 
@@ -49,7 +48,8 @@ Usage:
                                     Block until each job needs approval or finishes
   agvsr reload                      Reload team.yaml without restarting the daemon
   agvsr team                        Show configured roles
-  agvsr usage [job-id] [--json]     Show token/cost accounting per job and per role
+  agvsr usage [job-id] [--since D] [--hourly] [--json]
+                                    Show token/cost accounting, optionally over a rolling window
   agvsr cleanup [--apply]           Report (or remove) job worktrees/branches safe to delete
   agvsr web [--host H] [--port N] [--socket P]  Run the local web gateway
   agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
@@ -64,9 +64,39 @@ function normalizeCwd(input: string): string {
 
 /** Compact token count: 812, 12.3k, 1.24M — keeps the usage columns narrow. */
 export function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
+  if (n < 1000) return Number.isInteger(n) ? String(n) : n.toFixed(1);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+const HOUR_MS = 3_600_000;
+const MAX_USAGE_WINDOW_MS = 30 * 24 * HOUR_MS;
+
+/** Parse a compact positive duration accepted by `agvsr usage --since` (D40). */
+export function parseUsageDuration(value: string): number {
+  const match = /^(\d+)(m|h|d)$/.exec(value);
+  if (!match) throw new RangeError("--since must be a positive integer followed by m, h, or d");
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit === "m" ? 60_000 : unit === "h" ? HOUR_MS : 24 * HOUR_MS;
+  const ms = amount * multiplier;
+  if (!Number.isSafeInteger(ms) || ms <= 0) throw new RangeError("--since must be positive");
+  if (ms > MAX_USAGE_WINDOW_MS) throw new RangeError("--since must not exceed 30d");
+  return ms;
+}
+
+export function formatUsageDuration(ms: number): string {
+  if (ms % (24 * HOUR_MS) === 0) return `${ms / (24 * HOUR_MS)}d`;
+  if (ms % HOUR_MS === 0) return `${ms / HOUR_MS}h`;
+  return `${ms / 60_000}m`;
+}
+
+export function resolveUsageWindow(since: string | undefined, hourly: boolean): number | undefined {
+  const windowMs = since ? parseUsageDuration(since) : hourly ? 5 * HOUR_MS : undefined;
+  if (hourly && windowMs !== undefined && windowMs < HOUR_MS) {
+    throw new RangeError("--hourly requires --since of at least 1h");
+  }
+  return windowMs;
 }
 
 /**
@@ -80,8 +110,9 @@ export function formatCost(totals: UsageTotals): string {
 }
 
 function usageTotalsLine(t: UsageTotals): string {
+  const turns = Number.isInteger(t.turns) ? String(t.turns) : t.turns.toFixed(1);
   const parts = [
-    `${t.turns} turns`,
+    `${turns} turns`,
     `in ${formatTokens(t.input_tokens)}`,
     `out ${formatTokens(t.output_tokens)}`,
     `cache_r ${formatTokens(t.cache_read_tokens)}`,
@@ -112,11 +143,16 @@ export function formatJobUsage(usage: JobUsage | undefined): string[] {
 }
 
 /** Full `agvsr usage` rendering: totals, then role and job breakdowns. */
-export function formatUsageReport(
-  report: { totals: UsageTotals; by_role: UsageBreakdown[]; by_job: UsageByJob[] },
-  jobId?: string,
-): string[] {
-  const lines = [`${jobId ? `job ${jobId}` : "TOTAL"}  ${usageTotalsLine(report.totals)}`];
+export function formatUsageReport(report: UsageReport, jobId?: string): string[] {
+  const lines: string[] = [];
+  if (report.window) {
+    lines.push(
+      `WINDOW  last ${formatUsageDuration(report.window.window_ms)}  ` +
+        `${report.window.start_at}..${report.window.end_at}`,
+    );
+  }
+  lines.push(`${jobId ? `job ${jobId}` : "TOTAL"}  ${usageTotalsLine(report.totals)}`);
+  if (report.rate_per_hour) lines.push(`RATE/h  ${usageTotalsLine(report.rate_per_hour)}`);
   if (report.totals.cost_partial) {
     lines.push("(+ = lower bound: codex/agy turns report tokens but no cost)");
   }
@@ -136,6 +172,26 @@ export function formatUsageReport(
     );
   }
 
+  if (report.buckets) {
+    lines.push("", "by hour (UTC):");
+    lines.push(
+      `  ${"START".padEnd(24)} ${"END".padEnd(24)} ${"TURNS".padStart(7)} ` +
+        `${"INPUT".padStart(8)} ${"OUTPUT".padStart(8)} ${"CACHE_R".padStart(8)} ` +
+        `${"COST".padStart(9)}`,
+    );
+    for (const bucket of report.buckets) {
+      lines.push(
+        `  ${(bucket.start_at + (bucket.partial ? "*" : "")).padEnd(24)} ` +
+          `${bucket.end_at.padEnd(24)} ${String(bucket.totals.turns).padStart(7)} ` +
+          `${formatTokens(bucket.totals.input_tokens).padStart(8)} ` +
+          `${formatTokens(bucket.totals.output_tokens).padStart(8)} ` +
+          `${formatTokens(bucket.totals.cache_read_tokens).padStart(8)} ` +
+          `${formatCost(bucket.totals).padStart(9)}`,
+      );
+    }
+    if (report.buckets.some((bucket) => bucket.partial)) lines.push("  * partial hour");
+  }
+
   if (!jobId) {
     lines.push("", "by job:");
     lines.push(
@@ -150,6 +206,16 @@ export function formatUsageReport(
     }
   }
   return lines;
+}
+
+export function formatEmptyUsageMessage(report: UsageReport, jobId?: string): string {
+  if (report.window) {
+    const duration = formatUsageDuration(report.window.window_ms);
+    return jobId
+      ? `no accounted turns for job ${jobId} in the last ${duration}`
+      : `no accounted turns in the last ${duration}`;
+  }
+  return jobId ? `no accounted turns for job ${jobId}` : "no accounted turns recorded yet";
 }
 
 /** Compact human duration: 45s, 12m, 1h03m. */
@@ -1029,26 +1095,31 @@ async function main(argv: string[]): Promise<void> {
     case "usage": {
       const { values: usageOpts, positionals: usageArgs } = parseArgs({
         args: rest,
-        options: { json: { type: "boolean", default: false } },
+        options: {
+          json: { type: "boolean", default: false },
+          since: { type: "string" },
+          hourly: { type: "boolean", default: false },
+        },
         allowPositionals: true,
       });
       const jobId = usageArgs[0];
+      const windowMs = resolveUsageWindow(usageOpts.since, usageOpts.hourly);
       await withClient(async (c) => {
-        const report = unwrap(
-          await c.request<{
-            totals: UsageTotals;
-            by_role: UsageBreakdown[];
-            by_job: UsageByJob[];
-          }>("usage.report", jobId ? { job_id: jobId } : {}),
-        );
+        const params = {
+          ...(jobId ? { job_id: jobId } : {}),
+          ...(windowMs !== undefined ? { window_ms: windowMs } : {}),
+          ...(usageOpts.hourly ? { bucket_ms: HOUR_MS } : {}),
+        };
+        const report = unwrap(await c.request<UsageReport>("usage.report", params));
+        if (windowMs !== undefined && !report.window) {
+          throw new Error("daemon does not support windowed usage; update and restart agvsrd");
+        }
         if (usageOpts.json) {
           console.log(JSON.stringify(report, null, 2));
           return;
         }
         if (report.totals.turns === 0) {
-          console.log(
-            jobId ? `no accounted turns for job ${jobId}` : "no accounted turns recorded yet",
-          );
+          console.log(formatEmptyUsageMessage(report, jobId));
           return;
         }
         for (const line of formatUsageReport(report, jobId)) console.log(line);

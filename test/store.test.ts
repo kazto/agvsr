@@ -244,6 +244,46 @@ describe("Store turn usage accounting (D32)", () => {
     store.close();
   });
 
+  it("filters a half-open usage window and groups sparse UTC hours", () => {
+    const store = new Store(":memory:");
+    const job = store.createJob("windowed", "/repo");
+    const rec = (recorded_at: string, input_tokens: number, cost_usd: number) =>
+      store.recordTurnUsage({
+        job_id: job.id,
+        role: "supervisor",
+        adapter: "claude-code",
+        model: "claude-opus-4-8",
+        usage: usage({ input_tokens, cost_usd }),
+        recorded_at,
+      });
+
+    rec("2026-08-10T03:14:59.999Z", 1, 0.1); // before the window
+    rec("2026-08-10T03:15:00.000Z", 2, 0.2); // inclusive start
+    rec("2026-08-10T05:30:00.000Z", 3, 0.3);
+    rec("2026-08-10T08:15:00.000Z", 4, 0.4); // exclusive end
+    const range = {
+      start_at: "2026-08-10T03:15:00.000Z",
+      end_at: "2026-08-10T08:15:00.000Z",
+    };
+
+    const report = store.usageReport(job.id, range);
+    expect(report.totals.turns).toBe(2);
+    expect(report.totals.input_tokens).toBe(5);
+    expect(report.totals.cost_usd).toBeCloseTo(0.5, 12);
+
+    const hours = store.usageBuckets(job.id, range);
+    expect(hours.map((h) => h.hour_start)).toEqual([
+      "2026-08-10T03:00:00Z",
+      "2026-08-10T05:00:00Z",
+    ]);
+    expect(hours.map((h) => h.totals.input_tokens)).toEqual([2, 3]);
+    expect(hours.reduce((sum, h) => sum + h.totals.cost_usd, 0)).toBeCloseTo(
+      report.totals.cost_usd,
+      12,
+    );
+    store.close();
+  });
+
   it("adds the turn_usage table to a database created before D32", () => {
     const dir = mkdtempSync(join(tmpdir(), "agvsr-store-usage-"));
     const file = join(dir, "old.sqlite");
@@ -272,5 +312,12 @@ describe("Store turn usage accounting (D32)", () => {
     });
     expect(store.jobUsage("old-1").totals.turns).toBe(1);
     store.close();
+
+    const migrated = new Database(file);
+    const index = migrated
+      .query(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`)
+      .get("idx_turn_usage_created_at") as { name: string } | null;
+    expect(index?.name).toBe("idx_turn_usage_created_at");
+    migrated.close();
   });
 });

@@ -96,6 +96,33 @@ export interface JobUsage {
   by_role: UsageBreakdown[];
 }
 
+/** Exact daemon-clock interval used by a windowed usage report (D38). */
+export interface UsageWindow {
+  start_at: string;
+  end_at: string;
+  window_ms: number;
+}
+
+/** Average consumption per wall-clock hour across the requested window (D39). */
+export type UsageRate = UsageTotals;
+
+/** One UTC-aligned hour intersected with the requested window (D39). */
+export interface UsageBucket {
+  start_at: string;
+  end_at: string;
+  partial: boolean;
+  totals: UsageTotals;
+}
+
+export interface UsageReport {
+  totals: UsageTotals;
+  by_role: UsageBreakdown[];
+  by_job: UsageByJob[];
+  window?: UsageWindow;
+  rate_per_hour?: UsageRate;
+  buckets?: UsageBucket[];
+}
+
 export type MessageKind = "message" | "escalation" | "completion" | "failure" | "note";
 
 export interface Message {
@@ -172,7 +199,12 @@ export type Request =
       method: "job.mergeInstance";
       params: { job_id: string; role: string };
     }
-  | { id: string; type: "request"; method: "usage.report"; params?: { job_id?: string } }
+  | {
+      id: string;
+      type: "request";
+      method: "usage.report";
+      params?: { job_id?: string; window_ms?: number; bucket_ms?: number };
+    }
   | { id: string; type: "request"; method: "daemon.stop"; params?: Record<string, never> }
   | { id: string; type: "request"; method: "reload"; params?: Record<string, never> };
 

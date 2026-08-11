@@ -39,6 +39,9 @@ import type {
   Request,
   Response,
   RoleSummary,
+  UsageBucket,
+  UsageRate,
+  UsageTotals,
 } from "../protocol.ts";
 import type { Adapter } from "../config/team.ts";
 
@@ -74,6 +77,67 @@ const err = (id: string, code: string, message: string): Response => ({
   ok: false,
   error: { code, message },
 });
+
+const HOUR_MS = 3_600_000;
+const MAX_USAGE_WINDOW_MS = 30 * 24 * HOUR_MS;
+
+function usageWindowError(windowMs: unknown, bucketMs: unknown): string | null {
+  if (typeof windowMs !== "number" || !Number.isFinite(windowMs) || windowMs <= 0) {
+    return "window_ms must be a finite positive number";
+  }
+  if (windowMs > MAX_USAGE_WINDOW_MS) return "window_ms must not exceed 30d";
+  if (bucketMs === undefined) return null;
+  if (bucketMs !== HOUR_MS) return "bucket_ms currently supports only 1h";
+  if (bucketMs > windowMs) return "bucket_ms must not exceed window_ms";
+  return null;
+}
+
+function zeroUsageTotals(): UsageTotals {
+  return {
+    turns: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    cost_usd: 0,
+    cost_partial: false,
+  };
+}
+
+function usageRate(totals: UsageTotals, windowMs: number): UsageRate {
+  const hours = windowMs / HOUR_MS;
+  return {
+    turns: totals.turns / hours,
+    input_tokens: totals.input_tokens / hours,
+    output_tokens: totals.output_tokens / hours,
+    cache_read_tokens: totals.cache_read_tokens / hours,
+    cache_write_tokens: totals.cache_write_tokens / hours,
+    reasoning_tokens: totals.reasoning_tokens / hours,
+    cost_usd: totals.cost_usd / hours,
+    cost_partial: totals.cost_partial,
+  };
+}
+
+function usageBuckets(
+  sparse: Array<{ hour_start: string; totals: UsageTotals }>,
+  startMs: number,
+  endMs: number,
+): UsageBucket[] {
+  const byHour = new Map(sparse.map((row) => [Date.parse(row.hour_start), row.totals]));
+  const buckets: UsageBucket[] = [];
+  for (let hour = Math.floor(startMs / HOUR_MS) * HOUR_MS; hour < endMs; hour += HOUR_MS) {
+    const bucketStart = Math.max(hour, startMs);
+    const bucketEnd = Math.min(hour + HOUR_MS, endMs);
+    buckets.push({
+      start_at: new Date(bucketStart).toISOString(),
+      end_at: new Date(bucketEnd).toISOString(),
+      partial: bucketStart !== hour || bucketEnd !== hour + HOUR_MS,
+      totals: byHour.get(hour) ?? zeroUsageTotals(),
+    });
+  }
+  return buckets;
+}
 
 export interface Daemon {
   endpoint: string;
@@ -1308,7 +1372,30 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       case "usage.report": {
         const jobId = req.params?.job_id;
         if (jobId && !store.getJob(jobId)) return err(req.id, "not_found", `no job ${jobId}`);
-        return ok(req.id, store.usageReport(jobId));
+        const windowMs = req.params?.window_ms;
+        const bucketMs = req.params?.bucket_ms;
+        if (windowMs === undefined) {
+          if (bucketMs !== undefined) {
+            return err(req.id, "bad_request", "bucket_ms requires window_ms");
+          }
+          return ok(req.id, store.usageReport(jobId));
+        }
+        const invalid = usageWindowError(windowMs, bucketMs);
+        if (invalid) return err(req.id, "bad_request", invalid);
+
+        const endMs = Date.now();
+        const startMs = endMs - windowMs;
+        const range = {
+          start_at: new Date(startMs).toISOString(),
+          end_at: new Date(endMs).toISOString(),
+        };
+        const report = store.usageReport(jobId, range);
+        report.window = { ...range, window_ms: windowMs };
+        report.rate_per_hour = usageRate(report.totals, windowMs);
+        if (bucketMs !== undefined) {
+          report.buckets = usageBuckets(store.usageBuckets(jobId, range), startMs, endMs);
+        }
+        return ok(req.id, report);
       }
 
       case "team.get": {

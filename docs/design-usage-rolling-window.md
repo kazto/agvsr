@@ -167,8 +167,9 @@ daemonは `[start_at, end_at)` と交差するUTC正時境界を列挙し、SQL�
 ## エラーと表示上の注意
 
 - 期間内に記録がなければ累積時と区別する。全ジョブでは
-  `no accounted turns in the last 5h`、job-id指定時は
-  `no accounted turns for job <job-id> in the last 5h` と表示する。
+  `no accounted turns in the last <duration>`、job-id指定時は
+  `no accounted turns for job <job-id> in the last <duration>` と表示する。`<duration>`には実際に
+  指定または暗黙適用された正規化済みの期間（`5h`、`2h`など）を入れる。
 - 0件でも `window` と、要求された場合は0値で埋めたバケット列をJSONで返す。監視側が欠測とゼロを区別できる。
 - daemon再起動や時計調整で `created_at` が将来になった既存行は `[start, end)` から自然に除外される。
 - 表示タイムゾーンは初期実装ではUTCに固定する。human表示で明記し、JSONは常にISO 8601 UTCとする。
