@@ -111,6 +111,8 @@ plan quota than an interactive session does. agvsr records every turn's token co
 ```sh
 agvsr status <job-id>   # usage block for that one job
 agvsr usage             # totals plus per-role and per-job breakdowns, costliest first
+agvsr usage --since 5h  # rolling 5-hour totals and average consumption per hour
+agvsr usage --since 5h --hourly  # add zero-filled UTC hourly buckets
 agvsr usage --json      # same data, machine-readable
 ```
 
@@ -150,15 +152,15 @@ roles:
 
 Per-role fields:
 
-| Field             | Description                                                 |
-| ----------------- | ----------------------------------------------------------- |
-| `adapter`         | One of `claude-code`, `codex`, `agy` (required)             |
-| `model`           | Raw per-CLI model string (required)                         |
-| `charter`         | Replace the bundled default charter wholesale               |
-| `charter_append`  | Append project rules to the bundled default charter         |
-| `instances`       | Number of instances of this role (default `1`)              |
-| `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default    |
-| `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default |
+| Field             | Description                                                                       |
+| ----------------- | --------------------------------------------------------------------------------- |
+| `adapter`         | One of `claude-code`, `codex`, `agy` (required)                                   |
+| `model`           | Raw per-CLI model string (required)                                               |
+| `charter`         | Replace the bundled default charter wholesale                                     |
+| `charter_append`  | Append project rules to the bundled default charter                               |
+| `instances`       | Number of instances of this role (default `1`)                                    |
+| `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default                          |
+| `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default                       |
 | `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
 
 The team must define a `supervisor` role. The daemon's default team file is
@@ -273,7 +275,7 @@ by the skill.
 | `agvsr wait <job-id>... [--poll-sec N] [--timeout-sec N]` | Block until each job needs approval or reaches a terminal status |
 | `agvsr reload`                                            | Reload `team.yaml` without restarting the daemon                 |
 | `agvsr team`                                              | Show configured roles                                            |
-| `agvsr usage [job-id] [--json]`                           | Token/cost accounting per job and per role                       |
+| `agvsr usage [job-id] [--since D] [--hourly] [--json]`    | Cumulative or rolling token/cost accounting                      |
 | `agvsr cleanup [--apply]`                                 | Report (or remove) job worktrees/branches safe to delete         |
 | `agvsr doctor [--team F] [--json] [--probe]`              | Check adapter CLIs and auth; exit 0 if all pass                  |
 

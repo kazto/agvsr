@@ -14,7 +14,7 @@ import type {
   MessageKind,
   RoleWorktree,
   UsageBreakdown,
-  UsageByJob,
+  UsageReport,
   UsageTotals,
 } from "../protocol.ts";
 import type { TurnUsage } from "../adapters/types.ts";
@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS turn_usage (
   FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
 CREATE INDEX IF NOT EXISTS idx_turn_usage_job ON turn_usage(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_turn_usage_created_at ON turn_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(to_role, read_at) WHERE read_at IS NULL;
 `;
@@ -302,6 +303,8 @@ export class Store {
     adapter: string;
     model: string;
     usage: TurnUsage;
+    /** Optional deterministic completion time for tests/imports; production uses now(). */
+    recorded_at?: string;
   }): void {
     this.db
       .query(
@@ -324,7 +327,7 @@ export class Store {
         $cache_write_tokens: input.usage.cache_write_tokens,
         $reasoning_tokens: input.usage.reasoning_tokens,
         $cost_usd: input.usage.cost_usd,
-        $created_at: now(),
+        $created_at: input.recorded_at ?? now(),
       });
   }
 
@@ -337,13 +340,9 @@ export class Store {
   }
 
   /** Cross-job (or single-job) report. Powers `agvsr usage`. */
-  usageReport(jobId?: string): {
-    totals: UsageTotals;
-    by_role: UsageBreakdown[];
-    by_job: UsageByJob[];
-  } {
-    const where = jobId ? "job_id = $job_id" : "1 = 1";
-    const params: Record<string, string> = jobId ? { $job_id: jobId } : {};
+  usageReport(jobId?: string, range?: UsageRange): UsageReport {
+    const filters = usageFilters(jobId, range);
+    const { where, params } = filters;
     const by_job = this.db
       .query(
         `SELECT u.job_id AS job_id, j.goal AS goal, j.status AS status, ${TOTALS_COLUMNS}
@@ -364,6 +363,21 @@ export class Store {
         status: r.status ?? "interrupted",
       })),
     };
+  }
+
+  /** Sparse UTC-hour aggregates. The daemon clips/fills buckets against the exact window. */
+  usageBuckets(jobId: string | undefined, range: UsageRange): UsageHourAggregate[] {
+    const { where, params } = usageFilters(jobId, range);
+    const rows = this.db
+      .query(
+        `SELECT strftime('%Y-%m-%dT%H:00:00Z', u.created_at) AS hour_start,
+                ${TOTALS_COLUMNS}
+         FROM turn_usage u WHERE ${where}
+         GROUP BY hour_start
+         ORDER BY hour_start ASC`,
+      )
+      .all(params) as Array<TotalsRow & { hour_start: string }>;
+    return rows.map((row) => ({ hour_start: row.hour_start, totals: toTotals(row) }));
   }
 
   private totalsWhere(where: string, params: Record<string, string>): UsageTotals {
@@ -393,6 +407,34 @@ export class Store {
   close(): void {
     this.db.close();
   }
+}
+
+export interface UsageRange {
+  start_at: string;
+  end_at: string;
+}
+
+export interface UsageHourAggregate {
+  hour_start: string;
+  totals: UsageTotals;
+}
+
+function usageFilters(
+  jobId?: string,
+  range?: UsageRange,
+): { where: string; params: Record<string, string> } {
+  const clauses: string[] = [];
+  const params: Record<string, string> = {};
+  if (jobId) {
+    clauses.push("u.job_id = $job_id");
+    params.$job_id = jobId;
+  }
+  if (range) {
+    clauses.push("u.created_at >= $start_at", "u.created_at < $end_at");
+    params.$start_at = range.start_at;
+    params.$end_at = range.end_at;
+  }
+  return { where: clauses.length > 0 ? clauses.join(" AND ") : "1 = 1", params };
 }
 
 /** Shared aggregate projection. `missing_cost` counts turns whose adapter reported
