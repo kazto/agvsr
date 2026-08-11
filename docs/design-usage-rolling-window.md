@@ -68,6 +68,9 @@ agvsr usage [job-id] [--since DURATION] [--hourly] [--json]
 
 - `--since 5h`: 直近5時間のローリング集計。`m`、`h`、`d`を受理し、正の整数だけを許可する。
 - `--hourly`: 1時間バケットを追加表示する。単独指定時は `--since 5h` を暗黙適用する。
+- `--since` と `--hourly` の併用時は1時間以上を必須とする。`--since 30m --hourly` のような
+  組み合わせはCLIで先に検証し、`--hourly requires --since of at least 1h` と表示して終了する。
+  daemonも同じ制約を検証し、CLIを介さないIPCクライアントを保護する。
 - `--json`: human表示と同じ期間メタデータ、totals、rates、breakdown、bucketsを返す。
 - job-idとの併用を許可し、そのジョブだけを同じ期間で絞る。
 - `agvsr usage`、`agvsr usage <job-id>`、既存JSONフィールドは変更しない。期間指定時だけ新しい
@@ -99,8 +102,10 @@ params?: {
 }
 ```
 
-daemonは有限の正数であること、`bucket_ms <= window_ms`であることを検証する。CLIはdurationを
-ミリ秒へ変換するが、daemon側でも必ず検証し、不正値は `INVALID_REQUEST` とする。
+daemonは有限の正数であること、`bucket_ms <= window_ms`であること、`window_ms`が30日以下で
+あることを検証する。CLIはdurationをミリ秒へ変換して同じ条件を先に検証するが、daemon側でも必ず
+検証し、不正値は既存のエラー命名規約に合わせて `bad_request` とする。30日超の値はサイレントに
+クランプせず拒否する。
 
 期間指定時のレスポンスを次へ拡張する。
 
@@ -145,13 +150,25 @@ u.created_at >= $start_at AND u.created_at < $end_at
 ```
 
 文字列連結で任意WHERE句を受ける範囲を広げず、`UsageRange`から固定predicateとbind paramsを作る
-小さなhelperを用意する。バケット集計はSQLiteのローカルタイム設定に依存させず、daemonがUTC境界を
-列挙し、同じ集計helperを各区間へ適用する。窓は最大30日に制限し、誤指定による巨大なバケット列を
-防ぐ。1時間バケットなら最大720行である。
+小さなhelperを用意する。
+
+バケットは範囲predicateを適用したうえで、UTC保存済みの `created_at` をSQLiteで正時へ丸める単一の
+`GROUP BY` クエリで集計する。
+
+```sql
+strftime('%Y-%m-%dT%H:00:00Z', u.created_at)
+```
+
+daemonは `[start_at, end_at)` と交差するUTC正時境界を列挙し、SQLが返さなかった時間を0値で補完し、
+先頭・末尾へ `partial` を設定する。バケットごとの個別SQLは発行しない。最大30日の検証責任は
+公開境界であるdaemonに置き、Storeは検証済みの `UsageRange` を受け取るだけでクランプしない。
+1時間バケットならレスポンスは最大721区間（両端が部分時間の場合）に収まる。
 
 ## エラーと表示上の注意
 
-- 期間内に記録がなければ、累積時と区別して `no accounted turns in the last 5h` と表示する。
+- 期間内に記録がなければ累積時と区別する。全ジョブでは
+  `no accounted turns in the last 5h`、job-id指定時は
+  `no accounted turns for job <job-id> in the last 5h` と表示する。
 - 0件でも `window` と、要求された場合は0値で埋めたバケット列をJSONで返す。監視側が欠測とゼロを区別できる。
 - daemon再起動や時計調整で `created_at` が将来になった既存行は `[start, end)` から自然に除外される。
 - 表示タイムゾーンは初期実装ではUTCに固定する。human表示で明記し、JSONは常にISO 8601 UTCとする。
@@ -166,7 +183,8 @@ u.created_at >= $start_at AND u.created_at < $end_at
 
 - 開始境界を含み、終了境界を含まない。
 - job・role・adapter・model絞り込みと時間窓が同時に効く。
-- 5時間totalsが各1時間バケットの合計と一致する。
+- 5時間totalsが各1時間バケットの合計と一致する。整数のtoken列は厳密比較し、SQLite `REAL` の
+  `cost_usd` は加算順序による誤差を許容する近似比較を使う。
 - 空時間のバケットが0で埋まり、先頭／末尾だけがpartialになる。
 - 報告コストなしのターンが窓・速度・バケットすべてで`cost_partial`を立てる。
 - D32以前／本機能以前のDBを開くと新indexが作られ、既存usageを失わない。
@@ -175,16 +193,18 @@ u.created_at >= $start_at AND u.created_at < $end_at
 
 - `window_ms`なしは従来の累積レスポンスと同一。
 - 5時間指定はdaemonが返した同一`end_at`を全集計に使う。
-- 0、負数、NaN相当、30日超、未対応bucketを拒否する。
+- 0、負数、NaN相当、30日超、未対応bucketを `bad_request` で拒否し、値をクランプしない。
+- `window_ms < bucket_ms`（例: 30分窓と1時間bucket）を `bad_request` で拒否する。
 - 存在しないjob-idの既存エラー契約を維持する。
 
 ### CLI
 
 - `5h`などのduration parse、0・小数・未知suffix・overflowの拒否。
 - `--hourly`単独で5時間が適用される。
+- `--since 30m --hourly`をdaemonへ送る前に、規定のCLIメッセージで拒否する。
 - human表示に期間、`RATE/h`、UTC、partial hour、コスト下限記号が出る。
 - JSONが丸め前の数値と期間境界を保持する。
-- 期間0件時と全期間0件時のメッセージを区別する。
+- 期間0件時と全期間0件時を区別し、期間0件ではjob-id有無の2文面も検証する。
 
 ## 段階的な実装順
 
