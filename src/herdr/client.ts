@@ -17,7 +17,31 @@ export interface HerdrClient {
   resolveWorkspaceName(workspaceId: string, session?: string | null): Promise<string | null>;
   /** Inject text (+ Enter) into the agent occupying `paneId`, fire-and-forget. */
   promptAgent(paneId: string, text: string, session?: string | null): Promise<void>;
+  /** List live agents with enough identity to enforce workspace-bound delivery. */
+  listAgents(session?: string | null): Promise<HerdrAgentListResult>;
+  /** Prompt with a structured result for fail-closed workflows such as review requests. */
+  promptAgentChecked(
+    paneId: string,
+    text: string,
+    session?: string | null,
+  ): Promise<HerdrPromptResult>;
 }
+
+export interface HerdrAgent {
+  pane_id: string;
+  workspace_id: string;
+  agent: string;
+  agent_status: string | null;
+  cwd: string | null;
+}
+
+export type HerdrFailureCode = "unavailable" | "timeout" | "invalid_response";
+export type HerdrAgentListResult =
+  | { ok: true; agents: HerdrAgent[] }
+  | { ok: false; code: HerdrFailureCode; message: string };
+export type HerdrPromptResult =
+  | { ok: true }
+  | { ok: false; code: Exclude<HerdrFailureCode, "invalid_response">; message: string };
 
 type SpawnFn = (
   args: string[],
@@ -47,14 +71,16 @@ async function runHerdr(
   args: string[],
   env: Record<string, string | undefined>,
   timeoutMs: number,
-): Promise<{ exitCode: number; stdout: string } | null> {
+): Promise<{ exitCode: number; stdout: string; timedOut: boolean } | null> {
   let proc: ReturnType<typeof Bun.spawn>;
   try {
     proc = spawn(args, env);
   } catch {
     return null;
   }
+  let timedOut = false;
   const timer = setTimeout(() => {
+    timedOut = true;
     try {
       proc.kill();
     } catch {
@@ -64,7 +90,7 @@ async function runHerdr(
   try {
     const stdoutText = new Response(proc.stdout as ReadableStream).text();
     const exitCode = await proc.exited;
-    return { exitCode, stdout: await stdoutText };
+    return { exitCode, stdout: await stdoutText, timedOut };
   } catch {
     return null;
   } finally {
@@ -74,6 +100,29 @@ async function runHerdr(
 
 interface WorkspaceListResult {
   result?: { workspaces?: Array<{ workspace_id?: string; label?: string }> };
+}
+
+interface AgentListResult {
+  result?: { agents?: unknown[] };
+}
+
+function parseAgent(value: unknown): HerdrAgent | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.pane_id !== "string" ||
+    typeof row.workspace_id !== "string" ||
+    typeof row.agent !== "string"
+  ) {
+    return null;
+  }
+  return {
+    pane_id: row.pane_id,
+    workspace_id: row.workspace_id,
+    agent: row.agent,
+    agent_status: typeof row.agent_status === "string" ? row.agent_status : null,
+    cwd: typeof row.cwd === "string" ? row.cwd : null,
+  };
 }
 
 export function createHerdrClient(options: CreateHerdrClientOptions = {}): HerdrClient {
@@ -99,6 +148,54 @@ export function createHerdrClient(options: CreateHerdrClientOptions = {}): Herdr
 
     async promptAgent(paneId, text, session) {
       await runHerdr(spawn, ["agent", "prompt", paneId, text], herdrEnv(session), timeoutMs);
+    },
+
+    async listAgents(session) {
+      const result = await runHerdr(spawn, ["agent", "list"], herdrEnv(session), timeoutMs);
+      if (!result) return { ok: false, code: "unavailable", message: "herdr is unavailable" };
+      if (result.timedOut)
+        return { ok: false, code: "timeout", message: "herdr agent list timed out" };
+      if (result.exitCode !== 0) {
+        return { ok: false, code: "unavailable", message: "herdr agent list failed" };
+      }
+      try {
+        const parsed = JSON.parse(result.stdout) as AgentListResult;
+        if (!Array.isArray(parsed.result?.agents)) throw new Error("agents array missing");
+        const agents: HerdrAgent[] = [];
+        for (const value of parsed.result.agents) {
+          const agent = parseAgent(value);
+          if (!agent) {
+            return {
+              ok: false,
+              code: "invalid_response",
+              message: "herdr agent list returned an invalid agent record",
+            };
+          }
+          agents.push(agent);
+        }
+        return { ok: true, agents };
+      } catch {
+        return {
+          ok: false,
+          code: "invalid_response",
+          message: "herdr agent list returned invalid JSON",
+        };
+      }
+    },
+
+    async promptAgentChecked(paneId, text, session) {
+      const result = await runHerdr(
+        spawn,
+        ["agent", "prompt", paneId, text],
+        herdrEnv(session),
+        timeoutMs,
+      );
+      if (!result) return { ok: false, code: "unavailable", message: "herdr is unavailable" };
+      if (result.timedOut) return { ok: false, code: "timeout", message: "herdr prompt timed out" };
+      if (result.exitCode !== 0) {
+        return { ok: false, code: "unavailable", message: "herdr prompt failed" };
+      }
+      return { ok: true };
     },
   };
 }

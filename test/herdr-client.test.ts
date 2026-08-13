@@ -91,6 +91,69 @@ describe("createHerdrClient", () => {
     await expect(client.promptAgent("w1:p1", "hi")).resolves.toBeUndefined();
   });
 
+  it("listAgents returns normalized live agent identities", async () => {
+    const client = createHerdrClient({
+      spawn: () =>
+        fakeSpawn(
+          JSON.stringify({
+            result: {
+              agents: [
+                {
+                  pane_id: "w6:p2",
+                  workspace_id: "w6",
+                  agent: "codex",
+                  agent_status: "idle",
+                  cwd: "/work/growllover",
+                  ignored_future_field: true,
+                },
+              ],
+            },
+          }),
+          0,
+        ),
+    });
+    expect(await client.listAgents("work")).toEqual({
+      ok: true,
+      agents: [
+        {
+          pane_id: "w6:p2",
+          workspace_id: "w6",
+          agent: "codex",
+          agent_status: "idle",
+          cwd: "/work/growllover",
+        },
+      ],
+    });
+  });
+
+  it("listAgents rejects malformed records instead of silently dropping them", async () => {
+    const client = createHerdrClient({
+      spawn: () => fakeSpawn(JSON.stringify({ result: { agents: [{ pane_id: "w6:p2" }] } }), 0),
+    });
+    const result = await client.listAgents();
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("invalid_response");
+  });
+
+  it("listAgents distinguishes timeout from an unavailable command", async () => {
+    const timedOut = createHerdrClient({
+      timeoutMs: 20,
+      spawn: () => fakeSpawn("", 1, { hang: true }),
+    });
+    expect(await timedOut.listAgents()).toMatchObject({ ok: false, code: "timeout" });
+
+    const unavailable = createHerdrClient({ spawn: () => fakeSpawn("", 1) });
+    expect(await unavailable.listAgents()).toMatchObject({ ok: false, code: "unavailable" });
+  });
+
+  it("promptAgentChecked reports delivery failure", async () => {
+    const client = createHerdrClient({ spawn: () => fakeSpawn("", 1) });
+    expect(await client.promptAgentChecked("w6:p2", "review")).toMatchObject({
+      ok: false,
+      code: "unavailable",
+    });
+  });
+
   it("passes HERDR_SESSION through to the spawned process env", async () => {
     let seenEnv: Record<string, string | undefined> = {};
     const client = createHerdrClient({

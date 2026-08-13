@@ -29,7 +29,7 @@ import {
 } from "../adapters/index.ts";
 import { validateTeamModels } from "../adapters/validate.ts";
 import { fireHook, noopPushNotifier, type HookEvent, type PushNotifier } from "../hooks.ts";
-import { createHerdrClient, type HerdrClient } from "../herdr/client.ts";
+import { createHerdrClient, type HerdrAgent, type HerdrClient } from "../herdr/client.ts";
 import type {
   Job,
   JobRuntime,
@@ -44,6 +44,71 @@ import type {
   UsageTotals,
 } from "../protocol.ts";
 import type { Adapter } from "../config/team.ts";
+
+export type ReviewerKind = "claude" | "codex";
+
+export type ReviewResolution =
+  | { ok: true; agent: HerdrAgent }
+  | { ok: false; code: string; message: string };
+
+function adapterReviewerKind(adapter: Adapter): ReviewerKind | null {
+  if (adapter === "claude-code") return "claude";
+  if (adapter === "codex") return "codex";
+  return null;
+}
+
+/** Pure, order-independent reviewer selection. Never falls back across workspaces. */
+export function resolveReviewAgent(input: {
+  agents: HerdrAgent[];
+  workspaceId: string;
+  reviewerKind: ReviewerKind;
+  requesterAdapter: Adapter;
+  reviewerPaneId?: string;
+}): ReviewResolution {
+  const requesterKind = adapterReviewerKind(input.requesterAdapter);
+  if (requesterKind === input.reviewerKind) {
+    return {
+      ok: false,
+      code: "reviewer_same_kind",
+      message: `reviewer kind ${input.reviewerKind} must differ from the requesting adapter`,
+    };
+  }
+
+  const candidates = input.agents.filter(
+    (agent) =>
+      agent.workspace_id === input.workspaceId && agent.agent.toLowerCase() === input.reviewerKind,
+  );
+
+  if (input.reviewerPaneId) {
+    const match = candidates.find((agent) => agent.pane_id === input.reviewerPaneId);
+    if (match) return { ok: true, agent: match };
+    return {
+      ok: false,
+      code: "reviewer_mismatch",
+      message:
+        `reviewer pane ${input.reviewerPaneId} is not a ${input.reviewerKind} agent ` +
+        `in workspace ${input.workspaceId}`,
+    };
+  }
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      code: "reviewer_not_found",
+      message: `no ${input.reviewerKind} reviewer found in workspace ${input.workspaceId}`,
+    };
+  }
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      code: "reviewer_ambiguous",
+      message:
+        `multiple ${input.reviewerKind} reviewers found in workspace ${input.workspaceId}: ` +
+        candidates.map((agent) => agent.pane_id).join(", "),
+    };
+  }
+  return { ok: true, agent: candidates[0]! };
+}
 
 function resolveTeam(file?: string): TeamConfig | null {
   const candidate = resolveTeamFile(file);
@@ -1506,6 +1571,78 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           hook("on_supervisor_message", { event: "supervisor_message", job_id, body: reason });
         }
         return ok(req.id, { queued: true, message: msg });
+      }
+
+      case "review.request": {
+        const { job_id: jobId, from_role: fromRole, reviewer_kind: reviewerKind } = req.params;
+        const body = req.params.body?.trim();
+        const job = store.getJob(jobId);
+        if (!job) return err(req.id, "not_found", `no job ${jobId}`);
+
+        const rejectReview = (code: string, message: string): Response => {
+          createMsg({
+            job_id: jobId,
+            from_role: "daemon",
+            to_role: fromRole,
+            kind: "note",
+            body: `Herdr review request rejected: code=${code}, reason=${message}`,
+          });
+          return err(req.id, code, message);
+        };
+
+        if (job.status !== "running") {
+          return rejectReview("review_job_not_running", `job ${jobId} is ${job.status}`);
+        }
+        if (!body) return rejectReview("bad_request", "review body must not be empty");
+        if (!job.workspace_id) {
+          return rejectReview("review_workspace_unavailable", "job has no saved Herdr workspace");
+        }
+
+        const reviewTeam = jobTeamSnapshots.get(jobId) ?? team;
+        const requester = reviewTeam?.roles[fromRole];
+        if (!requester) return rejectReview("forbidden", `unknown role ${fromRole}`);
+
+        const listed = await herdrClient.listAgents(job.herdr_session);
+        if (!listed.ok) {
+          return rejectReview("herdr_unavailable", `${listed.code}: ${listed.message}`);
+        }
+        const resolution = resolveReviewAgent({
+          agents: listed.agents,
+          workspaceId: job.workspace_id,
+          reviewerKind,
+          requesterAdapter: requester.adapter,
+          reviewerPaneId: req.params.reviewer_pane_id,
+        });
+        if (!resolution.ok) return rejectReview(resolution.code, resolution.message);
+
+        const delivered = await herdrClient.promptAgentChecked(
+          resolution.agent.pane_id,
+          body,
+          job.herdr_session,
+        );
+        if (!delivered.ok) {
+          return rejectReview("review_delivery_failed", `${delivered.code}: ${delivered.message}`);
+        }
+
+        const preview = body.replaceAll(/\s+/g, " ").slice(0, 160);
+        createMsg({
+          job_id: jobId,
+          from_role: fromRole,
+          to_role: "daemon",
+          kind: "note",
+          body:
+            `Herdr review requested: workspace=${job.workspace_id}` +
+            `${job.workspace_name ? `(${job.workspace_name})` : ""}, ` +
+            `reviewer=${reviewerKind}, pane=${resolution.agent.pane_id}, ` +
+            `body_length=${body.length}, preview=${JSON.stringify(preview)}`,
+        });
+        return ok(req.id, {
+          reviewer_pane_id: resolution.agent.pane_id,
+          workspace_id: job.workspace_id,
+          workspace_name: job.workspace_name,
+          reviewer_kind: reviewerKind,
+          reviewer_status: resolution.agent.agent_status,
+        });
       }
 
       case "msg.watch": {

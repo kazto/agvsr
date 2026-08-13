@@ -65,6 +65,12 @@ async function setupHarness(): Promise<Harness> {
       return "agvsr";
     },
     async promptAgent() {},
+    async listAgents() {
+      return { ok: true, agents: [] };
+    },
+    async promptAgentChecked() {
+      return { ok: true };
+    },
   };
 
   const { startDaemon } = await import("../src/daemon/daemon.ts");
