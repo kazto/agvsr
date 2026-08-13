@@ -45,6 +45,13 @@ function makeFakeHerdrClient(workspaceName: string | null): {
     async promptAgent(paneId, text, session) {
       calls.promptAgent.push({ paneId, text, session });
     },
+    async listAgents() {
+      return { ok: true, agents: [] };
+    },
+    async promptAgentChecked(paneId, text, session) {
+      calls.promptAgent.push({ paneId, text, session });
+      return { ok: true };
+    },
   };
   return { client, calls };
 }

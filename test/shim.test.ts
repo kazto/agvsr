@@ -113,6 +113,49 @@ async function callShim(
 }
 
 describe("agvsr-mcp shim", () => {
+  it("relays agvsr_request_review with job and role fixed by the shim environment", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
+    const sockPath = join(dir, "test.sock");
+    const stub = await startStub(sockPath, (req: any) => ({
+      id: req.id,
+      type: "response",
+      ok: true,
+      result: {
+        reviewer_pane_id: "w6:p1",
+        workspace_id: "w6",
+        workspace_name: "growllover",
+        reviewer_kind: "claude",
+      },
+    }));
+
+    try {
+      await callShim(
+        sockPath,
+        { AGVSR_ROLE: "implementation-1", AGVSR_JOB_ID: "job-review" },
+        "agvsr_request_review",
+        {
+          reviewer_kind: "claude",
+          body: "Review PR #123",
+          reviewer_pane_id: "w6:p1",
+          job_id: "attacker-job",
+          from_role: "supervisor",
+        },
+      );
+
+      const relay = stub.received.find((r: any) => r.method === "review.request") as any;
+      expect(relay).toBeDefined();
+      expect(relay.params.job_id).toBe("job-review");
+      expect(relay.params.from_role).toBe("implementation-1");
+      expect(relay.params.reviewer_kind).toBe("claude");
+      expect(relay.params.reviewer_pane_id).toBe("w6:p1");
+    } finally {
+      await stub.close();
+      try {
+        unlinkSync(sockPath);
+      } catch {}
+    }
+  });
+
   it("relays agvsr_send to daemon as msg.send", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agvsr-shim-"));
     const sockPath = join(dir, "test.sock");

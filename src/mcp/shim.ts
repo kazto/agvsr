@@ -126,6 +126,50 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "agvsr_request_review",
+  {
+    title: "Request a Herdr review in this job's workspace",
+    description:
+      "Send a PR review or re-review request through the daemon. The daemon only selects " +
+      "a reviewer in the Herdr workspace saved on this job and rejects missing, ambiguous, " +
+      "or cross-workspace targets. Use the returned reviewer_pane_id for re-review.",
+    inputSchema: {
+      reviewer_kind: z.enum(["claude", "codex"]).describe("Required reviewer agent kind"),
+      body: z.string().min(1).describe("Review request including PR, commit, base, and scope"),
+      reviewer_pane_id: z
+        .string()
+        .optional()
+        .describe("Pane returned by the first request; provide it for re-review"),
+    },
+  },
+  async ({ reviewer_kind, body, reviewer_pane_id }) => {
+    const result = await relayGet<{
+      reviewer_pane_id: string;
+      workspace_id: string;
+      workspace_name: string | null;
+      reviewer_kind: string;
+    }>("review.request", {
+      job_id: jobId,
+      from_role: role,
+      reviewer_kind,
+      body,
+      reviewer_pane_id,
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `review requested -> ${result.reviewer_kind} ${result.reviewer_pane_id} ` +
+            `in ${result.workspace_name ?? result.workspace_id}`,
+        },
+      ],
+      structuredContent: result,
+    };
+  },
+);
+
 if (role === "supervisor") {
   server.registerTool(
     "agvsr_complete",

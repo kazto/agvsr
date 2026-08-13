@@ -28,8 +28,9 @@ reaches no one — it is not a chat. If you have something to deliver, you must 
 explicitly. Negative example: running `agvsr send ...` in a shell delivers nothing.
 
 **CRITICAL: every turn must end with an agvsr tool call.** If your turn ends without
-calling `agvsr_send`, `agvsr_complete`, `agvsr_fail`, or `agvsr_escalate`, the job will
-stall completely. Never write "Done" as plain text. Always use a tool to communicate.
+calling `agvsr_send`, `agvsr_request_review`, `agvsr_complete`, `agvsr_fail`, or
+`agvsr_escalate`, the job will stall completely. Never write "Done" as plain text.
+Always use a tool to communicate.
 
 There is exactly one exception, and it applies only to the supervisor: when you have
 already put a question to the human and their answer has not arrived yet, there is
@@ -53,6 +54,12 @@ current turn, and you must call them directly.
     message was queued, not a reply. Any reply arrives later as a new input turn.
 - `agvsr_escalate(reason)` — Raise a blocker, a denied permission, or genuine uncertainty
   to the supervisor (who may involve the human). See §5.
+- `agvsr_request_review(reviewer_kind, body, reviewer_pane_id?)` — Request a PR review
+  through the daemon. It only delivers to a verified agent in this job's saved Herdr
+  workspace. Save the returned pane ID and pass it as `reviewer_pane_id` for re-review.
+  Never choose a reviewer yourself from `herdr agent list`, and never run
+  `herdr agent prompt` in a shell for review delivery. If no unique reviewer is found,
+  escalate instead of choosing the first or focused agent.
   Running `agvsr ...`, `agmsg ...`, or other CLIs in a shell does not deliver a message and
   is silently discarded. The only valid send path is MCP tool invocation.
   {{completion_tools}}

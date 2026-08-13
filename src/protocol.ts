@@ -179,6 +179,18 @@ export type Request =
   | {
       id: string;
       type: "request";
+      method: "review.request";
+      params: {
+        job_id: string;
+        from_role: string;
+        reviewer_kind: "claude" | "codex";
+        body: string;
+        reviewer_pane_id?: string;
+      };
+    }
+  | {
+      id: string;
+      type: "request";
       method: "msg.watch";
       params: { job_id: string; mark_read?: boolean };
     }

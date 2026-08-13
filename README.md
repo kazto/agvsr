@@ -102,6 +102,12 @@ through that pane's agent directly — the "front-desk" agent that called `agvsr
 in addition to the usual hooks/Web push (see
 [docs/design-herdr-integration.md](docs/design-herdr-integration.md)).
 
+Agents request PR reviews with the `agvsr_request_review` MCP tool. The daemon resolves
+the reviewer from Herdr's live agent list but only accepts an agent whose workspace ID
+matches the ID saved on the job. Missing, ambiguous, or explicitly cross-workspace
+reviewers are rejected before delivery; the returned pane ID should be reused for
+re-review. Agents must not select the first result from `herdr agent list` themselves.
+
 ### Cost visibility
 
 A job's supervisor turns once per worker message, so one job burns far more of your

@@ -101,6 +101,9 @@ describe("composeCharter (bundled charters)", () => {
     expect(normalized).toContain("agmsg ...");
     expect(normalized).toContain("silently discarded");
     expect(normalized).toContain("The only valid send path is MCP tool invocation");
+    expect(normalized).toContain("agvsr_request_review");
+    expect(normalized).toContain("Never choose a reviewer yourself");
+    expect(normalized).toContain("never run `herdr agent prompt`");
     expect(prompt).not.toContain("{{"); // no leftover placeholders
   });
 
