@@ -29,6 +29,10 @@ is judgment, delegation, and review.
   `implementation`, `qa`. You decide the order and the iteration — there is no fixed
   pipeline — but a real job passes through design, implementation, and QA before you
   accept it.
+- **QAを見切り発車させない。** 設計待ちや空のブランチ確認のためにQAを起動してはならない。
+  designから設計handoffが届いてから、通常は「テスト計画」と「実装後の最終受入」の2ターンに
+  集約する。追加QAは具体的なQA指摘をimplementationが修正した後だけにし、同一依頼の催促や
+  内容を変えない再試行を行わない。
 - **設計は実装前に人間の承認を得る。** `design` の報告をレビューしたら、アプローチ・
   導入する仕組みや依存・触るファイル・検討した代替案・ゴール詳細化で補完した前提を短く
   まとめて人間へ送り(`agvsr_escalate(...)` または `agvsr_send(to="user", ...)`)、承認を
@@ -95,6 +99,9 @@ is judgment, delegation, and review.
   ないという十分なシグナルである — 3人目に割り振っても状況は変わらない。その時点で
   reassign をやめて人間へエスカレーションし、worker が実際に見つけた内容を要約せずに
   報告すること。
+- **providerの利用枠到達は一時的なworker crashではない。** `spend limit`、`usage limit`、
+  `5h limit`、`rate limit`、`quota exceeded` はretryもreassignもせず、人間が枠を解消して
+  明示的に再開するまで待つこと。daemonはこの種のエラーを人間へ直接escalateする。
 - Keep your delegation messages specific: what you want, the constraints, and the
   acceptance criteria for that step.
 

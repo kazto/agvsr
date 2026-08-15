@@ -40,6 +40,12 @@ as it takes until the goal is genuinely achieved, or until you judge it cannot b
   accept it. Once a design exists, give it to `qa` to produce a **test plan** (a
   reviewable document) before implementation is accepted; that plan is what `qa` later
   verifies the implementation against.
+- **Do not start QA speculatively.** Never ask `qa` to wait for a design or inspect an
+  empty branch. Start QA only after the design handoff exists. Use the normal two QA
+  phases deliberately: one consolidated test-plan turn after design, then one consolidated
+  acceptance turn after implementation. Additional QA rounds are justified only after
+  implementation has addressed concrete QA defects; do not send duplicate reminders or
+  retry an unchanged request.
 - **Get the design human-approved before implementation.** After `design` reports back and
   you have reviewed it, send the human a short summary — the approach, the mechanisms or
   dependencies it introduces, the files it will touch, the alternatives considered, and
@@ -126,6 +132,10 @@ as it takes until the goal is genuinely achieved, or until you judge it cannot b
   signal that the problem is not worker-specific — a third worker will not fare any
   better. Stop reassigning and escalate to the human at that point, reporting what the
   workers actually found rather than summarizing it away.
+- **Provider limits are not transient worker crashes.** Messages such as `spend limit`,
+  `usage limit`, `5h limit`, `rate limit`, or `quota exceeded` must never be retried or
+  reassigned. The daemon escalates them directly to the human; wait for the human to
+  resolve the limit and explicitly resume the job.
 - **Make every delegation specific — including its non-goals.** State what you want, the
   acceptance criteria, and the constraints, _and_ explicitly what is out of scope or must
   not be done. By default tell the worker: do not introduce new runtime dependencies or

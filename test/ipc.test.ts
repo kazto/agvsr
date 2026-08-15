@@ -72,6 +72,49 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("blocks premature and duplicate QA delegations", async () => {
+    const c = await Client.connect(sock);
+    const created = await c.request<{ job: Job }>("job.create", {
+      goal: "qa routing guard",
+      cwd: repo,
+    });
+    expect(created.ok).toBe(true);
+    const jobId = created.ok ? created.result.job.id : "";
+
+    const premature = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "qa",
+      body: "wait for the design",
+    });
+    expect(premature.ok).toBe(false);
+    if (!premature.ok) expect(premature.error.code).toBe("qa_design_required");
+
+    const design = await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design complete",
+    });
+    expect(design.ok).toBe(true);
+    const first = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "qa",
+      body: "produce the consolidated test plan",
+    });
+    expect(first.ok).toBe(true);
+    const duplicate = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "qa",
+      body: "produce the consolidated test plan",
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.error.code).toBe("duplicate_delegation");
+    c.close();
+  });
+
   it("creates, dispatches and lists jobs (persisted by the daemon)", async () => {
     const c = await Client.connect(sock);
     const before = dispatches.length;
@@ -527,6 +570,90 @@ describe("CLI <-> daemon over local IPC", () => {
     } finally {
       if (saved === undefined) delete process.env.AGVSR_MAX_WORKER_FAILURES;
       else process.env.AGVSR_MAX_WORKER_FAILURES = saved;
+      await localDaemon.close();
+      for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+        try {
+          rmSync(f);
+        } catch {}
+      }
+    }
+  });
+
+  it("parks a worker usage-limit failure for the human without retrying", async () => {
+    const base = join(tmpdir(), `agvsr-usage-limit-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: TEAM,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        if (dispatch.role === "implementation") {
+          const limit = "You've hit your monthly spend limit";
+          return {
+            events: [{ kind: "result", ok: false, text: limit }],
+            outcome: {
+              sessionId: "impl-session",
+              finalText: limit,
+              exitCode: 1,
+            },
+          };
+        }
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-session`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    try {
+      const c = await Client.connect(sockLocal);
+      const created = await c.request<{ job: Job }>("job.create", {
+        goal: "usage limit",
+        cwd: repo,
+      });
+      expect(created.ok).toBe(true);
+      const jobId = created.ok ? created.result.job.id : "";
+      for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+      const sent = await c.request("msg.send", {
+        from: "supervisor",
+        job_id: jobId,
+        to: "implementation",
+        body: "run once",
+      });
+      expect(sent.ok).toBe(true);
+      for (let i = 0; i < 100; i++) {
+        const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+        if (
+          logs.ok &&
+          logs.result.messages.some(
+            (message) => message.kind === "escalation" && message.to_role === "user",
+          )
+        ) {
+          break;
+        }
+        await Bun.sleep(5);
+      }
+
+      const got = await c.request<{ job: Job }>("job.get", { id: jobId });
+      expect(got.ok && got.result.job.status).toBe("running");
+      expect(seen.filter((dispatch) => dispatch.role === "implementation")).toHaveLength(1);
+      expect(seen.filter((dispatch) => dispatch.role === "supervisor")).toHaveLength(1);
+      const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
+      expect(logs.ok).toBe(true);
+      if (!logs.ok) throw new Error("msg.list failed");
+      const escalation = logs.result.messages.find(
+        (message) => message.kind === "escalation" && message.to_role === "user",
+      );
+      expect(escalation?.body).toContain("will not be retried automatically");
+      expect(escalation?.body).toContain("monthly spend limit");
+      c.close();
+    } finally {
       await localDaemon.close();
       for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
         try {

@@ -374,6 +374,33 @@ function isConfigError(adapter: Adapter, text: string): boolean {
   return CONFIG_ERROR_PATTERNS[adapter].some((pattern) => pattern.test(text));
 }
 
+const USAGE_LIMIT_PATTERNS = [
+  /hit your (?:monthly|weekly|daily|5[- ]?hour) (?:spend |usage )?limit/i,
+  /(?:monthly|weekly|daily|5[- ]?hour) (?:spend |usage )?limit (?:reached|exceeded)/i,
+  /(?:rate|usage|spend) limit (?:reached|exceeded)/i,
+  /too many requests/i,
+  /quota (?:has been )?(?:reached|exceeded)/i,
+];
+
+export function isUsageLimitError(text: string): boolean {
+  return USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function usageLimitEscalation(
+  role: string,
+  adapter: Adapter,
+  model: string,
+  diagnostics: string,
+): string {
+  return [
+    `${role} cannot continue because ${adapter} reported a usage/rate limit.`,
+    `The job remains running, but this worker will not be retried automatically. ` +
+      `Resolve or wait for the provider limit, then resume with agvsr tell.`,
+    `role=${role} adapter=${adapter} model=${model}`,
+    `diagnostics:\n${tailText(diagnostics, 2048)}`,
+  ].join("\n\n");
+}
+
 function configErrorEscalation(
   role: string,
   adapter: Adapter,
@@ -467,6 +494,28 @@ function lastDesignHandoff(messages: Message[]): Message | null {
     if (m.from_role === "design" && m.to_role === SUPERVISOR) return m;
   }
   return null;
+}
+
+function hasOutstandingIdenticalDelegation(
+  messages: Message[],
+  from: string,
+  to: string,
+  body: string,
+): boolean {
+  const normalized = body.trim();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.from_role === to && message.to_role === from) return false;
+    if (
+      message.kind === "message" &&
+      message.from_role === from &&
+      message.to_role === to &&
+      message.body.trim() === normalized
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1033,6 +1082,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
       } else {
         const diagnostics = [result.outcome.stderrTail, finalText].filter(Boolean).join("\n");
+        if (diagnostics && isUsageLimitError(diagnostics)) {
+          const body = usageLimitEscalation(
+            role,
+            roleConfig.adapter,
+            roleConfig.model,
+            diagnostics,
+          );
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "escalation",
+            body,
+          });
+          hook("on_supervisor_message", { event: "supervisor_message", job_id: job.id, body });
+          return;
+        }
         if (diagnostics && isConfigError(roleConfig.adapter, diagnostics)) {
           const body = configErrorEscalation(
             role,
@@ -1501,11 +1567,25 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const routingTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!isAllowed(routingTeam, from, to))
           return err(req.id, "forbidden", `${from} may not send to ${to}`);
+        const history = store.listMessages(job_id);
+        if (from === SUPERVISOR && to === "qa" && !lastDesignHandoff(history)) {
+          return err(
+            req.id,
+            "qa_design_required",
+            "qa may only be delegated after design has handed a design to the supervisor",
+          );
+        }
+        if (hasOutstandingIdenticalDelegation(history, from, to, body)) {
+          return err(
+            req.id,
+            "duplicate_delegation",
+            `an identical ${from} -> ${to} delegation is still awaiting a response`,
+          );
+        }
         // Design-approval gate: hold supervisor → implementation until the human approves
         // the design. Only engages once a design handoff exists (jobs that skip design are
         // unaffected). The blocked handoff is not recorded or dispatched.
         if (designGateEnabled() && from === SUPERVISOR && isImplementationRole(to)) {
-          const history = store.listMessages(job_id);
           const design = lastDesignHandoff(history);
           if (design && !approvedAfter(history, design.created_at)) {
             const note = createMsg({
