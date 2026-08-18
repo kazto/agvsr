@@ -35,6 +35,28 @@ describe("parseTeam", () => {
     expect(() => parseTeam(`roles:\n  supervisor: { adapter: codex }`)).toThrow(TeamConfigError);
   });
 
+  it("carries a team-level env through to the config", () => {
+    const team = parseTeam(
+      `env:\n  DATABASE_TEST_URL: postgres://x/y\nroles:\n  supervisor: { adapter: codex, model: m }`,
+    );
+    expect(team.env).toEqual({ DATABASE_TEST_URL: "postgres://x/y" });
+  });
+
+  it("carries a per-role env alongside the team-level one", () => {
+    const team = parseTeam(
+      `env:\n  SHARED: "1"\nroles:\n  supervisor: { adapter: codex, model: m }\n` +
+        `  qa: { adapter: codex, model: m, env: { DATABASE_TEST_URL: "postgres://q" } }`,
+    );
+    expect(team.env).toEqual({ SHARED: "1" });
+    expect(team.roles.qa!.env).toEqual({ DATABASE_TEST_URL: "postgres://q" });
+  });
+
+  it("rejects a non-string env value", () => {
+    expect(() =>
+      parseTeam(`env:\n  PORT: 5433\nroles:\n  supervisor: { adapter: codex, model: m }`),
+    ).toThrow(TeamConfigError);
+  });
+
   it("network_access defaults to undefined (opt-in, not required)", () => {
     const team = parseTeam(VALID);
     expect(team.roles.qa!.network_access).toBeUndefined();

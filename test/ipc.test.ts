@@ -326,6 +326,50 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("passes team and role env to the agent, but never over agvsr's own vars", async () => {
+    const base = join(tmpdir(), `agvsr-env-${randomUUID()}`);
+    const sockLocal = `${base}.sock`;
+    const db = `${base}.sqlite`;
+    const seen: TurnDispatch[] = [];
+    const envTeam = parseTeam(
+      `env:\n  DATABASE_TEST_URL: postgres://shared\n  AGVSR_ROLE: hijacked\n` +
+        `roles:\n  supervisor: { adapter: claude-code, model: m, env: { DATABASE_TEST_URL: "postgres://sup" } }\n` +
+        `  implementation: { adapter: codex, model: m }`,
+    );
+    const { startDaemon } = await import("../src/daemon/daemon.ts");
+    const localDaemon = await startDaemon({
+      endpoint: sockLocal,
+      storeFile: db,
+      team: envTeam,
+      interruptRunningJobsOnStart: false,
+      turnRunner: async (dispatch) => {
+        seen.push(dispatch);
+        return {
+          events: [{ kind: "result", ok: true, text: dispatch.role }],
+          outcome: { sessionId: `${dispatch.role}-s`, finalText: "", exitCode: 0 },
+        };
+      },
+    });
+
+    const c = await Client.connect(sockLocal);
+    await c.request("job.create", { goal: "env", cwd: repo });
+    for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
+
+    const env = seen[0]!.env;
+    // The role's value wins over the team's shared one...
+    expect(env.DATABASE_TEST_URL).toBe("postgres://sup");
+    // ...but agvsr's own variables are applied last and cannot be shadowed.
+    expect(env.AGVSR_ROLE).toBe("supervisor");
+
+    c.close();
+    await localDaemon.close();
+    for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
+      try {
+        rmSync(f);
+      } catch {}
+    }
+  });
+
   it("keeps the approval when the human sends an unrelated follow-up message", async () => {
     const c = await Client.connect(sock);
     const beforeCreate = dispatches.length;

@@ -42,6 +42,12 @@ const RoleSchema = z.object({
    * (e.g. a QA role verifying against a local database).
    */
   network_access: z.boolean().optional(),
+  /**
+   * Extra environment variables for this role's agent process. Merged over the
+   * team-level `env`, and both are overridden by agvsr's own reserved variables
+   * (AGVSR_*, HERDR_*, PATH) so a config mistake cannot unwire the MCP shim.
+   */
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 const HooksSchema = z
@@ -65,6 +71,8 @@ export type RoleConfig = z.infer<typeof RoleSchema>;
 export interface TeamConfig {
   roles: Record<string, RoleConfig>;
   hooks?: z.infer<typeof HooksSchema>;
+  /** Environment shared by every role (see RawTeamSchema.env). */
+  env?: Record<string, string>;
 }
 
 /** Raw shape as authored: `implementation:` may be a single role or an
@@ -72,6 +80,12 @@ export interface TeamConfig {
 const RawTeamSchema = z.object({
   roles: z.record(z.string(), z.union([RoleSchema, z.array(RoleSchema).min(1)])),
   hooks: HooksSchema,
+  /**
+   * Environment shared by every role's agent process. This is where job-invariant
+   * facts about the host belong — a test database URL, a registry token — so each
+   * job does not have to rediscover them and relay them through the human.
+   */
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 export const SUPERVISOR = "supervisor";
@@ -136,6 +150,7 @@ export function parseTeam(text: string, format: TeamFormat = "yaml"): TeamConfig
   const team: TeamConfig = {
     roles: expandRoles(parsed.data.roles),
     hooks: parsed.data.hooks,
+    env: parsed.data.env,
   };
   if (Object.keys(team.roles).length === 0) {
     throw new TeamConfigError(`${label} defines no roles.`);

@@ -953,6 +953,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         idleTimeoutMs: idleMs,
         onProgress: () => lastProgressAt.set(key, Date.now()),
         env: {
+          // Team/role env first: job-invariant host facts (a test DB URL, a token)
+          // belong in team.yaml so each job stops rediscovering them and relaying
+          // them through the human. agvsr's own variables are applied after, so a
+          // config mistake cannot unwire the MCP shim.
+          ...jobTeam.env,
+          ...roleConfig.env,
           PATH: userPath,
           AGVSR_SOCK: endpoint,
           AGVSR_ROLE: role,

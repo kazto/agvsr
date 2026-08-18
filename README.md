@@ -147,6 +147,13 @@ roles:
     adapter: agy
     model: gemini-3-pro
 
+# Optional environment shared by every role's agent process. Job-invariant facts
+# about the host belong here, so each job does not rediscover them and relay them
+# through you. Overridden per role by that role's own `env`; agvsr's own
+# variables (AGVSR_*, HERDR_*, PATH) always win over both.
+# env:
+#   DATABASE_TEST_URL: "postgresql://user:pass@localhost:5433/app_test"
+
 # Optional event hooks. Each value is a shell command run via `sh -c`;
 # the event JSON is written to the command's stdin. All keys are optional.
 # hooks:
@@ -168,6 +175,7 @@ Per-role fields:
 | `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default                          |
 | `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default                       |
 | `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
+| `env`             | Extra environment for this role's agent, merged over the team-level `env`         |
 
 The team must define a `supervisor` role. The daemon's default team file is
 resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml`, falling
@@ -311,12 +319,15 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 | `AGVSR_LOOP_REPEAT_TURNS`    | Repeated-turn detection threshold                                                              |
 | `AGVSR_MAX_LOOP_ESCALATIONS` | Max loop escalations before giving up                                                          |
 | `AGVSR_MAX_WORKER_FAILURES`  | Max worker failures tolerated                                                                  |
+| `AGVSR_SEED_PATHS`           | Ignored dependency dirs seeded into each new worktree (default `node_modules`); `off` disables |
+| `AGVSR_SEED_LINK`            | Hard-link seeded dependencies instead of copying; on by default, disable with `0`/`off`        |
 | `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |
 
 ## Files and locations
 
 - `~/.config/agvsr/inbox.sqlite` — message + job store
 - `~/.config/agvsr/worktrees/<job-id>` — per-job git worktree
+- `~/.config/agvsr/worktrees/.deps/<repo-hash>/` — staged dependency cache seeded into new worktrees
 - `~/.config/agvsr/agvsrd.sock` — daemon IPC socket (POSIX; named pipe on Windows)
 - `team.yaml` / `team.toml` — team configuration (per project, or via `$AGVSR_TEAM`; `team.yaml` wins if both exist)
 

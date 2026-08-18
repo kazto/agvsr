@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, cpSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { worktreesDir } from "../paths.ts";
+import { seedDependencies } from "./deps.ts";
 
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
   const r = spawnSync("git", args, {
@@ -84,6 +85,16 @@ export async function provisionWorktree(
       mkdirSync(dirname(tgt), { recursive: true });
       cpSync(src, tgt, { recursive: true });
     }
+  }
+
+  // Seed ignored dependency directories (node_modules and friends). Without this a
+  // job's first act is reinstalling them, which inside a write-restricted adapter
+  // sandbox frequently just fails. Best effort — a job that gets nothing here
+  // installs its own exactly as before.
+  try {
+    seedDependencies(root, dest, (path) => git(root, ["check-ignore", "-q", path]).ok);
+  } catch (e) {
+    console.error(`[agvsr] dependency seeding skipped: ${(e as Error).message}`);
   }
 
   return dest;
