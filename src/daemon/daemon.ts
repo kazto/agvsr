@@ -1043,8 +1043,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           `question to the human is outstanding, so nothing will happen until you act ` +
           `(${idleTurns}/${MAX_SUPERVISOR_IDLE_TURNS} before the job is failed).\n\n` +
           `Route the work forward: delegate with agvsr_send, ask the human with ` +
-          `agvsr_escalate, or finish with agvsr_complete/agvsr_fail. Note that ` +
-          `agvsr_status is read-only and does not count as routing.\n\n` +
+          `agvsr_escalate, or finish with agvsr_complete/agvsr_fail. If you are genuinely ` +
+          `blocked on something none of those can resolve, park the job with agvsr_wait ` +
+          `instead of restating that you are waiting. Note that agvsr_status is read-only ` +
+          `and does not count as routing.\n\n` +
           `Your last text:\n${finalText}`;
         createMsg({
           job_id: job.id,
@@ -1688,6 +1690,38 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         } else {
           hook("on_supervisor_message", { event: "supervisor_message", job_id, body: reason });
         }
+        return ok(req.id, { queued: true, message: msg });
+      }
+
+      case "job.wait": {
+        const noTeam = requireTeam(req.id);
+        if (noTeam) return noTeam;
+        const { from, job_id, reason } = req.params;
+        const job = store.getJob(job_id);
+        if (!job) return err(req.id, "not_found", `no job ${job_id}`);
+        if (!reason?.trim()) return err(req.id, "bad_request", "wait reason must not be empty");
+        // Only the supervisor can park a job. A worker that cannot continue must go
+        // through agvsr_escalate so the supervisor actually learns about the blocker;
+        // parking silently would strand the job with nobody watching it.
+        if (from !== SUPERVISOR)
+          return err(req.id, "forbidden", `${from} must use msg.escalate, not job.wait`);
+        // Parking is a legitimate way for a supervisor turn to end: it has nothing it
+        // should route because it is blocked on something the daemon cannot deliver (a
+        // human action taken outside agvsr, a long-running external job). Recording it as
+        // a message from the supervisor means the idle-turn detector sees the turn as
+        // routed and stops nudging — before this existed, a blocked supervisor burned its
+        // whole nudge budget restating "waiting" and then hard-failed a job whose work was
+        // fine. Nothing is dispatched, so the job idles until a reply arrives; the stall
+        // watchdog still reports it if nothing ever does.
+        const msg = createMsg({
+          job_id,
+          from_role: from,
+          to_role: "daemon",
+          kind: "note",
+          body: `Waiting (blocked): ${reason}`,
+        });
+        supervisorIdleTurns.delete(job_id);
+        debug("supervisor parked on a blocker", { job: job_id, reason });
         return ok(req.id, { queued: true, message: msg });
       }
 

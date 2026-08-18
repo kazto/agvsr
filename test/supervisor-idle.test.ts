@@ -16,11 +16,14 @@ roles:
 `);
 
 /**
- * Daemon whose supervisor turns are scripted: each entry is either an escalation
- * to the human (routes a message) or an idle turn (assistant text, no routing).
- * Once the script runs out, every further turn is idle.
+ * Daemon whose supervisor turns are scripted: each entry is an escalation to the human
+ * (routes a message), a park on a blocker (agvsr_wait), or an idle turn (assistant text,
+ * no routing). Once the script runs out, every further turn takes `fallback`.
  */
-async function makeDaemon(script: Array<"escalate" | "idle">) {
+async function makeDaemon(
+  script: Array<"escalate" | "idle" | "wait">,
+  fallback: "escalate" | "idle" | "wait" = "idle",
+) {
   const base = join(tmpdir(), `agvsr-idle-${randomUUID()}`);
   const sock = `${base}.sock`;
   const db = `${base}.sqlite`;
@@ -37,7 +40,7 @@ async function makeDaemon(script: Array<"escalate" | "idle">) {
     interruptRunningJobsOnStart: false,
     turnRunner: async (d: TurnDispatch) => {
       turns.push(d);
-      const action = script[step++] ?? "idle";
+      const action = script[step++] ?? fallback;
       if (action === "escalate") {
         const c = await Client.connect(sock);
         await c.request("msg.escalate", {
@@ -46,9 +49,22 @@ async function makeDaemon(script: Array<"escalate" | "idle">) {
           reason: "Need the human to run bun install",
         });
         c.close();
+      } else if (action === "wait") {
+        const c = await Client.connect(sock);
+        await c.request("job.wait", {
+          from: d.role,
+          job_id: d.job.id,
+          reason: "blocked on the human installing dependencies by hand",
+        });
+        c.close();
       }
       return {
-        events: [],
+        // A real parked turn *is* a tool call, so it feeds the Tier1 no-progress
+        // watchdog an event; an idle turn genuinely has none.
+        events:
+          action === "wait"
+            ? [{ kind: "tool_use" as const, name: "agvsr_wait", input: { n: step } }]
+            : [],
         outcome: {
           sessionId: `${d.role}-s`,
           finalText: "Already escalated; waiting for the human.",
@@ -190,6 +206,60 @@ describe("supervisor idle turns (D36)", () => {
     expect(await statusOf(c, jobId)).toBe("running");
     const msgs = await messagesOf(c, jobId);
     expect(msgs.some((m) => m.kind === "failure")).toBe(false);
+
+    c.close();
+    await h.daemon.close();
+    cleanup(h.sock, h.db, `${h.db}-wal`, `${h.db}-shm`, h.repo);
+  });
+
+  it("neither nudges nor fails a supervisor that parks the job with agvsr_wait", async () => {
+    // Without agvsr_wait a blocked supervisor could only write "waiting for X" as text,
+    // which routes nothing: it burned the nudge budget and then hard-failed a job whose
+    // work was fine. Parking is a legitimate end to a turn.
+    const h = await makeDaemon(["wait"], "wait");
+    const c = await Client.connect(h.sock);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "parks", cwd: h.repo });
+    const jobId = created.ok ? created.result.job.id : "";
+
+    await waitFor(async () =>
+      (await messagesOf(c, jobId)).some((m) => m.body.startsWith("Waiting (blocked):")),
+    );
+    // Drive several more turns; each one parks again.
+    for (let i = 0; i < 4; i++) {
+      await c.request("msg.send", {
+        from: "implementation",
+        job_id: jobId,
+        to: "supervisor",
+        body: `ping ${i}`,
+      });
+    }
+    await waitFor(async () => h.turns.length >= 4);
+    await Bun.sleep(150);
+
+    expect(await statusOf(c, jobId)).toBe("running");
+    const msgs = await messagesOf(c, jobId);
+    expect(msgs.some((m) => m.kind === "failure")).toBe(false);
+    expect(msgs.some((m) => m.kind === "escalation" && m.to_role === "supervisor")).toBe(false);
+    expect(msgs.filter((m) => m.body.startsWith("Waiting (blocked):")).length).toBeGreaterThan(1);
+
+    c.close();
+    await h.daemon.close();
+    cleanup(h.sock, h.db, `${h.db}-wal`, `${h.db}-shm`, h.repo);
+  });
+
+  it("refuses to let a worker park the job — workers must escalate", async () => {
+    const h = await makeDaemon(["idle"]);
+    const c = await Client.connect(h.sock);
+    const created = await c.request<{ job: Job }>("job.create", { goal: "worker", cwd: h.repo });
+    const jobId = created.ok ? created.result.job.id : "";
+
+    const res = await c.request("job.wait", {
+      from: "implementation",
+      job_id: jobId,
+      reason: "blocked",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("forbidden");
 
     c.close();
     await h.daemon.close();

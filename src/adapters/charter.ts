@@ -49,7 +49,12 @@ const BUNDLED = join(import.meta.dir, "..", "..", "charters");
 const COMPLETION_TOOLS = `- \`agvsr_complete(job_id, result)\` — Declare the job done and deliver the result to
   the human. Only you (the supervisor) may call this.
 - \`agvsr_fail(job_id, reason)\` — Declare the job impossible, with a reason. Only you
-  may call this.`;
+  may call this.
+- \`agvsr_wait(reason)\` — Park the job when you are genuinely blocked on something none
+  of the tools above can resolve (a human action taken outside agvsr, an external job you
+  are waiting on). This ends your turn legitimately: nothing is dispatched and the job
+  idles until a reply arrives. Only you may call this. Reach for it only when there is
+  truly nothing to route — delegating, asking the human, and finishing all come first.`;
 
 /** Strip HTML comments — they are maintainer notes, not for the LLM. */
 function stripHtmlComments(s: string): string {

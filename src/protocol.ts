@@ -190,6 +190,12 @@ export type Request =
   | {
       id: string;
       type: "request";
+      method: "job.wait";
+      params: { from: string; job_id: string; reason: string };
+    }
+  | {
+      id: string;
+      type: "request";
       method: "review.request";
       params: {
         job_id: string;

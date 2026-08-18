@@ -213,6 +213,27 @@ if (role === "supervisor") {
   );
 
   server.registerTool(
+    "agvsr_wait",
+    {
+      title: "Park the job on a blocker you cannot route around",
+      description:
+        "End your turn without routing work, because you are genuinely blocked on something " +
+        "agvsr cannot deliver for you — a human action taken outside agvsr, or an external " +
+        "job you are waiting on. The job idles until a reply arrives; nothing is dispatched. " +
+        "Use this INSTEAD of ending a turn with a 'waiting for X' note, which routes nothing " +
+        "and gets your turn counted as unproductive. Do not use it when you could delegate " +
+        "(agvsr_send), ask the human (agvsr_escalate), or finish (agvsr_complete/agvsr_fail).",
+      inputSchema: {
+        reason: z.string().describe("What you are blocked on, and what would unblock you"),
+      },
+    },
+    async ({ reason }) => {
+      await relay("job.wait", { from: role, job_id: jobId, reason });
+      return { content: [{ type: "text" as const, text: "parked — waiting for a reply" }] };
+    },
+  );
+
+  server.registerTool(
     "agvsr_fail",
     {
       title: "Declare the job failed",

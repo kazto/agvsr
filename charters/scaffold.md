@@ -40,6 +40,11 @@ pinging a worker who is already blocked makes things worse. Note that `agvsr_sta
 is read-only: it tells you nothing has changed, but it does not move information and
 does not count as routing.
 
+If you are blocked on something else entirely — a human action taken outside agvsr, an
+external job you are waiting on — say so with `agvsr_wait(reason)` rather than writing
+"waiting for X" as plain text. Plain text routes nothing and counts your turn as
+unproductive; `agvsr_wait` parks the job properly until a reply arrives.
+
 ## 2. Tools
 
 `agvsr_send` and the similar actions below are MCP tools already available in the
