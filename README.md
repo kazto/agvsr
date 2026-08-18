@@ -293,6 +293,12 @@ by the skill.
 | `agvsr cleanup [--apply]`                                 | Report (or remove) job worktrees/branches safe to delete         |
 | `agvsr doctor [--team F] [--json] [--probe]`              | Check adapter CLIs and auth; exit 0 if all pass                  |
 
+A finished job's own worktrees are reclaimed automatically, on exactly the rules
+`agvsr cleanup` applies: removed only when clean and fully merged into the right
+base, kept for a human otherwise. `agvsr cleanup` remains the way to sweep up
+what that leaves — orphans, and trees a human has since merged. Disable the
+automatic pass with `AGVSR_AUTO_RECLAIM=0`.
+
 ### Typical workflow
 
 ```sh
@@ -319,6 +325,7 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 | `AGVSR_LOOP_REPEAT_TURNS`    | Repeated-turn detection threshold                                                              |
 | `AGVSR_MAX_LOOP_ESCALATIONS` | Max loop escalations before giving up                                                          |
 | `AGVSR_MAX_WORKER_FAILURES`  | Max worker failures tolerated                                                                  |
+| `AGVSR_AUTO_RECLAIM`         | Remove a finished job's clean, fully-merged worktrees; on by default, disable with `0`/`off`    |
 | `AGVSR_SEED_PATHS`           | Ignored dependency dirs seeded into each new worktree (default `node_modules`); `off` disables |
 | `AGVSR_SEED_LINK`            | Hard-link seeded dependencies instead of copying; on by default, disable with `0`/`off`        |
 | `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |

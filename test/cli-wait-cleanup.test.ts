@@ -52,6 +52,7 @@ interface Harness {
   release: () => void;
   dispatches: TurnDispatch[];
   oldWorktreesEnv: string | undefined;
+  oldAutoReclaimEnv: string | undefined;
 }
 
 async function setupHarness(team = TEAM): Promise<Harness> {
@@ -75,6 +76,12 @@ async function setupHarness(team = TEAM): Promise<Harness> {
   mkdirSync(worktrees, { recursive: true });
   process.env.AGVSR_WORKTREES = worktrees;
 
+  // These tests exercise the `agvsr cleanup` CLI, so the daemon's automatic pass
+  // (D42) must stay out of the way — otherwise a finished job's worktree is
+  // already gone before the CLI gets to classify it.
+  const oldAutoReclaimEnv = process.env.AGVSR_AUTO_RECLAIM;
+  process.env.AGVSR_AUTO_RECLAIM = "0";
+
   const { startDaemon } = await import("../src/daemon/daemon.ts");
   const daemon = await startDaemon({
     endpoint: sock,
@@ -93,7 +100,19 @@ async function setupHarness(team = TEAM): Promise<Harness> {
   });
 
   const client = await Client.connect(sock);
-  return { base, repo, worktrees, sock, db, daemon, client, release, dispatches, oldWorktreesEnv };
+  return {
+    base,
+    repo,
+    worktrees,
+    sock,
+    db,
+    daemon,
+    client,
+    release,
+    dispatches,
+    oldWorktreesEnv,
+    oldAutoReclaimEnv,
+  };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -102,6 +121,8 @@ async function teardown(h: Harness): Promise<void> {
   await h.daemon.close();
   if (h.oldWorktreesEnv === undefined) delete process.env.AGVSR_WORKTREES;
   else process.env.AGVSR_WORKTREES = h.oldWorktreesEnv;
+  if (h.oldAutoReclaimEnv === undefined) delete process.env.AGVSR_AUTO_RECLAIM;
+  else process.env.AGVSR_AUTO_RECLAIM = h.oldAutoReclaimEnv;
   rmSync(h.base, { recursive: true, force: true });
 }
 

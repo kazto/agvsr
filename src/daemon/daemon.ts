@@ -9,6 +9,7 @@ import { serve, type PushFn } from "../ipc/transport.ts";
 import { provisionWorktree } from "../git/worktree.ts";
 import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../git/commit-gate.ts";
 import { mergeInstanceBranch } from "../git/merge.ts";
+import { assessWorktree, git } from "../git/cleanup.ts";
 import { Store } from "./store.ts";
 import {
   allowedTargets,
@@ -488,6 +489,12 @@ function designGateEnabled(): boolean {
   return !raw || !/^(0|off|false|no)$/i.test(raw.trim());
 }
 
+/** Reclaim a finished job's spent worktrees (D42). Disable with AGVSR_AUTO_RECLAIM=0. */
+function autoReclaimEnabled(): boolean {
+  const raw = process.env.AGVSR_AUTO_RECLAIM;
+  return !raw || !/^(0|off|false|no)$/i.test(raw.trim());
+}
+
 function isImplementationRole(role: string): boolean {
   return role === "implementation" || role.startsWith("implementation");
 }
@@ -745,6 +752,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   let doClose: () => Promise<void> = async () => {};
   // Set the moment shutdown begins, so no new turns are queued behind the drain.
   let closing = false;
+  // Pending deferred worktree reclamations, cancelled on shutdown.
+  const reclaimTimers = new Set<ReturnType<typeof setTimeout>>();
 
   if (team) {
     emitTeamModelWarnings(team, "startup");
@@ -766,6 +775,78 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const setStatus = (jobId: string, status: JobStatus): void => {
     store.setJobStatus(jobId, status);
     emitJobUpdate(jobId, status);
+    if (status !== "running") {
+      // Deferred: reclamation shells out to git several times, and no caller of
+      // setStatus should pay for that before it can answer its own request. The
+      // timer is tracked so shutdown can cancel it — firing after the store is
+      // closed would throw out of a timer callback with nobody to catch it.
+      const timer = setTimeout(() => {
+        reclaimTimers.delete(timer);
+        reclaimWorktrees(jobId);
+      }, 0);
+      reclaimTimers.add(timer);
+    }
+  };
+
+  /**
+   * Remove a finished job's worktrees when they hold nothing (D42). Worktrees
+   * accumulated indefinitely — 167 of them, 20GB, against 112 jobs — because
+   * reclaiming them was a manual `agvsr cleanup --apply` nobody ran.
+   *
+   * This reuses the exact classifier `agvsr cleanup` uses and removes only
+   * SAFE_TO_REMOVE: clean, and fully merged into the right base (main for a job's
+   * own worktree, the job branch for an instance's). Anything dirty, unmerged, or
+   * unresolvable is left for a human, so nothing recoverable is discarded.
+   */
+  const reclaimWorktrees = (jobId: string): void => {
+    if (closing || !autoReclaimEnabled()) return;
+    const job = store.getJob(jobId);
+    if (!job || job.status === "running") return;
+
+    const root = git(job.cwd, ["rev-parse", "--show-toplevel"]);
+    if (!root.ok || !root.stdout) return;
+    const mainWorktree = root.stdout;
+
+    // Instances first: an instance's base is the job branch, which the job's own
+    // worktree still owns until it is reclaimed in turn.
+    const targets: Array<{ path: string; branch: string | null; baseRef: string }> = [
+      ...store
+        .listRoleWorktrees(jobId)
+        .map((rw) => ({ path: rw.worktree, branch: rw.branch, baseRef: job.branch ?? "main" })),
+      ...(job.worktree ? [{ path: job.worktree, branch: job.branch, baseRef: "main" }] : []),
+    ];
+
+    const removed: string[] = [];
+    for (const t of targets) {
+      if (!t.path || t.path === mainWorktree) continue;
+      if (!existsSync(t.path)) continue;
+      const assessment = assessWorktree(
+        { path: t.path, branch: t.branch },
+        job,
+        mainWorktree,
+        t.baseRef,
+      );
+      if (assessment.classification !== "SAFE_TO_REMOVE") {
+        debug("worktree kept", { job: jobId, path: t.path, reason: assessment.reason });
+        continue;
+      }
+      if (!git(mainWorktree, ["worktree", "remove", "--force", t.path]).ok) continue;
+      if (t.branch) git(mainWorktree, ["branch", "-D", t.branch]);
+      removed.push(t.path);
+    }
+
+    if (removed.length === 0) return;
+    git(mainWorktree, ["worktree", "prune"]);
+    createMsg({
+      job_id: jobId,
+      from_role: "daemon",
+      to_role: "user",
+      kind: "note",
+      body:
+        `Reclaimed ${removed.length} worktree(s) for this finished job (clean and fully ` +
+        `merged):\n${removed.map((p) => `  ${p}`).join("\n")}\n` +
+        `Set AGVSR_AUTO_RECLAIM=0 to keep them instead.`,
+    });
   };
 
   const notifyWatchers = (msg: Message): void => {
@@ -2047,6 +2128,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   const close = async (): Promise<void> => {
     debug("closing");
     closing = true;
+    for (const timer of reclaimTimers) clearTimeout(timer);
+    reclaimTimers.clear();
     if (stallWatchdog) {
       clearInterval(stallWatchdog);
       stallWatchdog = null;
