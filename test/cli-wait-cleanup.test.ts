@@ -253,7 +253,7 @@ describe("agvsr cleanup", () => {
     expect(report.err).toBe("");
     expect(report.out).toContain(`${worktree}\tSAFE_TO_REMOVE\t${job.id}\tdone`);
 
-    const applied = await runCli(["cleanup", "--apply"], harness, harness.repo);
+    const applied = await runCli(["cleanup", "--apply", "--all"], harness, harness.repo);
     expect(applied.out).toContain(`removed ${worktree} (branch ${branch})`);
 
     const list = git(harness.repo, ["worktree", "list"]);
@@ -270,7 +270,7 @@ describe("agvsr cleanup", () => {
     const report = await runCli(["cleanup"], harness, harness.repo);
     expect(report.out).toContain(`${worktree}\tKEEP\t${job.id}\trunning`);
 
-    await runCli(["cleanup", "--apply"], harness, harness.repo);
+    await runCli(["cleanup", "--apply", "--all"], harness, harness.repo);
     const list = git(harness.repo, ["worktree", "list"]);
     expect(list.stdout).toContain(worktree);
   });
@@ -286,7 +286,7 @@ describe("agvsr cleanup", () => {
     expect(report.out).toContain("NEEDS_REVIEW");
     expect(report.out).toContain("uncommitted changes in the worktree");
 
-    await runCli(["cleanup", "--apply"], harness, harness.repo);
+    await runCli(["cleanup", "--apply", "--all"], harness, harness.repo);
     const list = git(harness.repo, ["worktree", "list"]);
     expect(list.stdout).toContain(worktree);
   });
@@ -313,7 +313,7 @@ describe("agvsr cleanup", () => {
     const report = await runCli(["cleanup"], harness, harness.repo);
     expect(report.out).toContain(`${orphanPath}\tSAFE_TO_REMOVE\t-\tORPHAN`);
 
-    await runCli(["cleanup", "--apply"], harness, harness.repo);
+    await runCli(["cleanup", "--apply", "--all"], harness, harness.repo);
     const list = git(harness.repo, ["worktree", "list"]);
     expect(list.stdout).not.toContain(orphanPath);
   });
@@ -354,10 +354,63 @@ roles:
 
     expect(report.out).toContain(instanceBranch);
 
-    const applied = await runCli(["cleanup", "--apply"], harness, harness.repo);
+    const applied = await runCli(
+      ["cleanup", "--apply", "--job", job.id],
+      harness,
+      harness.repo,
+    );
     expect(applied.out).toContain(`removed ${instanceWorktree} (branch ${instanceBranch})`);
     const list = git(harness.repo, ["worktree", "list"]);
     expect(list.stdout).not.toContain(instanceWorktree);
     expect(list.stdout).toContain(job.worktree!); // job worktree stays: NEEDS_REVIEW is never auto-removed
+  });
+
+  it("refuses --apply without --job or --all, and applies neither", async () => {
+    harness = await setupHarness();
+    const job = await createJob(harness);
+    await completeJob(harness, job.id);
+    const worktree = job.worktree!;
+
+    const applied = await runCli(["cleanup", "--apply"], harness, harness.repo);
+    expect(applied.code).toBe(2);
+    expect(applied.err).toContain("refusing to run --apply without a scope");
+
+    const list = git(harness.repo, ["worktree", "list"]);
+    expect(list.stdout).toContain(worktree);
+  });
+
+  it("--job scopes both the report and --apply to a single job, leaving other jobs untouched", async () => {
+    harness = await setupHarness();
+    const jobA = await createJob(harness, "job A");
+    await completeJob(harness, jobA.id);
+    const jobB = await createJob(harness, "job B");
+    await completeJob(harness, jobB.id);
+    const worktreeA = jobA.worktree!;
+    const worktreeB = jobB.worktree!;
+
+    const report = await runCli(["cleanup", "--job", jobA.id], harness, harness.repo);
+    expect(report.out).toContain(`${worktreeA}\tSAFE_TO_REMOVE\t${jobA.id}\tdone`);
+    expect(report.out).not.toContain(worktreeB);
+
+    const applied = await runCli(["cleanup", "--apply", "--job", jobA.id], harness, harness.repo);
+    expect(applied.out).toContain(`removed ${worktreeA}`);
+
+    const list = git(harness.repo, ["worktree", "list"]);
+    expect(list.stdout).not.toContain(worktreeA);
+    expect(list.stdout).toContain(worktreeB); // job B was never in scope
+  });
+
+  it("errors on an unknown --job id instead of falling back to an unscoped run", async () => {
+    harness = await setupHarness();
+    const job = await createJob(harness);
+    await completeJob(harness, job.id);
+    const worktree = job.worktree!;
+
+    const report = await runCli(["cleanup", "--job", "no-such-job"], harness, harness.repo);
+    expect(report.code).toBe(2);
+    expect(report.err).toContain("no such job: no-such-job");
+
+    const list = git(harness.repo, ["worktree", "list"]);
+    expect(list.stdout).toContain(worktree); // nothing touched
   });
 });

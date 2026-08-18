@@ -31,6 +31,7 @@ import {
   parseWorktreePorcelain,
   type CleanupClassification,
   type WorktreeAssessment,
+  type WorktreeEntry,
 } from "../git/cleanup.ts";
 
 const USAGE = `agvsr ${VERSION}
@@ -56,7 +57,12 @@ Usage:
   agvsr team                        Show configured roles
   agvsr usage [job-id] [--since D] [--hourly] [--json]
                                     Show token/cost accounting, optionally over a rolling window
-  agvsr cleanup [--apply]           Report (or remove) job worktrees/branches safe to delete
+  agvsr cleanup [--apply] [--job ID | --all] [--base-ref REF]
+                                    Report (or remove) job worktrees/branches safe to delete.
+                                    --apply requires --job <id> (one job) or --all (every job).
+                                    --base-ref overrides the "merged into main" comparison ref
+                                    (default: local "main" — pass origin/main after a fetch if
+                                    the local branch may be stale).
   agvsr web [--host H] [--port N] [--socket P]  Run the local web gateway
   agvsr doctor [--team F] [--json] [--probe]  Check adapter CLIs and auth; exit 0 if all pass
 `;
@@ -1009,8 +1015,29 @@ async function main(argv: string[]): Promise<void> {
     case "cleanup": {
       const { values: cleanupOpts } = parseArgs({
         args: rest,
-        options: { apply: { type: "boolean", default: false } },
+        options: {
+          apply: { type: "boolean", default: false },
+          job: { type: "string" },
+          all: { type: "boolean", default: false },
+          "base-ref": { type: "string", default: "main" },
+        },
+        allowPositionals: false,
+        strict: true,
       });
+
+      // An unscoped `--apply` deletes worktrees/branches across every job in one
+      // shot. That footgun is what turned a typo'd `--job` flag (which didn't
+      // exist yet, so `parseArgs` threw) into a `||`-chained fallback that wiped
+      // an unrelated job's worktrees along with the intended one. Require the
+      // caller to say which scope they mean before anything destructive runs.
+      if (cleanupOpts.apply && !cleanupOpts.job && !cleanupOpts.all) {
+        console.error(
+          "refusing to run --apply without a scope.\n" +
+            "  pass --job <id>  to remove only that job's worktrees, or\n" +
+            "  pass --all       to remove every safe-to-remove worktree across all jobs.",
+        );
+        process.exit(2);
+      }
 
       const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
       if (!repoRoot.ok) {
@@ -1018,6 +1045,7 @@ async function main(argv: string[]): Promise<void> {
         process.exit(2);
       }
       const mainWorktreePath = repoRoot.stdout;
+      const baseRef = cleanupOpts["base-ref"];
 
       const listRes = git(mainWorktreePath, ["worktree", "list", "--porcelain"]);
       if (!listRes.ok) {
@@ -1035,15 +1063,20 @@ async function main(argv: string[]): Promise<void> {
 
       await withClient(async (c) => {
         const { jobs } = unwrap(await c.request<{ jobs: Job[] }>("job.list"));
+        if (cleanupOpts.job && !jobs.some((j) => j.id === cleanupOpts.job)) {
+          console.error(`no such job: ${cleanupOpts.job}`);
+          process.exit(2);
+        }
         const { roleWorktrees } = unwrap(
           await c.request<{ roleWorktrees: RoleWorktree[] }>("job.roleWorktrees"),
         );
         const jobsById = new Map(jobs.map((j) => [j.id, j]));
 
-        // A job's own worktree merges toward main (unchanged); an instance
-        // worktree (D27) merges toward its owning job's own branch instead —
-        // it can be fully reconciled into the job branch long before the job
-        // itself is merged to main by a human.
+        // A job's own worktree merges toward `baseRef` (default "main", override
+        // with --base-ref if the local main ref is stale relative to origin);
+        // an instance worktree (D27) merges toward its owning job's own branch
+        // instead — it can be fully reconciled into the job branch long before
+        // the job itself is merged upstream by a human.
         interface Match {
           job: Job;
           baseRef: string;
@@ -1051,21 +1084,32 @@ async function main(argv: string[]): Promise<void> {
         const matchByWorktree = new Map<string, Match>();
         const matchByBranch = new Map<string, Match>();
         for (const j of jobs) {
-          if (j.worktree) matchByWorktree.set(j.worktree, { job: j, baseRef: "main" });
-          if (j.branch) matchByBranch.set(j.branch, { job: j, baseRef: "main" });
+          if (j.worktree) matchByWorktree.set(j.worktree, { job: j, baseRef });
+          if (j.branch) matchByBranch.set(j.branch, { job: j, baseRef });
         }
         for (const rw of roleWorktrees) {
           const job = jobsById.get(rw.job_id);
           if (!job) continue; // orphaned instance record; entry falls through as ORPHAN below
-          const baseRef = job.branch ?? "main";
-          matchByWorktree.set(rw.worktree, { job, baseRef });
-          matchByBranch.set(rw.branch, { job, baseRef });
+          const instanceBaseRef = job.branch ?? baseRef;
+          matchByWorktree.set(rw.worktree, { job, baseRef: instanceBaseRef });
+          matchByBranch.set(rw.branch, { job, baseRef: instanceBaseRef });
         }
 
-        const assessments = entries.map((entry) => {
-          const match =
-            matchByWorktree.get(entry.path) ??
-            (entry.branch ? matchByBranch.get(entry.branch) : undefined);
+        const matchFor = (entry: WorktreeEntry): Match | undefined =>
+          matchByWorktree.get(entry.path) ??
+          (entry.branch ? matchByBranch.get(entry.branch) : undefined);
+
+        const scopedEntries = cleanupOpts.job
+          ? entries.filter((entry) => matchFor(entry)?.job.id === cleanupOpts.job)
+          : entries;
+
+        if (scopedEntries.length === 0) {
+          console.log(`no worktrees found for job ${cleanupOpts.job}.`);
+          return;
+        }
+
+        const assessments = scopedEntries.map((entry) => {
+          const match = matchFor(entry);
           return assessWorktree(entry, match?.job ?? null, mainWorktreePath, match?.baseRef);
         });
 
@@ -1083,7 +1127,9 @@ async function main(argv: string[]): Promise<void> {
 
         if (!cleanupOpts.apply) {
           if (counts.SAFE_TO_REMOVE > 0) {
-            console.log("(dry run — pass --apply to remove the safe-to-remove entries)");
+            console.log(
+              "(dry run — pass --apply, plus --job <id> or --all, to remove the safe-to-remove entries)",
+            );
           }
           return;
         }
@@ -1501,5 +1547,21 @@ Usage: agvsr skill install [options]
 }
 
 if (import.meta.main) {
-  await main(process.argv.slice(2));
+  try {
+    await main(process.argv.slice(2));
+  } catch (err) {
+    // node:util's parseArgs throws a raw ERR_PARSE_ARGS_* exception (unknown
+    // option, missing value, ...) straight out of main() with no handling
+    // below. Left uncaught, that surfaces as a Node stack trace on exit code
+    // 1 — indistinguishable from any other failure, which is exactly what let
+    // a mistyped flag silently trip a shell `||` fallback into a broader,
+    // unintended command. Give it a clean message and its own exit code
+    // instead; anything else still propagates so real bugs keep their trace.
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (typeof code === "string" && code.startsWith("ERR_PARSE_ARGS")) {
+      console.error(`${(err as Error).message}\n\nRun "agvsr --help" for usage.`);
+      process.exit(2);
+    }
+    throw err;
+  }
 }
