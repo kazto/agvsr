@@ -326,6 +326,150 @@ describe("CLI <-> daemon over local IPC", () => {
     c.close();
   });
 
+  it("keeps the approval when the human sends an unrelated follow-up message", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "latch me", cwd: repo });
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1);
+
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design v1",
+      refs: ["docs/design.md"],
+    });
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "approved" });
+
+    // Ordinary human messages carrying no verdict must not revoke the approval — this is
+    // what used to re-open the gate every time the human passed along env details.
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "DATABASE_TEST_URL=postgres://x/y" });
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "テストDBのポートは 5433 です" });
+
+    await Bun.sleep(2);
+    const beforeImpl = dispatches.length;
+    const go = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "implement v1",
+    });
+    expect(go.ok).toBe(true);
+    await waitForDispatches(beforeImpl + 1);
+    c.close();
+  });
+
+  it("accepts a Japanese approval and honours a Japanese rejection", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "ja gate", cwd: repo });
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1);
+
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "設計が完了しました",
+      refs: ["docs/design.md"],
+    });
+
+    await Bun.sleep(2);
+    await c.request("job.tell", {
+      job_id: jobId,
+      body: "承認しますが1点変更があります。A2はZustandで。",
+    });
+    await Bun.sleep(2);
+    const beforeImpl = dispatches.length;
+    const go = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "実装してください",
+    });
+    expect(go.ok).toBe(true);
+    await waitForDispatches(beforeImpl + 1);
+
+    // An explicit Japanese rejection revokes it again.
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "やはり承認しません。中止してください。" });
+    await Bun.sleep(2);
+    const blocked = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "続行してください",
+    });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.error.code).toBe("approval_required");
+    c.close();
+  });
+
+  it("does not re-gate on a design follow-up about the already approved artifacts", async () => {
+    const c = await Client.connect(sock);
+    const beforeCreate = dispatches.length;
+    const created = await c.request<{ job: Job }>("job.create", { goal: "followup", cwd: repo });
+    const jobId = created.ok ? created.result.job.id : "";
+    await waitForDispatches(beforeCreate + 1);
+
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "design handoff",
+      refs: ["docs/design.md", "docs/handoff.md"],
+    });
+    await Bun.sleep(2);
+    await c.request("job.tell", { job_id: jobId, body: "approved" });
+
+    // design reports back on the *same* document (e.g. "I committed it to the job branch").
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "committed the design doc to the job branch",
+      refs: ["docs/design.md"],
+    });
+    await Bun.sleep(2);
+    const beforeImpl = dispatches.length;
+    const go = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "carry on",
+    });
+    expect(go.ok).toBe(true);
+    await waitForDispatches(beforeImpl + 1);
+
+    // but a handoff that widens the design surface does re-gate.
+    await Bun.sleep(2);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: jobId,
+      to: "supervisor",
+      body: "revised design: new schema",
+      refs: ["docs/design.md", "src/schema.ts"],
+    });
+    await Bun.sleep(2);
+    const reblocked = await c.request("msg.send", {
+      from: "supervisor",
+      job_id: jobId,
+      to: "implementation",
+      body: "implement revision",
+    });
+    expect(reblocked.ok).toBe(false);
+    if (!reblocked.ok) expect(reblocked.error.code).toBe("approval_required");
+    c.close();
+  });
+
   it("routes a supervisor escalation to the human, not back to itself", async () => {
     const c = await Client.connect(sock);
     const beforeCreate = dispatches.length;

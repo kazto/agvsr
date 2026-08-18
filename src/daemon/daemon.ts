@@ -475,8 +475,13 @@ function stallTimeoutMs(): number {
 // Design-approval gate (D-gate): once a design has been handed to the supervisor, block the
 // supervisor → implementation handoff until the human approves. Structural backstop for the
 // charter rule; applies to all jobs. Disable with AGVSR_DESIGN_GATE in {0,off,false,no}.
-const APPROVAL_RE = /\b(approve|approved|approval granted|go ahead|proceed|ship it|lgtm)\b/i;
-const REJECTION_RE = /\b(not approved|do not proceed|don'?t proceed|hold|stop|reject|rejected)\b/i;
+// Approval/rejection wording is matched in English and Japanese: humans answer the gate in
+// whatever language they run the job in, and an unrecognised "承認します" used to read as
+// "not approved" and re-open the gate on a design the human had already signed off.
+const APPROVAL_RE =
+  /\b(approve|approved|approval granted|go ahead|proceed|ship it|lgtm)\b|承認(?!しな|しませ|できま|を?(取り消|撤回|保留))|了承|許可します|進めてください|着手してください|問題ありません|異存はありません/i;
+const REJECTION_RE =
+  /\b(not approved|do not proceed|don'?t proceed|hold|stop|reject|rejected)\b|承認しな|承認しませ|承認できま|承認を?(取り消|撤回|保留)|却下|中止して|やめてください|一旦(停止|保留)|待ってください/i;
 
 function designGateEnabled(): boolean {
   const raw = process.env.AGVSR_DESIGN_GATE;
@@ -519,19 +524,52 @@ function hasOutstandingIdenticalDelegation(
 }
 
 /**
- * Decide approval from the most recent human (user → supervisor) reply after the design
- * handoff: approved iff it reads as approval and not as rejection. A later "stop"/"reject"
- * overrides an earlier "approved"; no reply at all means not yet approved.
+ * Read a human (user → supervisor) message as a verdict on the design: "approve",
+ * "reject", or null for an ordinary message that says nothing about approval. Only a
+ * verdict moves the gate — a plain progress report or a piece of environment info leaves
+ * an existing approval standing.
  */
-function approvedAfter(messages: Message[], sinceCreatedAt: string): boolean {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.created_at <= sinceCreatedAt) break;
-    if (m.from_role === "user" && m.to_role === SUPERVISOR) {
-      return APPROVAL_RE.test(m.body) && !REJECTION_RE.test(m.body);
-    }
+function approvalVerdict(body: string): "approve" | "reject" | null {
+  if (REJECTION_RE.test(body)) return "reject";
+  if (APPROVAL_RE.test(body)) return "approve";
+  return null;
+}
+
+function refsOf(message: Message): string[] {
+  if (!message.refs) return [];
+  try {
+    const parsed = JSON.parse(message.refs);
+    return Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : [];
+  } catch {
+    return [];
   }
-  return false;
+}
+
+/**
+ * The design handoff still awaiting human approval, or null if implementation may proceed.
+ *
+ * Approval is durable job state (`design_approved_at`), so it survives any number of
+ * unrelated human messages. It is revoked only by an explicit rejection or by a design
+ * handoff that widens the design surface: a handoff whose refs all fall inside the
+ * approved set is design reporting back on the *same* design (a re-commit, a "the file is
+ * in place now" confirmation) and must not re-gate work the human already signed off. A
+ * handoff carrying no refs at all is unattributable, so it re-gates.
+ */
+function pendingDesignApproval(job: Job, messages: Message[]): Message | null {
+  const latest = lastDesignHandoff(messages);
+  if (!latest) return null; // design was skipped for this job — gate does not apply
+  if (!job.design_approved_at) return latest;
+
+  const approvedRefs = new Set<string>(
+    job.design_approved_refs ? (JSON.parse(job.design_approved_refs) as string[]) : [],
+  );
+  for (const m of messages) {
+    if (m.created_at <= job.design_approved_at) continue;
+    if (m.from_role !== "design" || m.to_role !== SUPERVISOR) continue;
+    const refs = refsOf(m);
+    if (refs.length === 0 || refs.some((r) => !approvedRefs.has(r))) return m;
+  }
+  return null;
 }
 
 function toolUseFingerprint(events: TurnEvent[]): string {
@@ -1586,8 +1624,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         // the design. Only engages once a design handoff exists (jobs that skip design are
         // unaffected). The blocked handoff is not recorded or dispatched.
         if (designGateEnabled() && from === SUPERVISOR && isImplementationRole(to)) {
-          const design = lastDesignHandoff(history);
-          if (design && !approvedAfter(history, design.created_at)) {
+          const design = pendingDesignApproval(job, history);
+          if (design) {
             const note = createMsg({
               job_id,
               from_role: "daemon",
@@ -1847,6 +1885,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           kind: "message",
           body,
         });
+        // The human's verdict on the design is latched onto the job here rather than
+        // re-read from the tail of the log later, so a later unrelated message ("here is
+        // the test DB URL") cannot silently revoke it.
+        const verdict = approvalVerdict(body);
+        if (verdict === "approve") {
+          const design = lastDesignHandoff(store.listMessages(job_id));
+          if (design) store.setDesignApproval(job_id, msg.created_at, refsOf(design));
+        } else if (verdict === "reject") {
+          store.clearDesignApproval(job_id);
+        }
         enqueueDispatch(job, SUPERVISOR, body);
         return ok(req.id, { queued: true, message: msg });
       }

@@ -32,7 +32,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   workspace_id   TEXT,                  -- herdr mode only (D29/D30); NULL in standalone mode
   workspace_name TEXT,                  -- resolved herdr workspace label, cached at create time
   caller_pane_id TEXT,                  -- submitting pane, the front-desk escalation target (D31)
-  herdr_session  TEXT                   -- HERDR_SESSION of the submitting process
+  herdr_session  TEXT,                  -- HERDR_SESSION of the submitting process
+  design_approved_at   TEXT,            -- D-gate: when the human approved the current design
+  design_approved_refs TEXT             -- JSON array of refs carried by the approved handoff
 );
 CREATE TABLE IF NOT EXISTS messages (
   id         TEXT PRIMARY KEY,
@@ -102,7 +104,14 @@ export class Store {
     if (!has("worktree")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN worktree TEXT");
     }
-    for (const col of ["workspace_id", "workspace_name", "caller_pane_id", "herdr_session"]) {
+    for (const col of [
+      "workspace_id",
+      "workspace_name",
+      "caller_pane_id",
+      "herdr_session",
+      "design_approved_at",
+      "design_approved_refs",
+    ]) {
       if (!has(col)) {
         this.db.exec(`ALTER TABLE jobs ADD COLUMN ${col} TEXT`);
       }
@@ -136,6 +145,8 @@ export class Store {
       workspace_name: herdrInfo?.workspace_name ?? null,
       caller_pane_id: herdrInfo?.caller_pane_id ?? null,
       herdr_session: herdrInfo?.herdr_session ?? null,
+      design_approved_at: null,
+      design_approved_refs: null,
     };
     this.db
       .query(
@@ -172,6 +183,30 @@ export class Store {
 
   listJobs(): Job[] {
     return this.db.query(`SELECT * FROM jobs ORDER BY created_at DESC`).all() as Job[];
+  }
+
+  /**
+   * Record the human's design approval (D-gate). `refs` are the artifacts the approved
+   * design handoff carried; a later handoff that stays within them is a follow-up, not a
+   * new design, and must not revoke this approval.
+   */
+  setDesignApproval(id: string, approvedAt: string, refs: string[]): void {
+    this.db
+      .query(
+        `UPDATE jobs SET design_approved_at = $at, design_approved_refs = $refs, updated_at = $ts
+         WHERE id = $id`,
+      )
+      .run({ $at: approvedAt, $refs: JSON.stringify(refs), $ts: now(), $id: id });
+  }
+
+  /** Revoke a recorded design approval (explicit human rejection, or a new design). */
+  clearDesignApproval(id: string): void {
+    this.db
+      .query(
+        `UPDATE jobs SET design_approved_at = NULL, design_approved_refs = NULL, updated_at = $ts
+         WHERE id = $id`,
+      )
+      .run({ $ts: now(), $id: id });
   }
 
   setJobStatus(id: string, status: JobStatus): void {

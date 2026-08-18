@@ -24,6 +24,17 @@ export interface Job {
   caller_pane_id: string | null;
   /** HERDR_SESSION of the submitting process, passed through to herdr CLI calls. */
   herdr_session: string | null;
+  /**
+   * When the human approved the current design (D-gate). Durable job state rather
+   * than something re-derived from the tail of the message log, so that ordinary
+   * follow-up messages from the human do not silently revoke an approval.
+   */
+  design_approved_at: string | null;
+  /**
+   * JSON array of the `refs` carried by the design handoff that was approved. A later
+   * design handoff re-gates only if it touches artifacts outside this set.
+   */
+  design_approved_refs: string | null;
 }
 
 /** A role instance's dedicated worktree/branch (D27 — array-expanded

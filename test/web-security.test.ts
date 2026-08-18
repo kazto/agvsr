@@ -111,6 +111,8 @@ describe("web security helpers", () => {
       workspace_name: null,
       caller_pane_id: null,
       herdr_session: null,
+      design_approved_at: null,
+      design_approved_refs: null,
     };
     const baseRuntime: JobRuntime = {
       in_flight: false,
