@@ -19,6 +19,14 @@ import {
   unresolvedEnvFiles,
 } from "../git/env-parity.ts";
 import { refsGateEnabled, refsGateMessage, uncommittedRefs } from "../git/refs-gate.ts";
+import {
+  decisionLedgerEnabled,
+  decisionsFromRefs,
+  driftMessage,
+  frozenNotice,
+  mentionedDecisions,
+  outOfScopeDrift,
+} from "../git/decisions.ts";
 import { checkpointRef, checkpointsEnabled, createCheckpoint } from "../git/checkpoint.ts";
 import { Store } from "./store.ts";
 import {
@@ -1917,6 +1925,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const noTeam = requireTeam(req.id);
         if (noTeam) return noTeam;
         const { from, job_id, to, body, refs } = req.params;
+        let routedBody = body;
+        let reworkScope: string[] | null = null;
         const job = store.getJob(job_id);
         if (!job) return err(req.id, "not_found", `no job ${job_id}`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
@@ -1960,7 +1970,47 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             }
           }
         }
-        if (hasOutstandingIdenticalDelegation(history, from, to, body)) {
+        // Decision ledger (D45). Stable decision ids turn an approved design
+        // into mechanically checkable state instead of prose the supervisor
+        // must remember across every rework round.
+        if (decisionLedgerEnabled() && from === "design" && to === SUPERVISOR) {
+          const senderWt = store.getRoleWorktree(job_id, from);
+          const worktree = senderWt?.worktree ?? job.worktree;
+          const decisions = worktree && refs?.length ? decisionsFromRefs(worktree, refs) : [];
+          if (worktree && decisions.length === 0) {
+            return err(
+              req.id,
+              "design_decisions_unparseable",
+              `The design handoff contains no decision entries. Each decision must start ` +
+                `with a stable id, for example "D-1: keep the access TTL at 24h".`,
+            );
+          }
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = store.listDesignReworkScope(job_id);
+            const drift = outOfScopeDrift(approved, decisions, scope);
+            if (drift.length > 0) {
+              return err(req.id, "approved_decision_reverted", driftMessage(drift, scope));
+            }
+          }
+        }
+        if (decisionLedgerEnabled() && from === SUPERVISOR && to === "design") {
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = mentionedDecisions(body);
+            if (scope.length === 0) {
+              return err(
+                req.id,
+                "rework_scope_required",
+                `A rework instruction must name the decision ids to change ` +
+                  `(for example "revise D-1 and D-4; leave the rest unchanged").`,
+              );
+            }
+            reworkScope = scope;
+            routedBody += frozenNotice(approved, scope);
+          }
+        }
+        if (hasOutstandingIdenticalDelegation(history, from, to, routedBody)) {
           return err(
             req.id,
             "duplicate_delegation",
@@ -2012,18 +2062,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             );
           }
         }
+        if (reworkScope) {
+          store.setDesignReworkScope(job_id, reworkScope);
+          store.clearDesignApproval(job_id);
+        }
         const msg = createMsg({
           job_id,
           from_role: from,
           to_role: to,
           kind: "message",
-          body,
+          body: routedBody,
           refs,
         });
         if (to !== "user") {
-          enqueueDispatch(job, to, body);
+          enqueueDispatch(job, to, routedBody);
         } else if (from === SUPERVISOR) {
-          hook("on_supervisor_message", { event: "supervisor_message", job_id, body });
+          hook("on_supervisor_message", { event: "supervisor_message", job_id, body: routedBody });
         }
         return ok(req.id, { queued: true, message: msg });
       }
@@ -2280,6 +2334,42 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (job.status !== "running")
           return err(req.id, "bad_request", `job ${job_id} is not running (status: ${job.status})`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
+        const verdict = approvalVerdict(body);
+        if (decisionLedgerEnabled() && verdict === "reject") {
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = mentionedDecisions(body);
+            if (scope.length === 0) {
+              return err(
+                req.id,
+                "rework_scope_required",
+                `A design rejection must name the decision ids to change ` +
+                  `(for example "revise D-1 and D-4; leave the rest unchanged").`,
+              );
+            }
+            store.setDesignReworkScope(job_id, scope);
+          }
+        }
+        let approvedDesign:
+          | { refs: string[]; decisions: ReturnType<typeof decisionsFromRefs> }
+          | undefined;
+        if (verdict === "approve") {
+          const design = lastDesignHandoff(store.listMessages(job_id));
+          if (design) {
+            const designRefs = refsOf(design);
+            const designWt = store.getRoleWorktree(job_id, "design");
+            const worktree = designWt?.worktree ?? job.worktree;
+            const decisions = worktree ? decisionsFromRefs(worktree, designRefs) : [];
+            if (decisionLedgerEnabled() && worktree && decisions.length === 0) {
+              return err(
+                req.id,
+                "design_decisions_unparseable",
+                "The design being approved contains no stable D-n decision entries.",
+              );
+            }
+            approvedDesign = { refs: designRefs, decisions };
+          }
+        }
         const msg = createMsg({
           job_id,
           from_role: "user",
@@ -2290,10 +2380,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         // The human's verdict on the design is latched onto the job here rather than
         // re-read from the tail of the log later, so a later unrelated message ("here is
         // the test DB URL") cannot silently revoke it.
-        const verdict = approvalVerdict(body);
         if (verdict === "approve") {
-          const design = lastDesignHandoff(store.listMessages(job_id));
-          if (design) store.setDesignApproval(job_id, msg.created_at, refsOf(design));
+          if (approvedDesign) {
+            store.setDesignApproval(job_id, msg.created_at, approvedDesign.refs);
+            if (decisionLedgerEnabled() && approvedDesign.decisions.length > 0) {
+              store.replaceDesignDecisions(job_id, msg.created_at, approvedDesign.decisions);
+            }
+          }
         } else if (verdict === "reject") {
           store.clearDesignApproval(job_id);
         }

@@ -90,7 +90,7 @@ async function setup() {
 describe("uncommittedRefs", () => {
   it("reports an untracked file", async () => {
     const { worktree, c } = await setup();
-    writeFileSync(join(worktree, "design.md"), "# design\n");
+    writeFileSync(join(worktree, "design.md"), "D-1: keep the design stable\n");
     const problems = uncommittedRefs(worktree, ["design.md"]);
     expect(problems).toHaveLength(1);
     expect(problems[0]!.problem).toBe("untracked");
@@ -193,7 +193,7 @@ describe("handoff artifact gate (D46)", () => {
 
   it("accepts the same handoff once the artifact is committed", async () => {
     const { c, job, worktree } = await setup();
-    writeFileSync(join(worktree, "design.md"), "# design\n");
+    writeFileSync(join(worktree, "design.md"), "D-1: keep the design stable\n");
     git(worktree, ["add", "-A"]);
     git(worktree, ["commit", "-m", "design"]);
 
@@ -238,6 +238,7 @@ describe("handoff artifact gate (D46)", () => {
 
   it("stands down when AGVSR_REFS_GATE is disabled", async () => {
     setEnv("AGVSR_REFS_GATE", "0");
+    setEnv("AGVSR_DECISION_LEDGER", "0");
     const { c, job, worktree } = await setup();
     writeFileSync(join(worktree, "design.md"), "# design\n");
     const sent = await c.request("msg.send", {
@@ -248,6 +249,107 @@ describe("handoff artifact gate (D46)", () => {
       refs: ["design.md"],
     });
     expect(sent.ok).toBe(true);
+    c.close();
+  });
+});
+
+describe("approved decision ledger (D45)", () => {
+  it("requires stable decision ids in a committed design", async () => {
+    const { c, job, worktree } = await setup();
+    writeFileSync(join(worktree, "design.md"), "# Design without decision ids\n");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["commit", "-m", "design"]);
+
+    const sent = await c.request("msg.send", {
+      from: "design",
+      job_id: job.id,
+      to: "supervisor",
+      body: "design ready",
+      refs: ["design.md"],
+    });
+    expect(sent.ok).toBe(false);
+    if (!sent.ok) expect(sent.error.code).toBe("design_decisions_unparseable");
+    c.close();
+  });
+
+  it("rejects out-of-scope drift and appends the frozen decisions to rework", async () => {
+    const { c, job, worktree } = await setup();
+    writeFileSync(worktree + "/design.md", "D-1: TTL is 24h\n\nD-2: token format is unchanged\n");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["commit", "-m", "design v1"]);
+    const first = await c.request("msg.send", {
+      from: "design",
+      job_id: job.id,
+      to: "supervisor",
+      body: "design ready",
+      refs: ["design.md"],
+    });
+    expect(first.ok).toBe(true);
+    const approved = await c.request("job.tell", { job_id: job.id, body: "approved" });
+    expect(approved.ok).toBe(true);
+
+    const rework = await c.request<{ message: Message }>("msg.send", {
+      from: "supervisor",
+      job_id: job.id,
+      to: "design",
+      body: "Revise D-1 only.",
+    });
+    expect(rework.ok).toBe(true);
+    if (rework.ok) {
+      expect(rework.result.message.body).toContain("D-2");
+      expect(rework.result.message.body).toContain("変更禁止");
+    }
+
+    writeFileSync(worktree + "/design.md", "D-1: TTL is 1h\n\nD-2: add familyId to tokens\n");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["commit", "-m", "bad revision"]);
+    const drifted = await c.request("msg.send", {
+      from: "design",
+      job_id: job.id,
+      to: "supervisor",
+      body: "revised design",
+      refs: ["design.md"],
+    });
+    expect(drifted.ok).toBe(false);
+    if (!drifted.ok) {
+      expect(drifted.error.code).toBe("approved_decision_reverted");
+      expect(drifted.error.message).toContain("D-2");
+    }
+
+    writeFileSync(worktree + "/design.md", "D-1: TTL is 1h\n\nD-2: token format is unchanged\n");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["commit", "-m", "scoped revision"]);
+    const scoped = await c.request("msg.send", {
+      from: "design",
+      job_id: job.id,
+      to: "supervisor",
+      body: "revised design",
+      refs: ["design.md"],
+    });
+    expect(scoped.ok).toBe(true);
+    c.close();
+  });
+
+  it("requires a rejection to name its rework scope", async () => {
+    const { c, job, worktree } = await setup();
+    writeFileSync(worktree + "/design.md", "D-1: TTL is 24h\n");
+    git(worktree, ["add", "-A"]);
+    git(worktree, ["commit", "-m", "design"]);
+    await c.request("msg.send", {
+      from: "design",
+      job_id: job.id,
+      to: "supervisor",
+      body: "design ready",
+      refs: ["design.md"],
+    });
+    await c.request("job.tell", { job_id: job.id, body: "approved" });
+
+    const rejected = await c.request("job.tell", {
+      job_id: job.id,
+      body: "Reject this and rewrite the design.",
+    });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe("rework_scope_required");
     c.close();
   });
 });

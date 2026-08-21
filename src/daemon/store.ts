@@ -91,6 +91,22 @@ CREATE TABLE IF NOT EXISTS job_checkpoints (
   created_at TEXT NOT NULL,
   FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
+CREATE TABLE IF NOT EXISTS design_decisions (
+  job_id      TEXT NOT NULL,
+  decision_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  summary     TEXT NOT NULL,
+  approved_at TEXT NOT NULL,
+  PRIMARY KEY (job_id, decision_id),
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE TABLE IF NOT EXISTS design_rework_scope (
+  job_id      TEXT NOT NULL,
+  decision_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (job_id, decision_id),
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
 CREATE INDEX IF NOT EXISTS idx_job_checkpoints_job ON job_checkpoints(job_id, role, turn);
 CREATE INDEX IF NOT EXISTS idx_job_checkpoints_worktree ON job_checkpoints(worktree, turn);
 CREATE INDEX IF NOT EXISTS idx_turn_usage_job ON turn_usage(job_id, created_at);
@@ -221,6 +237,78 @@ export class Store {
          WHERE id = $id`,
       )
       .run({ $ts: now(), $id: id });
+  }
+
+  replaceDesignDecisions(
+    jobId: string,
+    approvedAt: string,
+    decisions: Array<{ id: string; hash: string; summary: string }>,
+  ): void {
+    const replace = this.db.transaction(() => {
+      this.db.query(`DELETE FROM design_decisions WHERE job_id = $job_id`).run({ $job_id: jobId });
+      const insert = this.db.query(
+        `INSERT INTO design_decisions
+           (job_id, decision_id, content_hash, summary, approved_at)
+         VALUES ($job_id, $decision_id, $hash, $summary, $approved_at)`,
+      );
+      for (const decision of decisions) {
+        insert.run({
+          $job_id: jobId,
+          $decision_id: decision.id,
+          $hash: decision.hash,
+          $summary: decision.summary,
+          $approved_at: approvedAt,
+        });
+      }
+      this.clearDesignReworkScope(jobId);
+    });
+    replace();
+  }
+
+  listDesignDecisions(
+    jobId: string,
+  ): Array<{ decision_id: string; hash: string; summary: string }> {
+    return this.db
+      .query(
+        `SELECT decision_id, content_hash AS hash, summary
+         FROM design_decisions WHERE job_id = $job_id ORDER BY decision_id`,
+      )
+      .all({ $job_id: jobId }) as Array<{
+      decision_id: string;
+      hash: string;
+      summary: string;
+    }>;
+  }
+
+  setDesignReworkScope(jobId: string, decisionIds: string[]): void {
+    const replace = this.db.transaction(() => {
+      this.clearDesignReworkScope(jobId);
+      const insert = this.db.query(
+        `INSERT INTO design_rework_scope (job_id, decision_id, created_at)
+         VALUES ($job_id, $decision_id, $created_at)`,
+      );
+      const createdAt = now();
+      for (const decisionId of decisionIds) {
+        insert.run({ $job_id: jobId, $decision_id: decisionId, $created_at: createdAt });
+      }
+    });
+    replace();
+  }
+
+  listDesignReworkScope(jobId: string): string[] {
+    const rows = this.db
+      .query(
+        `SELECT decision_id FROM design_rework_scope
+         WHERE job_id = $job_id ORDER BY decision_id`,
+      )
+      .all({ $job_id: jobId }) as Array<{ decision_id: string }>;
+    return rows.map((row) => row.decision_id);
+  }
+
+  clearDesignReworkScope(jobId: string): void {
+    this.db.query(`DELETE FROM design_rework_scope WHERE job_id = $job_id`).run({
+      $job_id: jobId,
+    });
   }
 
   setJobStatus(id: string, status: JobStatus): void {
