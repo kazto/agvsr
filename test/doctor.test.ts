@@ -501,8 +501,14 @@ describe("model probing", () => {
         return { exitCode: 0, stdout: "OK", stderr: "" };
       },
     });
-    await runDoctor("/team.yaml", deps);
+    const report = await runDoctor("/team.yaml", deps);
     expect(calls).toBe(0);
+    const warning = report.groups
+      .flatMap((group) => group.checks)
+      .find((check) => check.label === "runtime probe");
+    expect(warning?.level).toBe("warn");
+    expect(warning?.message).toContain("agvsr doctor --probe");
+    expect(warning?.message).toContain("malformed CLI configuration");
   });
 
   it("probes roles in team.yaml order when enabled", async () => {

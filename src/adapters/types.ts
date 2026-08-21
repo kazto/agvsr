@@ -64,6 +64,8 @@ export interface TurnOutcome {
   finalText: string;
   /** Bounded stderr tail kept for diagnostics/classification. */
   stderrTail?: string;
+  /** Bounded raw stdout tail, used when a CLI reports startup errors on stdout. */
+  stdoutTail?: string;
   exitCode: number;
   /** True when the deterministic runtime watchdog killed the turn (D14). */
   timedOut?: boolean;

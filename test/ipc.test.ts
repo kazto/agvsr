@@ -775,6 +775,8 @@ describe("CLI <-> daemon over local IPC", () => {
     const sockLocal = `${base}.sock`;
     const db = `${base}.sqlite`;
     const seen: TurnDispatch[] = [];
+    const savedGuard = process.env.AGVSR_DELEGATION_GUARD;
+    process.env.AGVSR_DELEGATION_GUARD = "0";
     const { startDaemon } = await import("../src/daemon/daemon.ts");
     const localDaemon = await startDaemon({
       endpoint: sockLocal,
@@ -811,40 +813,47 @@ describe("CLI <-> daemon over local IPC", () => {
       const jobId = created.ok ? created.result.job.id : "";
       for (let i = 0; i < 50 && seen.length < 1; i++) await Bun.sleep(5);
 
-      const sent = await c.request("msg.send", {
-        from: "supervisor",
-        job_id: jobId,
-        to: "implementation",
-        body: "run once",
-      });
-      expect(sent.ok).toBe(true);
-      for (let i = 0; i < 100; i++) {
-        const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
-        if (
-          logs.ok &&
-          logs.result.messages.some(
-            (message) => message.kind === "escalation" && message.to_role === "user",
-          )
+      for (let occurrence = 1; occurrence <= 3; occurrence++) {
+        const sent = await c.request("msg.send", {
+          from: "supervisor",
+          job_id: jobId,
+          to: "implementation",
+          body: `run attempt ${occurrence}`,
+        });
+        expect(sent.ok).toBe(true);
+        for (
+          let i = 0;
+          i < 100 &&
+          seen.filter((dispatch) => dispatch.role === "implementation").length < occurrence;
+          i++
         ) {
-          break;
+          await Bun.sleep(5);
         }
-        await Bun.sleep(5);
       }
 
       const got = await c.request<{ job: Job }>("job.get", { id: jobId });
       expect(got.ok && got.result.job.status).toBe("running");
-      expect(seen.filter((dispatch) => dispatch.role === "implementation")).toHaveLength(1);
+      expect(seen.filter((dispatch) => dispatch.role === "implementation")).toHaveLength(3);
       expect(seen.filter((dispatch) => dispatch.role === "supervisor")).toHaveLength(1);
       const logs = await c.request<{ messages: Message[] }>("msg.list", { job_id: jobId });
       expect(logs.ok).toBe(true);
       if (!logs.ok) throw new Error("msg.list failed");
-      const escalation = logs.result.messages.find(
+      const escalations = logs.result.messages.filter(
         (message) => message.kind === "escalation" && message.to_role === "user",
       );
+      expect(escalations).toHaveLength(3);
+      const escalation = escalations.at(-1);
+      expect(escalation?.body).toContain("3rd consecutive occurrence");
       expect(escalation?.body).toContain("will not be retried automatically");
       expect(escalation?.body).toContain("monthly spend limit");
+      expect(escalation?.body).toContain(
+        "Available adapters/roles: claude-code: supervisor, design; agy: qa",
+      );
+      expect(escalation?.body).toContain("Limited adapters/roles: codex: implementation");
       c.close();
     } finally {
+      if (savedGuard === undefined) delete process.env.AGVSR_DELEGATION_GUARD;
+      else process.env.AGVSR_DELEGATION_GUARD = savedGuard;
       await localDaemon.close();
       for (const f of [sockLocal, db, `${db}-wal`, `${db}-shm`]) {
         try {
@@ -2681,7 +2690,7 @@ describe("timeout failure reasons (AC-4)", () => {
     }
   });
 
-  it("supervisor non-timeout failure body includes exitCode, adapter, and model", async () => {
+  it("supervisor failure uses stdout diagnostics when stderr is empty", async () => {
     const base = join(tmpdir(), `agvsr-diag-sup-${randomUUID()}`);
     const sockLocal = `${base}.sock`;
     const db = `${base}.sqlite`;
@@ -2695,7 +2704,12 @@ describe("timeout failure reasons (AC-4)", () => {
       interruptRunningJobsOnStart: false,
       turnRunner: async () => ({
         events: [],
-        outcome: { sessionId: null, finalText: "", exitCode: 5 },
+        outcome: {
+          sessionId: null,
+          finalText: "",
+          stdoutTail: "failed to load ~/.codex/config.toml: invalid hooks section",
+          exitCode: 5,
+        },
       }),
     });
 
@@ -2722,6 +2736,9 @@ describe("timeout failure reasons (AC-4)", () => {
       expect(failMsg!.body).toContain("exitCode=5");
       expect(failMsg!.body).toContain("adapter=claude-code");
       expect(failMsg!.body).toContain("model=claude-opus-4-8");
+      expect(failMsg!.body).toContain("stderrTail: (empty)");
+      expect(failMsg!.body).toContain("stdoutTail:");
+      expect(failMsg!.body).toContain("invalid hooks section");
 
       c.close();
     } finally {

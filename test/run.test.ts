@@ -202,6 +202,23 @@ describe("runTurn", () => {
     expect(outcome.stderrTail).toBeUndefined();
   });
 
+  it("retains raw stdout for startup failures that never reach the parser", async () => {
+    const { outcome } = await runTurn(
+      stderrDriver({
+        sessionId: null,
+        stderr: "",
+        stdout: `HEAD_START|${"a".repeat(9000)}|CODEX_CONFIG_ERROR`,
+      }),
+      spec,
+      null,
+      "go",
+    );
+    expect(outcome.stdoutTail).toBeDefined();
+    expect(outcome.stdoutTail!.length).toBeLessThanOrEqual(8192);
+    expect(outcome.stdoutTail!).toContain("CODEX_CONFIG_ERROR");
+    expect(outcome.stdoutTail!).not.toContain("HEAD_START");
+  });
+
   it("retains only the bounded stderr tail", async () => {
     const { outcome } = await runTurn(
       stderrDriver({

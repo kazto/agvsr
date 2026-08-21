@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { parseArgs } from "node:util";
+import { randomUUID } from "node:crypto";
 import { Client, DaemonNotRunningError, EndpointInUseError } from "../ipc/transport.ts";
 import { ipcEndpoint } from "../paths.ts";
 import { VERSION } from "../version.ts";
@@ -645,7 +646,7 @@ async function main(argv: string[]): Promise<void> {
         caller_pane_id?: string;
         herdr_session?: string;
       } = { goal, cwd };
-      if (values.id) params.id = values.id;
+      params.id = values.id ?? randomUUID();
       // herdr mode (D29): detected from env, never required. Absent HERDR_ENV/
       // HERDR_WORKSPACE_ID, the job is submitted as standalone with no herdr fields.
       const herdrMode = process.env.HERDR_ENV === "1" && !!process.env.HERDR_WORKSPACE_ID;
@@ -654,6 +655,7 @@ async function main(argv: string[]): Promise<void> {
         if (process.env.HERDR_PANE_ID) params.caller_pane_id = process.env.HERDR_PANE_ID;
         if (process.env.HERDR_SESSION) params.herdr_session = process.env.HERDR_SESSION;
       }
+      console.log(`submitting job ${params.id}`);
       await withClient(async (c) => {
         const { job } = unwrap(await c.request<{ job: Job }>("job.create", params));
         console.log(`job ${job.id} created (${job.status})`);

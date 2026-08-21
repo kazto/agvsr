@@ -140,9 +140,13 @@ describe("agvsr job herdr mode detection (D29)", () => {
 
   it("submits standalone (all herdr fields null) when HERDR_ENV/HERDR_WORKSPACE_ID are unset", async () => {
     harness = await setupHarness();
-    const { code, err } = await runJobCli(harness, "standalone job", null);
+    const { code, out, err } = await runJobCli(harness, "standalone job", null);
     expect(err).toBe("");
     expect(code).toBe(0);
+    const outputLines = out.trim().split("\n");
+    expect(outputLines[0]).toMatch(/^submitting job [0-9a-f-]{36}$/);
+    const submittedId = outputLines[0]!.slice("submitting job ".length);
+    expect(outputLines[1]).toBe(`job ${submittedId} created (running)`);
 
     const jobs = await harness.client.request<{ jobs: Job[] }>("job.list");
     expect(jobs.ok).toBe(true);

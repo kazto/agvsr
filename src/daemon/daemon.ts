@@ -406,16 +406,40 @@ export function isUsageLimitError(text: string): boolean {
   return USAGE_LIMIT_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function usageLimitCause(text: string): string | null {
+  const index = USAGE_LIMIT_PATTERNS.findIndex((pattern) => pattern.test(text));
+  return index < 0 ? null : `usage-limit-pattern-${index}`;
+}
+
 function usageLimitEscalation(
   role: string,
   adapter: Adapter,
   model: string,
   diagnostics: string,
+  occurrence: number,
+  team: TeamConfig,
+  limitedAdapters: Set<Adapter>,
 ): string {
+  const rolesByAdapter = new Map<Adapter, string[]>();
+  for (const [name, config] of Object.entries(team.roles)) {
+    const roles = rolesByAdapter.get(config.adapter) ?? [];
+    roles.push(name);
+    rolesByAdapter.set(config.adapter, roles);
+  }
+  const describe = (limited: boolean): string => {
+    const rows = [...rolesByAdapter]
+      .filter(([candidate]) => limitedAdapters.has(candidate) === limited)
+      .map(([candidate, roles]) => `${candidate}: ${roles.join(", ")}`);
+    return rows.length > 0 ? rows.join("; ") : "(none)";
+  };
   return [
-    `${role} cannot continue because ${adapter} reported a usage/rate limit.`,
+    `${role} cannot continue because ${adapter} reported a usage/rate limit (${occurrence}${
+      occurrence === 1 ? "st" : occurrence === 2 ? "nd" : occurrence === 3 ? "rd" : "th"
+    } consecutive occurrence).`,
     `The job remains running, but this worker will not be retried automatically. ` +
       `Resolve or wait for the provider limit, then resume with agvsr tell.`,
+    `Available adapters/roles: ${describe(false)}`,
+    `Limited adapters/roles: ${describe(true)}`,
     `role=${role} adapter=${adapter} model=${model}`,
     `diagnostics:\n${tailText(diagnostics, 2048)}`,
   ].join("\n\n");
@@ -442,11 +466,17 @@ function turnFailureDiagnostics(
   model: string,
   exitCode: number,
   stderrTail: string | undefined,
+  stdoutTail?: string,
 ): string {
-  const tail = tailText(stderrTail ?? "", STDERR_DIAG_CAP);
+  const stderr = tailText(stderrTail ?? "", STDERR_DIAG_CAP);
+  const stdout = stderr ? "" : tailText(stdoutTail ?? "", STDERR_DIAG_CAP);
   return [
     `exitCode=${exitCode} adapter=${adapter} model=${model}`,
-    tail ? `stderrTail:\n${tail}` : "stderrTail: (empty)",
+    stderr
+      ? `stderrTail:\n${stderr}`
+      : stdout
+        ? `stderrTail: (empty)\n\nstdoutTail:\n${stdout}`
+        : "stderrTail: (empty)\n\nstdoutTail: (empty)",
   ].join("\n\n");
 }
 
@@ -821,6 +851,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   }
   const sessions = new Map<string, Map<string, string | null>>();
   const failureCounts = new Map<string, Map<string, number>>();
+  const usageLimitFailures = new Map<
+    string,
+    Map<string, { adapter: Adapter; cause: string; count: number }>
+  >();
+  const limitedAdaptersByJob = new Map<string, Set<Adapter>>();
   /**
    * When each `<jobId>:<role>` last finished a turn (D44). The delegation guard
    * needs to tell "has not answered" apart from "has not started", and a role
@@ -1165,6 +1200,33 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     failureCounts.get(jobId)?.set(role, 0);
   };
 
+  const recordUsageLimit = (
+    jobId: string,
+    role: string,
+    adapter: Adapter,
+    cause: string,
+  ): number => {
+    const byRole = usageLimitFailures.get(jobId) ?? new Map();
+    usageLimitFailures.set(jobId, byRole);
+    const previous = byRole.get(role);
+    const count =
+      previous?.adapter === adapter && previous.cause === cause ? previous.count + 1 : 1;
+    byRole.set(role, { adapter, cause, count });
+    const limited = limitedAdaptersByJob.get(jobId) ?? new Set<Adapter>();
+    limitedAdaptersByJob.set(jobId, limited);
+    limited.add(adapter);
+    return count;
+  };
+
+  const clearUsageLimit = (jobId: string, adapter: Adapter): void => {
+    limitedAdaptersByJob.get(jobId)?.delete(adapter);
+    const byRole = usageLimitFailures.get(jobId);
+    if (!byRole) return;
+    for (const [role, state] of byRole) {
+      if (state.adapter === adapter) byRole.delete(role);
+    }
+  };
+
   /**
    * True when the supervisor has put a question to the human that is still
    * unanswered (D36). In that state the supervisor has nothing it *should* route
@@ -1481,7 +1543,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
               ? `${role} turn failed: no progress for ${idleMs}ms (no-progress timeout).`
               : `${role} turn failed: exceeded hard timeout ${hardMs}ms.`;
         } else {
-          reason = `${role} turn failed.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, undefined)}`;
+          reason = `${role} turn failed.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, result.outcome.stderrTail, result.outcome.stdoutTail)}`;
         }
         reason = appendRecoverableDirtyWorktreeNote(job, reason, store.listRoleWorktrees(job.id));
         setStatus(job.id, "failed");
@@ -1494,13 +1556,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         });
         hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
       } else {
-        const diagnostics = [result.outcome.stderrTail, finalText].filter(Boolean).join("\n");
-        if (diagnostics && isUsageLimitError(diagnostics)) {
+        const diagnostics = [result.outcome.stderrTail, result.outcome.stdoutTail, finalText]
+          .filter(Boolean)
+          .join("\n");
+        const limitCause = diagnostics ? usageLimitCause(diagnostics) : null;
+        if (limitCause) {
+          const occurrence = recordUsageLimit(job.id, role, roleConfig.adapter, limitCause);
           const body = usageLimitEscalation(
             role,
             roleConfig.adapter,
             roleConfig.model,
             diagnostics,
+            occurrence,
+            jobTeam,
+            limitedAdaptersByJob.get(job.id)!,
           );
           createMsg({
             job_id: job.id,
@@ -1512,6 +1581,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           hook("on_supervisor_message", { event: "supervisor_message", job_id: job.id, body });
           return;
         }
+        clearUsageLimit(job.id, roleConfig.adapter);
         if (diagnostics && isConfigError(roleConfig.adapter, diagnostics)) {
           const body = configErrorEscalation(
             role,
@@ -1547,7 +1617,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           });
           hook("on_job_failed", { event: "job_failed", job_id: job.id, goal: job.goal, reason });
         } else {
-          const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, result.outcome.stderrTail)}`;
+          const body = `${role} turn failed with exit code ${result.outcome.exitCode} (failure ${failures}/${threshold}). Supervisor must decide whether to retry, reassign, or fail the job.\n\n${turnFailureDiagnostics(roleConfig.adapter, roleConfig.model, result.outcome.exitCode, result.outcome.stderrTail, result.outcome.stdoutTail)}`;
           createMsg({
             job_id: job.id,
             from_role: "daemon",
@@ -1560,6 +1630,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       }
     } else {
       resetFailure(job.id, role);
+      clearUsageLimit(job.id, roleConfig.adapter);
       const loopMsg = checkLoopSignal(job.id, role, roleConfig.adapter, result.events);
       if (loopMsg) {
         const escalations = (loopEscalationCounts.get(job.id) ?? 0) + 1;
