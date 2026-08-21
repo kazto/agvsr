@@ -28,6 +28,7 @@ import {
   outOfScopeDrift,
 } from "../git/decisions.ts";
 import { checkpointRef, checkpointsEnabled, createCheckpoint } from "../git/checkpoint.ts";
+import { checkVerifyGate, verifyGateEnabled, type VerifyOutcome } from "../git/verify.ts";
 import { Store } from "./store.ts";
 import {
   allowedTargets,
@@ -826,6 +827,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
    * that has never produced a turn is the only case the guard acts on.
    */
   const lastTurnEndedAt = new Map<string, number>();
+  /** Turns each `<jobId>:<role>` has finished, reported to the supervisor (D44). */
+  const completedTurns = new Map<string, number>();
   // Loop/no-progress watchdog state (D14)
   const noProgressCounts = new Map<string, Map<string, number>>();
   const loopFingerprints = new Map<string, Map<string, { fp: string; count: number }>>();
@@ -1053,6 +1056,67 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     }
   };
 
+  /**
+   * Facts about every delegate, prepended to each supervisor turn (D44).
+   *
+   * The supervisor that escalated "design is not responding" 30 seconds after
+   * delegating was not lying — it had no way to tell "has not answered" from
+   * "has not started". Both look identical from inside a turn. Every line here
+   * is the daemon's own observation, not something an agent reported, so the
+   * distinction is available before the supervisor has to act on it.
+   *
+   * The refusals in msg.send/msg.escalate remain the actual guarantee; this
+   * only removes the excuse for needing them.
+   */
+  const delegationStatusBlock = (job: Job, jobTeam: TeamConfig): string => {
+    if (!delegationGuardEnabled()) return "";
+    const roles = Object.keys(jobTeam.roles).filter((r) => r !== SUPERVISOR);
+    if (roles.length === 0) return "";
+
+    const history = store.listMessages(job.id);
+    const now = Date.now();
+    const width = Math.max(...roles.map((r) => r.length));
+    const lines = roles.map((role) => {
+      const key = `${job.id}:${role}`;
+      const turns = completedTurns.get(key) ?? 0;
+      const pending = outstandingDelegation(history, role);
+      const inFlight = turnStartedAt.has(key);
+      const state = pending
+        ? `awaiting reply, delegated ${describeAge(pending.created_at, now)} ago`
+        : turns > 0
+          ? "idle, last delegation answered"
+          : "not delegated";
+      return `  ${role.padEnd(width)} : ${state}, ${turns} turn(s) completed, in-flight: ${
+        inFlight ? "yes" : "no"
+      }`;
+    });
+    return [`[agvsr delegation status]`, ...lines, ``].join("\n");
+  };
+
+  /**
+   * Run the job's declared verification against its worktree (D43 mechanism B),
+   * with the same environment its roles had — otherwise the gate would recreate
+   * the very gap it exists to detect. Returns null when there is nothing
+   * configured or the run is satisfactory.
+   */
+  const runVerifyGate = (job: Job, jobTeam: TeamConfig | null): VerifyOutcome | null => {
+    if (!verifyGateEnabled() || !jobTeam?.verify || !job.worktree) return null;
+    const repoRoot = repoRootOf(job.cwd);
+    if (!repoRoot) return null;
+    const env = { ...envFileVarsFor(job.cwd, jobTeam), ...jobTeam.env };
+    try {
+      return checkVerifyGate(jobTeam.verify, job.worktree, repoRoot, env);
+    } catch (e) {
+      // A gate that cannot run is a gate that verified nothing; say so rather
+      // than letting the completion through on an exception.
+      return {
+        ok: false,
+        code: "verify_failed",
+        message: `Verification could not be run: ${(e as Error).message}`,
+      };
+    }
+  };
+
   const notifyWatchers = (msg: Message): void => {
     const set = msgWatchers.get(msg.job_id);
     if (!set || set.size === 0) return;
@@ -1185,6 +1249,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
 
     const messageCountBeforeTurn = store.listMessages(job.id).length;
     const sessionId = sessionFor(job.id, role);
+    // Only the supervisor delegates, so only it needs to know where its
+    // delegates stand (D44).
+    const turnMessage =
+      role === SUPERVISOR ? `${delegationStatusBlock(job, jobTeam)}${message}` : message;
     // A role with its own isolated worktree (D27 — an array-expanded
     // implementation instance) dispatches there instead of the job's shared
     // worktree; every other role is unaffected (roleWt is null for them).
@@ -1230,7 +1298,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         networkAccess: roleConfig.network_access,
         job,
         effectiveCwd,
-        message,
+        message: turnMessage,
         sessionId,
         systemPrompt,
         signal: ac.signal,
@@ -1288,6 +1356,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     // Recorded before the kill check below, like usage above: the turn ran, and
     // the delegation guard must not keep treating this role as never-started.
     lastTurnEndedAt.set(`${job.id}:${role}`, Date.now());
+    completedTurns.set(`${job.id}:${role}`, (completedTurns.get(`${job.id}:${role}`) ?? 0) + 1);
 
     // Park whatever the turn left uncommitted (D46). Ahead of the kill check on
     // purpose: a turn cut short mid-edit is exactly when the work is most at
@@ -2254,6 +2323,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             body: gate.message,
           });
           return err(req.id, gate.code, gate.message);
+        }
+        // Independent verification (D43 mechanism B). Runs after the commit
+        // gate so the tests exercise committed work, and the daemon runs it
+        // itself — whatever the completing turn claimed about tests passing is
+        // not read here.
+        const completingTeam = jobTeamSnapshots.get(job.id) ?? team;
+        const verifyOutcome = runVerifyGate(job, completingTeam);
+        if (verifyOutcome) {
+          createMsg({
+            job_id: job.id,
+            from_role: "daemon",
+            to_role: "user",
+            kind: "escalation",
+            body: verifyOutcome.message,
+          });
+          return err(req.id, verifyOutcome.code, verifyOutcome.message);
         }
         setStatus(req.params.job_id, "done");
         createMsg({

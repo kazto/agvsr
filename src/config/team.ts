@@ -81,6 +81,33 @@ const WorktreeSchema = z
   })
   .optional();
 
+/**
+ * Independent verification the daemon runs itself before a job may complete
+ * (D43 mechanism B). Opt-in: without this block nothing extra runs.
+ */
+const VerifySchema = z
+  .object({
+    /** Shell command, run in the job worktree and (for a baseline) the checkout. */
+    command: z.string().min(1),
+    /**
+     * Regex whose first group captures how many tests ran. Omit to try the
+     * built-in patterns for bun test, vitest, and jest.
+     */
+    count_pattern: z.string().optional(),
+    /**
+     * `source` (default) measures the checkout and caches per commit; `fixed:<n>`
+     * states the expected count outright; `off` checks only the exit code.
+     */
+    baseline: z.union([z.enum(["source", "off"]), z.string().regex(/^fixed:\d+$/)]).optional(),
+    /** How far below the baseline is tolerated (default 0). */
+    tolerance: z.number().int().nonnegative().optional(),
+    /** Per-run limit in ms (default 900000). */
+    timeout_ms: z.number().int().positive().optional(),
+  })
+  .optional();
+
+export type VerifyConfig = NonNullable<z.infer<typeof VerifySchema>>;
+
 const HooksSchema = z
   .object({
     /** Shell command to run when a job completes successfully (D26). */
@@ -106,6 +133,8 @@ export interface TeamConfig {
   env?: Record<string, string>;
   /** Worktree provisioning policy, including env-file parity (D43). */
   worktree?: z.infer<typeof WorktreeSchema>;
+  /** Independent verification run by the daemon before completion (D43). */
+  verify?: VerifyConfig;
 }
 
 /** Raw shape as authored: `implementation:` may be a single role or an
@@ -120,6 +149,7 @@ const RawTeamSchema = z.object({
    */
   env: z.record(z.string(), z.string()).optional(),
   worktree: WorktreeSchema,
+  verify: VerifySchema,
 });
 
 export const SUPERVISOR = "supervisor";
@@ -186,6 +216,7 @@ export function parseTeam(text: string, format: TeamFormat = "yaml"): TeamConfig
     hooks: parsed.data.hooks,
     env: parsed.data.env,
     worktree: parsed.data.worktree,
+    verify: parsed.data.verify,
   };
   if (Object.keys(team.roles).length === 0) {
     throw new TeamConfigError(`${label} defines no roles.`);
