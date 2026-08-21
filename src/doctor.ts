@@ -289,6 +289,14 @@ export async function runDoctor(
       });
     }
   }
+  if (!options.probe) {
+    modelGroup.checks.push({
+      label: "runtime probe",
+      level: "warn",
+      message:
+        "adapter CLIs were not started; malformed CLI configuration, login failures, and runtime model rejection are only detected by agvsr doctor --probe",
+    });
+  }
 
   // Build adapter → roles map (preserves insertion order = team.yaml order).
   const rolesByAdapter = new Map<Adapter, string[]>();

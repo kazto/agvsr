@@ -6,7 +6,7 @@
  */
 import type { AgentSpec, CliDriver, TurnEvent, TurnResult } from "./types.ts";
 
-const STDERR_TAIL_CAP = 8192;
+const DIAGNOSTIC_TAIL_CAP = 8192;
 
 // These values describe the pane/workspace that launched the daemon. A daemon
 // serves jobs from multiple Herdr workspaces, so blindly inheriting them makes
@@ -150,19 +150,22 @@ export async function runTurn(
 
   const stderrChunks: Uint8Array[] = [];
   let stderrBytes = 0;
+  const stdoutChunks: Uint8Array[] = [];
+  let stdoutBytes = 0;
 
   // Drain stderr concurrently to avoid the process blocking on a full stderr pipe.
   const stderrDrain = (async () => {
     for await (const chunk of proc.stderr as AsyncIterable<Uint8Array>) {
       options.onProgress?.();
       resetIdle();
-      stderrBytes = appendTailChunk(stderrChunks, chunk, STDERR_TAIL_CAP);
+      stderrBytes = appendTailChunk(stderrChunks, chunk, DIAGNOSTIC_TAIL_CAP);
     }
   })();
 
   for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
     options.onProgress?.();
     resetIdle();
+    stdoutBytes = appendTailChunk(stdoutChunks, chunk, DIAGNOSTIC_TAIL_CAP);
     buf += decoder.decode(chunk, { stream: true });
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
@@ -203,7 +206,18 @@ export async function runTurn(
       stderrTailBytes.set(chunk, offset);
       offset += chunk.length;
     }
-    stderrTail = decoder.decode(stderrTailBytes);
+    stderrTail = new TextDecoder().decode(stderrTailBytes);
+  }
+
+  let stdoutTail: string | undefined;
+  if (stdoutBytes > 0) {
+    const stdoutTailBytes = new Uint8Array(stdoutBytes);
+    let offset = 0;
+    for (const chunk of stdoutChunks) {
+      stdoutTailBytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    stdoutTail = new TextDecoder().decode(stdoutTailBytes);
   }
 
   const sessionId2 =
@@ -220,6 +234,7 @@ export async function runTurn(
       sessionId: sessionId2,
       finalText: parser.finalText(),
       ...(stderrTail ? { stderrTail } : {}),
+      ...(stdoutTail ? { stdoutTail } : {}),
       exitCode,
       timedOut,
       ...(timeoutKind ? { timeoutKind } : {}),
