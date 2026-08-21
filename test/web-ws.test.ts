@@ -254,6 +254,7 @@ async function setupHarness(): Promise<{
   const oldStore = process.env.AGVSR_STORE;
   const oldSock = process.env.AGVSR_SOCK;
   const oldWorktrees = process.env.AGVSR_WORKTREES;
+  const oldDelegationGuard = process.env.AGVSR_DELEGATION_GUARD;
   mkdirSync(binDir);
   mkdirSync(repo);
   mkdirSync(worktrees);
@@ -266,6 +267,10 @@ async function setupHarness(): Promise<{
   process.env.AGVSR_STORE = db;
   process.env.AGVSR_SOCK = sock;
   process.env.AGVSR_WORKTREES = worktrees;
+  // These tests use msg.send purely to produce stream frames, including two in a
+  // row to the same role. That is exactly what the delegation guard (D44) exists
+  // to refuse, so it is turned off here — this file is about websocket delivery.
+  process.env.AGVSR_DELEGATION_GUARD = "0";
 
   const team = parseTeam(`
 roles:
@@ -327,6 +332,8 @@ roles:
         else process.env.AGVSR_SOCK = oldSock;
         if (oldWorktrees === undefined) delete process.env.AGVSR_WORKTREES;
         else process.env.AGVSR_WORKTREES = oldWorktrees;
+        if (oldDelegationGuard === undefined) delete process.env.AGVSR_DELEGATION_GUARD;
+        else process.env.AGVSR_DELEGATION_GUARD = oldDelegationGuard;
         rmSync(dir, { recursive: true, force: true });
       },
     };
@@ -342,6 +349,8 @@ roles:
     else process.env.AGVSR_SOCK = oldSock;
     if (oldWorktrees === undefined) delete process.env.AGVSR_WORKTREES;
     else process.env.AGVSR_WORKTREES = oldWorktrees;
+    if (oldDelegationGuard === undefined) delete process.env.AGVSR_DELEGATION_GUARD;
+    else process.env.AGVSR_DELEGATION_GUARD = oldDelegationGuard;
     rmSync(dir, { recursive: true, force: true });
     throw err;
   }

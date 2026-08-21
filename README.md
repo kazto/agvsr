@@ -92,6 +92,19 @@ Agents do all their work there, never in your main checkout. This is the core sa
 guarantee — destructive commands an agent might run are confined to the job's
 worktree.
 
+Isolation cuts both ways: a worktree contains only tracked files, so every
+git-ignored environment file is absent from it. Test suites that key off those
+files do not fail there — they quietly run a subset and report success. One
+recorded job reported "293 tests passed" while 236 tests never ran, because the
+project holding every test for the feature under development was excluded by a
+missing `DATABASE_TEST_URL`.
+
+agvsr therefore refuses to create a job while any git-ignored environment file in
+your checkout is undeclared, and names the files in the error. Declare each one
+under `worktree.env_files` as `env`, a list of variable names, `copy`, or
+`ignore` — a one-time decision per repository, made before any agent can run.
+Set `AGVSR_ENV_PARITY=0` to disable the check.
+
 ### Messages
 
 Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite`.
@@ -154,6 +167,17 @@ roles:
 # env:
 #   DATABASE_TEST_URL: "postgresql://user:pass@localhost:5433/app_test"
 
+# How each git-ignored environment file should reach a job. Required: agvsr
+# refuses to create a job while any such file in your checkout is undeclared,
+# because a worktree holds only tracked files and a test suite keyed off a
+# missing `.env` reports success instead of failing.
+# worktree:
+#   env_files:
+#     ".env": [DATABASE_TEST_URL]  # pass only these variables (safest)
+#     ".env.test": env             # pass every variable in the file
+#     ".env.ci": copy              # place the file in the worktree
+#     ".env.production": ignore    # jobs here do not need it
+
 # Optional event hooks. Each value is a shell command run via `sh -c`;
 # the event JSON is written to the command's stdin. All keys are optional.
 # hooks:
@@ -175,6 +199,7 @@ Per-role fields:
 | `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default                          |
 | `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default                       |
 | `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
+| `min_delegation_wait_ms` | Supervisor only: how long a delegate gets to start before its silence may be escalated (default `300000`) |
 | `env`             | Extra environment for this role's agent, merged over the team-level `env`         |
 
 The team must define a `supervisor` role. The daemon's default team file is
@@ -328,6 +353,10 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 | `AGVSR_AUTO_RECLAIM`         | Remove a finished job's clean, fully-merged worktrees; on by default, disable with `0`/`off`    |
 | `AGVSR_SEED_PATHS`           | Ignored dependency dirs seeded into each new worktree (default `node_modules`); `off` disables |
 | `AGVSR_SEED_LINK`            | Hard-link seeded dependencies instead of copying; on by default, disable with `0`/`off`        |
+| `AGVSR_ENV_PARITY`           | Refuse `job.create` while a git-ignored env file is undeclared; on by default, disable with `0`/`off` |
+| `AGVSR_REFS_GATE`            | Refuse a worker handoff citing uncommitted artifacts; on by default, disable with `0`/`off`     |
+| `AGVSR_DELEGATION_GUARD`     | Refuse nudging or escalating about a delegate that has not run yet; on by default, disable with `0`/`off` |
+| `AGVSR_MIN_DELEGATION_WAIT_MS` | How long a delegate gets to start before its silence may be escalated (default `300000`)      |
 | `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |
 
 ## Files and locations
