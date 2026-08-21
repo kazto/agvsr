@@ -33,6 +33,7 @@ import {
   type WorktreeAssessment,
   type WorktreeEntry,
 } from "../git/cleanup.ts";
+import { capturingRef } from "../git/checkpoint.ts";
 
 const USAGE = `agvsr ${VERSION}
 
@@ -1110,7 +1111,16 @@ async function main(argv: string[]): Promise<void> {
 
         const assessments = scopedEntries.map((entry) => {
           const match = matchFor(entry);
-          return assessWorktree(entry, match?.job ?? null, mainWorktreePath, match?.baseRef);
+          // A dirty worktree whose state is already parked in a checkpoint ref
+          // (D46) is safe to remove — nothing is discarded with the directory.
+          const parked = match ? capturingRef(entry.path, match.job.id) : null;
+          return assessWorktree(
+            entry,
+            match?.job ?? null,
+            mainWorktreePath,
+            match?.baseRef,
+            parked,
+          );
         });
 
         for (const a of assessments) console.log(formatWorktreeLine(a));

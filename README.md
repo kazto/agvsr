@@ -105,6 +105,14 @@ under `worktree.env_files` as `env`, a list of variable names, `copy`, or
 `ignore` — a one-time decision per repository, made before any agent can run.
 Set `AGVSR_ENV_PARITY=0` to disable the check.
 
+After every turn, whatever the worktree holds uncommitted is parked as a commit
+under `refs/agvsr/checkpoints/<job>/<role>/<turn>`, off any branch. No agent
+cooperation and no tokens are involved. Removing a worktree — by `agvsr cleanup`
+or automatic reclamation — therefore discards nothing, and a dirty worktree
+whose state is already parked is reclaimable instead of piling up as
+NEEDS_REVIEW. Recover with `git show <ref>` or
+`git restore --source <ref> -- .`. Set `AGVSR_CHECKPOINTS=0` to disable.
+
 ### Messages
 
 Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite`.
@@ -356,6 +364,7 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 | `AGVSR_ENV_PARITY`           | Refuse `job.create` while a git-ignored env file is undeclared; on by default, disable with `0`/`off` |
 | `AGVSR_REFS_GATE`            | Refuse a worker handoff citing uncommitted artifacts; on by default, disable with `0`/`off`     |
 | `AGVSR_DELEGATION_GUARD`     | Refuse nudging or escalating about a delegate that has not run yet; on by default, disable with `0`/`off` |
+| `AGVSR_CHECKPOINTS`          | Park each turn's uncommitted worktree state under a ref; on by default, disable with `0`/`off`  |
 | `AGVSR_MIN_DELEGATION_WAIT_MS` | How long a delegate gets to start before its silence may be escalated (default `300000`)      |
 | `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |
 

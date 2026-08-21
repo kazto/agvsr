@@ -19,6 +19,7 @@ import {
   unresolvedEnvFiles,
 } from "../git/env-parity.ts";
 import { refsGateEnabled, refsGateMessage, uncommittedRefs } from "../git/refs-gate.ts";
+import { checkpointRef, checkpointsEnabled, createCheckpoint } from "../git/checkpoint.ts";
 import { Store } from "./store.ts";
 import {
   allowedTargets,
@@ -907,22 +908,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     ];
 
     const removed: string[] = [];
+    /** Removed worktrees that held uncommitted work, and where it now lives. */
+    const parked: string[] = [];
     for (const t of targets) {
       if (!t.path || t.path === mainWorktree) continue;
       if (!existsSync(t.path)) continue;
+      const checkpoint = store.latestCheckpointFor(t.path);
       const assessment = assessWorktree(
         { path: t.path, branch: t.branch },
         job,
         mainWorktree,
         t.baseRef,
+        checkpoint?.ref ?? null,
       );
       if (assessment.classification !== "SAFE_TO_REMOVE") {
         debug("worktree kept", { job: jobId, path: t.path, reason: assessment.reason });
         continue;
       }
       if (!git(mainWorktree, ["worktree", "remove", "--force", t.path]).ok) continue;
+      // The branch can go: a checkpoint commit keeps its own history reachable
+      // through the checkpoint ref, which is not tied to any branch.
       if (t.branch) git(mainWorktree, ["branch", "-D", t.branch]);
       removed.push(t.path);
+      if (assessment.dirty && checkpoint) parked.push(`${t.path} → ${checkpoint.ref}`);
     }
 
     if (removed.length === 0) return;
@@ -935,6 +943,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       body:
         `Reclaimed ${removed.length} worktree(s) for this finished job (clean and fully ` +
         `merged):\n${removed.map((p) => `  ${p}`).join("\n")}\n` +
+        (parked.length > 0
+          ? `\nUncommitted work in these was parked first — recover with ` +
+            `\`git restore --source <ref> -- .\` or \`git show <ref>\`:\n` +
+            `${parked.map((p) => `  ${p}`).join("\n")}\n`
+          : "") +
         `Set AGVSR_AUTO_RECLAIM=0 to keep them instead.`,
     });
   };
@@ -1000,6 +1013,36 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       `Escalating now would ask the human to fix something that has not had a chance to`,
       `happen. Use agvsr_wait to park the job, or escalate again once the window passes.`,
     ].join("\n");
+  };
+
+  /**
+   * Park a turn's uncommitted worktree state under a checkpoint ref (D46).
+   * Best effort: a checkpoint that cannot be taken must never fail the turn
+   * that produced the work, so every failure here is logged and dropped.
+   */
+  const checkpointWorktree = (job: Job, role: string, worktree: string): void => {
+    if (!checkpointsEnabled()) return;
+    // job.cwd is the human's checkout; only a provisioned worktree is ours to
+    // snapshot, and a job without one has nothing isolated to lose.
+    if (!job.worktree || worktree === job.cwd) return;
+    try {
+      const turn = store.lastCheckpointTurn(job.id, role) + 1;
+      const ref = checkpointRef(job.id, role, turn);
+      const checkpoint = createCheckpoint(worktree, ref);
+      if (!checkpoint) return; // clean worktree, or git declined
+      store.recordCheckpoint({
+        job_id: job.id,
+        role,
+        worktree,
+        turn,
+        ref,
+        sha: checkpoint.sha,
+        tree: checkpoint.tree,
+      });
+      debug("checkpoint", { job: job.id, role, turn, ref, sha: checkpoint.sha });
+    } catch (e) {
+      debug("checkpoint failed", { job: job.id, role, error: (e as Error).message });
+    }
   };
 
   const notifyWatchers = (msg: Message): void => {
@@ -1237,6 +1280,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     // Recorded before the kill check below, like usage above: the turn ran, and
     // the delegation guard must not keep treating this role as never-started.
     lastTurnEndedAt.set(`${job.id}:${role}`, Date.now());
+
+    // Park whatever the turn left uncommitted (D46). Ahead of the kill check on
+    // purpose: a turn cut short mid-edit is exactly when the work is most at
+    // risk, and a killed job's worktree is reclaimed like any other.
+    checkpointWorktree(job, role, effectiveCwd);
 
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
 

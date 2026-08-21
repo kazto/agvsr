@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS turn_usage (
   created_at         TEXT NOT NULL,
   FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
+CREATE TABLE IF NOT EXISTS job_checkpoints (
+  id         TEXT PRIMARY KEY,
+  job_id     TEXT NOT NULL,
+  role       TEXT NOT NULL,
+  worktree   TEXT NOT NULL,
+  turn       INTEGER NOT NULL,          -- 1-based, per (job, role)
+  ref        TEXT NOT NULL,             -- refs/agvsr/checkpoints/<job>/<role>/<turn>
+  sha        TEXT NOT NULL,
+  tree       TEXT NOT NULL,             -- worktree state identity, compared by cleanup (D46)
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_job_checkpoints_job ON job_checkpoints(job_id, role, turn);
+CREATE INDEX IF NOT EXISTS idx_job_checkpoints_worktree ON job_checkpoints(worktree, turn);
 CREATE INDEX IF NOT EXISTS idx_turn_usage_job ON turn_usage(job_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_turn_usage_created_at ON turn_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_job ON messages(job_id, created_at);
@@ -328,6 +342,58 @@ export class Store {
     return this.db
       .query(`SELECT job_id, role, worktree, branch FROM job_role_worktrees`)
       .all() as RoleWorktree[];
+  }
+
+  /**
+   * Record a turn-end worktree checkpoint (D46). Returns the turn number used,
+   * which is per (job, role) and is what names the ref.
+   */
+  recordCheckpoint(input: {
+    job_id: string;
+    role: string;
+    worktree: string;
+    turn: number;
+    ref: string;
+    sha: string;
+    tree: string;
+  }): void {
+    this.db
+      .query(
+        `INSERT INTO job_checkpoints (id, job_id, role, worktree, turn, ref, sha, tree, created_at)
+         VALUES ($id, $job_id, $role, $worktree, $turn, $ref, $sha, $tree, $created_at)`,
+      )
+      .run({
+        $id: randomUUID(),
+        $job_id: input.job_id,
+        $role: input.role,
+        $worktree: input.worktree,
+        $turn: input.turn,
+        $ref: input.ref,
+        $sha: input.sha,
+        $tree: input.tree,
+        $created_at: now(),
+      });
+  }
+
+  /** Highest turn number checkpointed for a (job, role); 0 when none. */
+  lastCheckpointTurn(jobId: string, role: string): number {
+    const row = this.db
+      .query(
+        `SELECT MAX(turn) AS turn FROM job_checkpoints WHERE job_id = $job_id AND role = $role`,
+      )
+      .get({ $job_id: jobId, $role: role }) as { turn: number | null } | null;
+    return row?.turn ?? 0;
+  }
+
+  /** Newest checkpoint taken for a worktree path, or null if it has none. */
+  latestCheckpointFor(worktree: string): { ref: string; sha: string; tree: string } | null {
+    const row = this.db
+      .query(
+        `SELECT ref, sha, tree FROM job_checkpoints WHERE worktree = $worktree
+         ORDER BY turn DESC LIMIT 1`,
+      )
+      .get({ $worktree: worktree }) as { ref: string; sha: string; tree: string } | null;
+    return row ?? null;
   }
 
   /** Record one turn's accounting (D32). Turns whose CLI reported nothing are

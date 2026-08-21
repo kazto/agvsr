@@ -371,10 +371,23 @@ design は自分でコミットして再送する。人間の介入は発生し�
 各ロールのターン終了時、そのロールの実効 worktree が dirty なら、デーモンが
 **作業ツリーの状態を専用 ref に退避**する。ジョブブランチには触れない。
 
+**`git stash create` は使えない(実装時に判明)。** `git stash create` は
+**追跡済みの変更しか拾わない**。本機構が守るべき対象そのもの — `git add` されて
+いない設計文書 — を取りこぼす。実測でも untracked な `design.md` は空の結果に
+なった。代わりに使い捨て index 経由でツリーを組む:
+
 ```
-git stash create                      # コミットを作るが、どのブランチにも乗せない
-git update-ref refs/agvsr/checkpoints/<job>/<role>/<n> <sha>
+GIT_INDEX_FILE=<tmp> git read-tree HEAD
+GIT_INDEX_FILE=<tmp> git add -A          # untracked も含む。ignored は除外
+GIT_INDEX_FILE=<tmp> git write-tree      # → tree
+git commit-tree <tree> -p HEAD -m ...    # → commit(どのブランチにも乗らない)
+git update-ref refs/agvsr/checkpoints/<job>/<role>/<n> <commit>
 ```
+
+作業ツリーと実 index には一切触れない(エージェントが意図して stage した内容を
+壊さない)。`--force` を付けないので `node_modules` 等の ignored は入らない。
+linked worktree で作った `refs/agvsr/...` は ref ストアが共有されるため、
+worktree 削除後も main 側から参照できる(実測確認済み)。
 
 - エージェントの協力もトークン消費も不要。デーモンが git を叩くだけ。
 - ジョブブランチの履歴を汚さない。エージェントの中途状態がコミットとして混ざらない。
@@ -395,6 +408,13 @@ git update-ref refs/agvsr/checkpoints/<job>/<role>/<n> <sha>
 なお `growllover-96--implementation-1` のように **main より 89 コミット先行**する
 worktree は別問題(未マージ)であり、`SAFE_TO_REMOVE` にはならない。
 これは正しい挙動なので変更しない。
+
+**適用経路は主に失敗ジョブである(実装時に判明)。** dirty な worktree のまま
+`job.complete` を呼んでも既存の commit gate が `commit_required` で止めるので、
+「dirty のまま完了して回収される」経路は存在しない。チェックポイントは
+commit gate を迂回させるものではない(その性質をテストで固定した)。実際に
+worktree が滞留したのは `job.complete` に到達しない**失敗ジョブ**であり、
+機構 C が効くのはそこである。報告の 53 個も失敗ジョブ由来と一致する。
 
 ### 5.5 既存 commit gate との関係
 
