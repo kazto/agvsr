@@ -118,6 +118,22 @@ id such as `D-1`; approval freezes its text hash. A rework instruction must name
 it may change, and a later handoff that changes or removes any other approved decision is
 rejected before review. Set `AGVSR_DECISION_LEDGER=0` to disable.
 
+Declaring a `verify` command adds one more check: before a job may complete, the
+daemon runs that command in the worktree itself and compares how many tests ran
+against how many your checkout runs. A completing turn's claim that tests pass is
+never read. A suite that shrinks and stays green — the general form of the missing
+`.env` above — is refused rather than accepted. This costs a second run of the
+suite, so it is opt-in.
+
+```yaml
+verify:
+  command: "bun run test:run"
+  # baseline: source (default, measured from your checkout and cached per commit),
+  #           fixed:530, or off (exit code only)
+  # count_pattern: 'Tests\s+[^\n]*\((\d+)\)'   # omit for bun test / vitest / jest
+  # tolerance: 0
+```
+
 ### Messages
 
 Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite`.
@@ -371,6 +387,7 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 | `AGVSR_DELEGATION_GUARD`       | Refuse nudging or escalating about a delegate that has not run yet; on by default, disable with `0`/`off`      |
 | `AGVSR_CHECKPOINTS`            | Park each turn's uncommitted worktree state under a ref; on by default, disable with `0`/`off`                 |
 | `AGVSR_DECISION_LEDGER`        | Freeze approved `D-n` design decisions outside an explicit rework scope; on by default, disable with `0`/`off` |
+| `AGVSR_VERIFY_GATE`            | Run the team's `verify` command before completion; on by default (no-op without `verify`), disable with `0`/`off` |
 | `AGVSR_MIN_DELEGATION_WAIT_MS` | How long a delegate gets to start before its silence may be escalated (default `300000`)                       |
 | `AGVSR_DEBUG`                  | Enable verbose daemon debug logging                                                                            |
 

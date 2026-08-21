@@ -129,7 +129,10 @@ describe("CLI <-> daemon over local IPC", () => {
     const first = dispatches.at(-1)!;
     expect(first.role).toBe("supervisor");
     expect(first.job.id).toBe(id);
-    expect(first.message).toBe("do a thing");
+    // The goal is delivered intact, behind the daemon's delegation status
+    // block (D44) — only supervisor turns carry that prefix.
+    expect(first.message).toContain("do a thing");
+    expect(first.message).toContain("[agvsr delegation status]");
     expect(first.sessionId).toBeNull();
     expect(first.systemPrompt).toContain("supervisor");
     expect(first.env.AGVSR_ALLOWED!.split(",").sort()).toEqual(
@@ -1280,7 +1283,7 @@ roles:
     }
     for (let i = 0; i < 50 && seen.length < beforeTell + 1; i++) await Bun.sleep(5);
     expect(seen.at(-1)!.role).toBe("supervisor");
-    expect(seen.at(-1)!.message).toBe("please prioritize X");
+    expect(seen.at(-1)!.message).toContain("please prioritize X");
 
     c.close();
     await localDaemon.close();
