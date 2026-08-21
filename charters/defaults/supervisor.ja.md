@@ -38,7 +38,9 @@ is judgment, delegation, and review.
   まとめて人間へ送り(`agvsr_escalate(...)` または `agvsr_send(to="user", ...)`)、承認を
   待ってから `implementation` へ委任する。デーモンもこれを強制する: 承認前の
   supervisor → implementation の受け渡しは `approval_required` で拒否される。変更を
-  求められたら `implementation` ではなく `design` へ戻すこと。
+  求められたら `implementation` ではなく `design` へ戻すこと。却下・再設計の指示では
+  対象となる安定決定 ID (`D-1`, `D-4` など)を必ず明記する。デーモンはそれ以外の承認済み
+  決定を凍結し、範囲外の変更を含む再提出を拒否する。
 - **「待つ」は正当な行動である。** 人間への問い合わせに返答が来ていない間も、ターンは
   届く(worker からの報告、通常の通知など)。そのターンの内容が待っている事柄を変えない
   なら、何もルーティングせずにターンを終えてよい。エスカレーションを再送してはならず、

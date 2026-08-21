@@ -9,6 +9,7 @@
  * branch prefix against job ids) mis-classified nearly every real job as orphaned.
  */
 import { spawnSync } from "node:child_process";
+import { isCapturedAt } from "./checkpoint.ts";
 import type { Job } from "../protocol.ts";
 
 export interface WorktreeEntry {
@@ -59,6 +60,11 @@ export function assessWorktree(
   // main — an instance can be fully reconciled into the job branch long
   // before the job itself is merged to main by the human (D27).
   baseRef: string = "main",
+  // Ref parking this worktree's uncommitted state (D46). Dirty normally means
+  // "unrecoverable if removed", which is why dirty worktrees accumulate — 53 of
+  // 55 in one recorded cleanup. When the dirty state is already in a ref,
+  // removing the directory discards nothing and that reason no longer holds.
+  checkpointRef: string | null = null,
 ): WorktreeAssessment {
   if (job?.status === "running") {
     return {
@@ -90,7 +96,11 @@ export function assessWorktree(
     aheadOfMain = count.ok ? Number(count.stdout) : null;
   }
 
-  if (dirty) {
+  // Only a checkpoint that matches the worktree *as it stands* counts. A stale
+  // one describes an earlier turn, and treating it as cover would discard
+  // whatever changed since.
+  const captured = dirty && !!checkpointRef && isCapturedAt(entry.path, checkpointRef);
+  if (dirty && !captured) {
     return {
       entry,
       job,
@@ -120,6 +130,7 @@ export function assessWorktree(
       reason: `${aheadOfMain} commit(s) not yet merged into ${baseRef}`,
     };
   }
+  const state = captured ? `uncommitted work parked at ${checkpointRef}` : "clean";
   return {
     entry,
     job,
@@ -127,7 +138,7 @@ export function assessWorktree(
     aheadOfMain,
     classification: "SAFE_TO_REMOVE",
     reason: job
-      ? `job ${job.status}, clean, fully merged into ${baseRef}`
-      : "orphaned (no job record), clean, fully merged",
+      ? `job ${job.status}, ${state}, fully merged into ${baseRef}`
+      : `orphaned (no job record), ${state}, fully merged`,
   };
 }

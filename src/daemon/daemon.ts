@@ -10,6 +10,24 @@ import { provisionWorktree } from "../git/worktree.ts";
 import { checkJobCommitGate, recoverableDirtyWorktreeNote } from "../git/commit-gate.ts";
 import { mergeInstanceBranch } from "../git/merge.ts";
 import { assessWorktree, git } from "../git/cleanup.ts";
+import {
+  copyDeclaredEnvFiles,
+  envFileVariables,
+  envParityEnabled,
+  envParityErrorMessage,
+  repoRootOf,
+  unresolvedEnvFiles,
+} from "../git/env-parity.ts";
+import { refsGateEnabled, refsGateMessage, uncommittedRefs } from "../git/refs-gate.ts";
+import {
+  decisionLedgerEnabled,
+  decisionsFromRefs,
+  driftMessage,
+  frozenNotice,
+  mentionedDecisions,
+  outOfScopeDrift,
+} from "../git/decisions.ts";
+import { checkpointRef, checkpointsEnabled, createCheckpoint } from "../git/checkpoint.ts";
 import { Store } from "./store.ts";
 import {
   allowedTargets,
@@ -431,6 +449,22 @@ function turnFailureDiagnostics(
   ].join("\n\n");
 }
 
+/**
+ * Place `copy`-declared environment files into a newly provisioned worktree (D43).
+ * Best effort, like dependency seeding: a file that cannot be placed leaves the
+ * job exactly as it would have been before this existed.
+ */
+function placeDeclaredEnvFiles(cwd: string, worktree: string, team: TeamConfig): void {
+  if (!team.worktree?.env_files) return;
+  const root = repoRootOf(cwd);
+  if (!root) return;
+  try {
+    copyDeclaredEnvFiles(root, worktree, team);
+  } catch (e) {
+    console.error(`[agvsr] env file placement skipped: ${(e as Error).message}`);
+  }
+}
+
 function appendRecoverableDirtyWorktreeNote(
   job: Job,
   reason: string,
@@ -528,6 +562,65 @@ function hasOutstandingIdenticalDelegation(
     }
   }
   return false;
+}
+
+// Delegation guard (D44). A supervisor delegated a design and, 30 seconds later,
+// told the human that design was unresponsive and needed restarting — while
+// design had not yet run a single turn. Nothing was wrong except that nobody had
+// waited. The charter cannot fix this: "wait longer" is a judgement call, and the
+// supervisor was making it from a position of not knowing whether the delegate
+// had started. These guards remove the failure by making the two actions that
+// waste a human round-trip unavailable while the delegate is still starting up.
+const DEFAULT_MIN_DELEGATION_WAIT_MS = 5 * 60 * 1000;
+
+function delegationGuardEnabled(): boolean {
+  const raw = process.env.AGVSR_DELEGATION_GUARD;
+  return !raw || !/^(0|off|false|no)$/i.test(raw.trim());
+}
+
+function minDelegationWaitMs(roleConfig?: import("../config/team.ts").RoleConfig): number {
+  // `!== undefined`, not truthiness: 0 is a valid configured value meaning
+  // "never hold an escalation", and treating it as unset would silently
+  // reinstate the five-minute default the operator just turned off.
+  if (roleConfig?.min_delegation_wait_ms !== undefined) return roleConfig.min_delegation_wait_ms;
+  const raw = process.env.AGVSR_MIN_DELEGATION_WAIT_MS;
+  if (!raw) return DEFAULT_MIN_DELEGATION_WAIT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.floor(parsed)
+    : DEFAULT_MIN_DELEGATION_WAIT_MS;
+}
+
+/**
+ * The supervisor's latest delegation to `to` that `to` has not answered, or null
+ * when the last exchange with that role was a reply.
+ */
+function outstandingDelegation(messages: Message[], to: string): Message | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.from_role === to && m.to_role === SUPERVISOR) return null;
+    if (m.from_role === SUPERVISOR && m.to_role === to && m.kind === "message") return m;
+  }
+  return null;
+}
+
+/** Every unanswered supervisor delegation in the job, by role. */
+function outstandingDelegations(
+  messages: Message[],
+  team: TeamConfig,
+): Array<{ role: string; message: Message }> {
+  const out: Array<{ role: string; message: Message }> = [];
+  for (const role of Object.keys(team.roles)) {
+    if (role === SUPERVISOR) continue;
+    const message = outstandingDelegation(messages, role);
+    if (message) out.push({ role, message });
+  }
+  return out;
+}
+
+function describeAge(fromIso: string, now: number): string {
+  const seconds = Math.max(0, Math.round((now - Date.parse(fromIso)) / 1000));
+  return seconds < 120 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
 }
 
 /**
@@ -727,6 +820,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
   }
   const sessions = new Map<string, Map<string, string | null>>();
   const failureCounts = new Map<string, Map<string, number>>();
+  /**
+   * When each `<jobId>:<role>` last finished a turn (D44). The delegation guard
+   * needs to tell "has not answered" apart from "has not started", and a role
+   * that has never produced a turn is the only case the guard acts on.
+   */
+  const lastTurnEndedAt = new Map<string, number>();
   // Loop/no-progress watchdog state (D14)
   const noProgressCounts = new Map<string, Map<string, number>>();
   const loopFingerprints = new Map<string, Map<string, { fp: string; count: number }>>();
@@ -817,22 +916,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
     ];
 
     const removed: string[] = [];
+    /** Removed worktrees that held uncommitted work, and where it now lives. */
+    const parked: string[] = [];
     for (const t of targets) {
       if (!t.path || t.path === mainWorktree) continue;
       if (!existsSync(t.path)) continue;
+      const checkpoint = store.latestCheckpointFor(t.path);
       const assessment = assessWorktree(
         { path: t.path, branch: t.branch },
         job,
         mainWorktree,
         t.baseRef,
+        checkpoint?.ref ?? null,
       );
       if (assessment.classification !== "SAFE_TO_REMOVE") {
         debug("worktree kept", { job: jobId, path: t.path, reason: assessment.reason });
         continue;
       }
       if (!git(mainWorktree, ["worktree", "remove", "--force", t.path]).ok) continue;
+      // The branch can go: a checkpoint commit keeps its own history reachable
+      // through the checkpoint ref, which is not tied to any branch.
       if (t.branch) git(mainWorktree, ["branch", "-D", t.branch]);
       removed.push(t.path);
+      if (assessment.dirty && checkpoint) parked.push(`${t.path} → ${checkpoint.ref}`);
     }
 
     if (removed.length === 0) return;
@@ -845,8 +951,106 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
       body:
         `Reclaimed ${removed.length} worktree(s) for this finished job (clean and fully ` +
         `merged):\n${removed.map((p) => `  ${p}`).join("\n")}\n` +
+        (parked.length > 0
+          ? `\nUncommitted work in these was parked first — recover with ` +
+            `\`git restore --source <ref> -- .\` or \`git show <ref>\`:\n` +
+            `${parked.map((p) => `  ${p}`).join("\n")}\n`
+          : "") +
         `Set AGVSR_AUTO_RECLAIM=0 to keep them instead.`,
     });
+  };
+
+  /**
+   * Variables from `env`-declared files for a job's cwd (D43). The repo root is
+   * cached because this runs on every turn; the file contents deliberately are
+   * not, so a value the human corrects mid-job reaches the next turn.
+   */
+  const repoRootCache = new Map<string, string | null>();
+  const envFileVarsFor = (cwd: string, jobTeam: TeamConfig): Record<string, string> => {
+    if (!jobTeam.worktree?.env_files) return {};
+    let root = repoRootCache.get(cwd);
+    if (root === undefined) {
+      root = repoRootOf(cwd);
+      repoRootCache.set(cwd, root);
+    }
+    if (!root) return {};
+    try {
+      return envFileVariables(root, jobTeam);
+    } catch (e) {
+      debug("env file read failed", { cwd, error: (e as Error).message });
+      return {};
+    }
+  };
+
+  /**
+   * Why a supervisor escalation to the human is premature, or null to let it
+   * through (D44).
+   *
+   * Deliberately narrow: it fires only while *no* worker has produced a turn in
+   * this job and *every* outstanding delegation is younger than the window. In
+   * that state there is nothing for the human to act on that waiting would not
+   * also resolve. Once any worker has run, or the window passes, escalation is
+   * the supervisor's call again — a genuine question is delayed by at most the
+   * window, never lost.
+   */
+  const prematureEscalation = (job: Job, jobTeam: TeamConfig): string | null => {
+    if (!delegationGuardEnabled()) return null;
+    const pending = outstandingDelegations(store.listMessages(job.id), jobTeam);
+    if (pending.length === 0) return null;
+    for (const role of Object.keys(jobTeam.roles)) {
+      if (role === SUPERVISOR) continue;
+      if (lastTurnEndedAt.has(`${job.id}:${role}`)) return null;
+    }
+    const waitMs = minDelegationWaitMs(jobTeam.roles[SUPERVISOR]);
+    const now = Date.now();
+    const newestFirst = [...pending].sort(
+      (a, b) => Date.parse(b.message.created_at) - Date.parse(a.message.created_at),
+    );
+    const oldest = newestFirst[newestFirst.length - 1]!;
+    if (now - Date.parse(oldest.message.created_at) >= waitMs) return null;
+
+    const ages = newestFirst
+      .map((p) => `  ${p.role}: delegated ${describeAge(p.message.created_at, now)} ago, 0 turns`)
+      .join("\n");
+    return [
+      `No worker has completed a turn yet, and every outstanding delegation is younger`,
+      `than ${Math.round(waitMs / 1000)}s.`,
+      ``,
+      ages,
+      ``,
+      `Escalating now would ask the human to fix something that has not had a chance to`,
+      `happen. Use agvsr_wait to park the job, or escalate again once the window passes.`,
+    ].join("\n");
+  };
+
+  /**
+   * Park a turn's uncommitted worktree state under a checkpoint ref (D46).
+   * Best effort: a checkpoint that cannot be taken must never fail the turn
+   * that produced the work, so every failure here is logged and dropped.
+   */
+  const checkpointWorktree = (job: Job, role: string, worktree: string): void => {
+    if (!checkpointsEnabled()) return;
+    // job.cwd is the human's checkout; only a provisioned worktree is ours to
+    // snapshot, and a job without one has nothing isolated to lose.
+    if (!job.worktree || worktree === job.cwd) return;
+    try {
+      const turn = store.lastCheckpointTurn(job.id, role) + 1;
+      const ref = checkpointRef(job.id, role, turn);
+      const checkpoint = createCheckpoint(worktree, ref);
+      if (!checkpoint) return; // clean worktree, or git declined
+      store.recordCheckpoint({
+        job_id: job.id,
+        role,
+        worktree,
+        turn,
+        ref,
+        sha: checkpoint.sha,
+        tree: checkpoint.tree,
+      });
+      debug("checkpoint", { job: job.id, role, turn, ref, sha: checkpoint.sha });
+    } catch (e) {
+      debug("checkpoint failed", { job: job.id, role, error: (e as Error).message });
+    }
   };
 
   const notifyWatchers = (msg: Message): void => {
@@ -1034,7 +1238,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         idleTimeoutMs: idleMs,
         onProgress: () => lastProgressAt.set(key, Date.now()),
         env: {
-          // Team/role env first: job-invariant host facts (a test DB URL, a token)
+          // Variables read out of `env`-declared files (D43) sit lowest: they
+          // reconstruct what the human's shell would have provided, and an
+          // explicit team.yaml value is a deliberate choice that outranks them.
+          ...envFileVarsFor(job.cwd, jobTeam),
+          // Team/role env next: job-invariant host facts (a test DB URL, a token)
           // belong in team.yaml so each job stops rediscovering them and relaying
           // them through the human. agvsr's own variables are applied after, so a
           // config mistake cannot unwire the MCP shim.
@@ -1076,6 +1284,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         usage: result.outcome.usage,
       });
     }
+
+    // Recorded before the kill check below, like usage above: the turn ran, and
+    // the delegation guard must not keep treating this role as never-started.
+    lastTurnEndedAt.set(`${job.id}:${role}`, Date.now());
+
+    // Park whatever the turn left uncommitted (D46). Ahead of the kill check on
+    // purpose: a turn cut short mid-edit is exactly when the work is most at
+    // risk, and a killed job's worktree is reclaimed like any other.
+    checkpointWorktree(job, role, effectiveCwd);
 
     setSession(job.id, role, result.outcome.sessionId ?? sessionId);
 
@@ -1540,6 +1757,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           );
         }
 
+        // Environment parity (D43). Runs before the job row exists: a worktree
+        // holds only tracked files, so a test suite keyed off an ignored `.env`
+        // silently runs a subset there and reports success. Refusing here — the
+        // one place no agent has started yet — is what makes that unfakeable.
+        if (envParityEnabled()) {
+          const parityRoot = repoRootOf(normalizedCwd);
+          if (parityRoot) {
+            const unresolved = unresolvedEnvFiles(parityRoot, jobTeam);
+            if (unresolved.length > 0) {
+              return err(
+                req.id,
+                "env_parity_required",
+                envParityErrorMessage(parityRoot, unresolved),
+              );
+            }
+          }
+        }
+
         // Resolve the herdr workspace label as an additional identifier (D30).
         // Best-effort: an unreachable/unknown herdr server just leaves the name
         // unset, it never blocks job creation.
@@ -1560,6 +1795,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           if (worktree) {
             store.setJobWorktree(job.id, worktree);
             job.worktree = worktree;
+            placeDeclaredEnvFiles(normalizedCwd, worktree, jobTeam);
           }
         } catch (e) {
           setStatus(job.id, "failed");
@@ -1591,6 +1827,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
               );
               if (instanceWorktree) {
                 store.setRoleWorktree(job.id, instanceRole, instanceWorktree, instanceBranch);
+                placeDeclaredEnvFiles(normalizedCwd, instanceWorktree, jobTeam);
               }
             } catch (e) {
               setStatus(job.id, "failed");
@@ -1688,12 +1925,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         const noTeam = requireTeam(req.id);
         if (noTeam) return noTeam;
         const { from, job_id, to, body, refs } = req.params;
+        let routedBody = body;
+        let reworkScope: string[] | null = null;
         const job = store.getJob(job_id);
         if (!job) return err(req.id, "not_found", `no job ${job_id}`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
         const routingTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!isAllowed(routingTeam, from, to))
           return err(req.id, "forbidden", `${from} may not send to ${to}`);
+        // Same guard as msg.escalate: reaching the human directly is the same
+        // act, and leaving this path open would make the other one decorative.
+        if (from === SUPERVISOR && to === "user") {
+          const premature = prematureEscalation(job, routingTeam);
+          if (premature) return err(req.id, "delegation_still_starting", premature);
+        }
         const history = store.listMessages(job_id);
         if (from === SUPERVISOR && to === "qa" && !lastDesignHandoff(history)) {
           return err(
@@ -1702,12 +1947,94 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             "qa may only be delegated after design has handed a design to the supervisor",
           );
         }
-        if (hasOutstandingIdenticalDelegation(history, from, to, body)) {
+        // Handoff artifact gate (D46). A worker citing artifacts must have
+        // committed them: uncommitted work cannot be merged, blocks worktree
+        // reclamation, and is lost outright if the job never reaches completion
+        // (where the only existing commit check lives).
+        if (refsGateEnabled() && to === SUPERVISOR && from !== SUPERVISOR) {
+          const senderWt = store.getRoleWorktree(job_id, from);
+          const worktree = senderWt?.worktree ?? job.worktree;
+          const branch = senderWt?.branch ?? job.branch;
+          if (worktree) {
+            if (from === "design" && (!refs || refs.length === 0)) {
+              return err(
+                req.id,
+                "design_refs_required",
+                `A design handoff must cite the design artifacts in refs, so they can be ` +
+                  `checked in, approved as a set, and re-checked when the design is revised.`,
+              );
+            }
+            const problems = refs?.length ? uncommittedRefs(worktree, refs) : [];
+            if (problems.length > 0) {
+              return err(req.id, "refs_uncommitted", refsGateMessage(from, branch, problems));
+            }
+          }
+        }
+        // Decision ledger (D45). Stable decision ids turn an approved design
+        // into mechanically checkable state instead of prose the supervisor
+        // must remember across every rework round.
+        if (decisionLedgerEnabled() && from === "design" && to === SUPERVISOR) {
+          const senderWt = store.getRoleWorktree(job_id, from);
+          const worktree = senderWt?.worktree ?? job.worktree;
+          const decisions = worktree && refs?.length ? decisionsFromRefs(worktree, refs) : [];
+          if (worktree && decisions.length === 0) {
+            return err(
+              req.id,
+              "design_decisions_unparseable",
+              `The design handoff contains no decision entries. Each decision must start ` +
+                `with a stable id, for example "D-1: keep the access TTL at 24h".`,
+            );
+          }
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = store.listDesignReworkScope(job_id);
+            const drift = outOfScopeDrift(approved, decisions, scope);
+            if (drift.length > 0) {
+              return err(req.id, "approved_decision_reverted", driftMessage(drift, scope));
+            }
+          }
+        }
+        if (decisionLedgerEnabled() && from === SUPERVISOR && to === "design") {
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = mentionedDecisions(body);
+            if (scope.length === 0) {
+              return err(
+                req.id,
+                "rework_scope_required",
+                `A rework instruction must name the decision ids to change ` +
+                  `(for example "revise D-1 and D-4; leave the rest unchanged").`,
+              );
+            }
+            reworkScope = scope;
+            routedBody += frozenNotice(approved, scope);
+          }
+        }
+        if (hasOutstandingIdenticalDelegation(history, from, to, routedBody)) {
           return err(
             req.id,
             "duplicate_delegation",
             `an identical ${from} -> ${to} delegation is still awaiting a response`,
           );
+        }
+        // Delegation guard (D44). Nudging a delegate that has not run yet cannot
+        // change anything: the message only queues behind the turn already
+        // starting. The existing duplicate check compares message bodies, so a
+        // reworded nudge ("進捗確認です") walked straight past it; this one does
+        // not read the body at all.
+        if (delegationGuardEnabled() && from === SUPERVISOR && to !== "user") {
+          const pending = outstandingDelegation(history, to);
+          const endedAt = lastTurnEndedAt.get(`${job_id}:${to}`);
+          if (pending && (endedAt === undefined || endedAt < Date.parse(pending.created_at))) {
+            return err(
+              req.id,
+              "delegate_not_started",
+              `${to} has not completed a turn since you delegated to it ` +
+                `(${describeAge(pending.created_at, Date.now())} ago). Sending it another ` +
+                `message now cannot change anything. Use agvsr_wait to park the job until ` +
+                `it reports back.`,
+            );
+          }
         }
         // Design-approval gate: hold supervisor → implementation until the human approves
         // the design. Only engages once a design handoff exists (jobs that skip design are
@@ -1735,18 +2062,22 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
             );
           }
         }
+        if (reworkScope) {
+          store.setDesignReworkScope(job_id, reworkScope);
+          store.clearDesignApproval(job_id);
+        }
         const msg = createMsg({
           job_id,
           from_role: from,
           to_role: to,
           kind: "message",
-          body,
+          body: routedBody,
           refs,
         });
         if (to !== "user") {
-          enqueueDispatch(job, to, body);
+          enqueueDispatch(job, to, routedBody);
         } else if (from === SUPERVISOR) {
-          hook("on_supervisor_message", { event: "supervisor_message", job_id, body });
+          hook("on_supervisor_message", { event: "supervisor_message", job_id, body: routedBody });
         }
         return ok(req.id, { queued: true, message: msg });
       }
@@ -1761,6 +2092,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
           return err(req.id, "bad_request", "escalation reason must not be empty");
         const escalationTeam = jobTeamSnapshots.get(job_id) ?? team!;
         if (!escalationTeam.roles[from]) return err(req.id, "forbidden", `unknown role ${from}`);
+        if (from === SUPERVISOR) {
+          const premature = prematureEscalation(job, escalationTeam);
+          if (premature) return err(req.id, "delegation_still_starting", premature);
+        }
         // Worker escalations go to the supervisor; a supervisor escalation goes to the human
         // (routing it back to itself would be a no-op self-loop). This is the approval/blocker
         // channel the design-approval flow relies on.
@@ -1999,6 +2334,42 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         if (job.status !== "running")
           return err(req.id, "bad_request", `job ${job_id} is not running (status: ${job.status})`);
         if (!body?.trim()) return err(req.id, "bad_request", "message body must not be empty");
+        const verdict = approvalVerdict(body);
+        if (decisionLedgerEnabled() && verdict === "reject") {
+          const approved = store.listDesignDecisions(job_id);
+          if (approved.length > 0) {
+            const scope = mentionedDecisions(body);
+            if (scope.length === 0) {
+              return err(
+                req.id,
+                "rework_scope_required",
+                `A design rejection must name the decision ids to change ` +
+                  `(for example "revise D-1 and D-4; leave the rest unchanged").`,
+              );
+            }
+            store.setDesignReworkScope(job_id, scope);
+          }
+        }
+        let approvedDesign:
+          | { refs: string[]; decisions: ReturnType<typeof decisionsFromRefs> }
+          | undefined;
+        if (verdict === "approve") {
+          const design = lastDesignHandoff(store.listMessages(job_id));
+          if (design) {
+            const designRefs = refsOf(design);
+            const designWt = store.getRoleWorktree(job_id, "design");
+            const worktree = designWt?.worktree ?? job.worktree;
+            const decisions = worktree ? decisionsFromRefs(worktree, designRefs) : [];
+            if (decisionLedgerEnabled() && worktree && decisions.length === 0) {
+              return err(
+                req.id,
+                "design_decisions_unparseable",
+                "The design being approved contains no stable D-n decision entries.",
+              );
+            }
+            approvedDesign = { refs: designRefs, decisions };
+          }
+        }
         const msg = createMsg({
           job_id,
           from_role: "user",
@@ -2009,10 +2380,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Dae
         // The human's verdict on the design is latched onto the job here rather than
         // re-read from the tail of the log later, so a later unrelated message ("here is
         // the test DB URL") cannot silently revoke it.
-        const verdict = approvalVerdict(body);
         if (verdict === "approve") {
-          const design = lastDesignHandoff(store.listMessages(job_id));
-          if (design) store.setDesignApproval(job_id, msg.created_at, refsOf(design));
+          if (approvedDesign) {
+            store.setDesignApproval(job_id, msg.created_at, approvedDesign.refs);
+            if (decisionLedgerEnabled() && approvedDesign.decisions.length > 0) {
+              store.replaceDesignDecisions(job_id, msg.created_at, approvedDesign.decisions);
+            }
+          }
         } else if (verdict === "reject") {
           store.clearDesignApproval(job_id);
         }

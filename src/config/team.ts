@@ -35,6 +35,11 @@ const RoleSchema = z.object({
   /** No-progress turn time limit in ms (overrides env/default). */
   idle_timeout_ms: z.number().int().positive().optional(),
   /**
+   * How long this role must let a delegate start before it may escalate the
+   * delegate's silence to the human (D44). Only meaningful on the supervisor.
+   */
+  min_delegation_wait_ms: z.number().int().nonnegative().optional(),
+  /**
    * Opt-in network access inside the adapter's sandbox (currently only
    * codex's `sandbox_workspace_write.network_access` respects this; other
    * adapters ignore it). Default false keeps the existing network-denied
@@ -49,6 +54,32 @@ const RoleSchema = z.object({
    */
   env: z.record(z.string(), z.string()).optional(),
 });
+
+/**
+ * What a job should do with one git-ignored environment file (D43).
+ *
+ * A key list is the safe form of `env`: a whole `.env` can carry variables
+ * that change behaviour unrelated to the job, so naming the ones that matter
+ * keeps the blast radius to what was intended.
+ */
+const EnvFileDispositionSchema = z.union([
+  z.enum(["env", "copy", "ignore"]),
+  z.array(z.string().min(1)).min(1),
+]);
+
+export type EnvFileDisposition = z.infer<typeof EnvFileDispositionSchema>;
+
+const WorktreeSchema = z
+  .object({
+    /**
+     * Disposition per git-ignored environment file, keyed by repo-relative
+     * path. `job.create` refuses to start while any such file in the checkout
+     * is undeclared — see src/git/env-parity.ts for why the check lives
+     * outside the worktree.
+     */
+    env_files: z.record(z.string(), EnvFileDispositionSchema).optional(),
+  })
+  .optional();
 
 const HooksSchema = z
   .object({
@@ -73,6 +104,8 @@ export interface TeamConfig {
   hooks?: z.infer<typeof HooksSchema>;
   /** Environment shared by every role (see RawTeamSchema.env). */
   env?: Record<string, string>;
+  /** Worktree provisioning policy, including env-file parity (D43). */
+  worktree?: z.infer<typeof WorktreeSchema>;
 }
 
 /** Raw shape as authored: `implementation:` may be a single role or an
@@ -86,6 +119,7 @@ const RawTeamSchema = z.object({
    * job does not have to rediscover them and relay them through the human.
    */
   env: z.record(z.string(), z.string()).optional(),
+  worktree: WorktreeSchema,
 });
 
 export const SUPERVISOR = "supervisor";
@@ -151,6 +185,7 @@ export function parseTeam(text: string, format: TeamFormat = "yaml"): TeamConfig
     roles: expandRoles(parsed.data.roles),
     hooks: parsed.data.hooks,
     env: parsed.data.env,
+    worktree: parsed.data.worktree,
   };
   if (Object.keys(team.roles).length === 0) {
     throw new TeamConfigError(`${label} defines no roles.`);

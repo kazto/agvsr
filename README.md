@@ -92,6 +92,32 @@ Agents do all their work there, never in your main checkout. This is the core sa
 guarantee — destructive commands an agent might run are confined to the job's
 worktree.
 
+Isolation cuts both ways: a worktree contains only tracked files, so every
+git-ignored environment file is absent from it. Test suites that key off those
+files do not fail there — they quietly run a subset and report success. One
+recorded job reported "293 tests passed" while 236 tests never ran, because the
+project holding every test for the feature under development was excluded by a
+missing `DATABASE_TEST_URL`.
+
+agvsr therefore refuses to create a job while any git-ignored environment file in
+your checkout is undeclared, and names the files in the error. Declare each one
+under `worktree.env_files` as `env`, a list of variable names, `copy`, or
+`ignore` — a one-time decision per repository, made before any agent can run.
+Set `AGVSR_ENV_PARITY=0` to disable the check.
+
+After every turn, whatever the worktree holds uncommitted is parked as a commit
+under `refs/agvsr/checkpoints/<job>/<role>/<turn>`, off any branch. No agent
+cooperation and no tokens are involved. Removing a worktree — by `agvsr cleanup`
+or automatic reclamation — therefore discards nothing, and a dirty worktree
+whose state is already parked is reclaimable instead of piling up as
+NEEDS_REVIEW. Recover with `git show <ref>` or
+`git restore --source <ref> -- .`. Set `AGVSR_CHECKPOINTS=0` to disable.
+
+Approved designs also have a decision ledger. Each design decision starts with a stable
+id such as `D-1`; approval freezes its text hash. A rework instruction must name the ids
+it may change, and a later handoff that changes or removes any other approved decision is
+rejected before review. Set `AGVSR_DECISION_LEDGER=0` to disable.
+
 ### Messages
 
 Roles communicate through a SQLite-backed inbox at `~/.config/agvsr/inbox.sqlite`.
@@ -154,6 +180,17 @@ roles:
 # env:
 #   DATABASE_TEST_URL: "postgresql://user:pass@localhost:5433/app_test"
 
+# How each git-ignored environment file should reach a job. Required: agvsr
+# refuses to create a job while any such file in your checkout is undeclared,
+# because a worktree holds only tracked files and a test suite keyed off a
+# missing `.env` reports success instead of failing.
+# worktree:
+#   env_files:
+#     ".env": [DATABASE_TEST_URL]  # pass only these variables (safest)
+#     ".env.test": env             # pass every variable in the file
+#     ".env.ci": copy              # place the file in the worktree
+#     ".env.production": ignore    # jobs here do not need it
+
 # Optional event hooks. Each value is a shell command run via `sh -c`;
 # the event JSON is written to the command's stdin. All keys are optional.
 # hooks:
@@ -165,17 +202,18 @@ roles:
 
 Per-role fields:
 
-| Field             | Description                                                                       |
-| ----------------- | --------------------------------------------------------------------------------- |
-| `adapter`         | One of `claude-code`, `codex`, `agy` (required)                                   |
-| `model`           | Raw per-CLI model string (required)                                               |
-| `charter`         | Replace the bundled default charter wholesale                                     |
-| `charter_append`  | Append project rules to the bundled default charter                               |
-| `instances`       | Number of instances of this role (default `1`)                                    |
-| `hard_timeout_ms` | Absolute per-turn time limit, overriding the env/default                          |
-| `idle_timeout_ms` | No-progress per-turn time limit, overriding the env/default                       |
-| `network_access`  | Opt-in sandbox network access (default `false`); only codex currently respects it |
-| `env`             | Extra environment for this role's agent, merged over the team-level `env`         |
+| Field                    | Description                                                                                               |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `adapter`                | One of `claude-code`, `codex`, `agy` (required)                                                           |
+| `model`                  | Raw per-CLI model string (required)                                                                       |
+| `charter`                | Replace the bundled default charter wholesale                                                             |
+| `charter_append`         | Append project rules to the bundled default charter                                                       |
+| `instances`              | Number of instances of this role (default `1`)                                                            |
+| `hard_timeout_ms`        | Absolute per-turn time limit, overriding the env/default                                                  |
+| `idle_timeout_ms`        | No-progress per-turn time limit, overriding the env/default                                               |
+| `network_access`         | Opt-in sandbox network access (default `false`); only codex currently respects it                         |
+| `min_delegation_wait_ms` | Supervisor only: how long a delegate gets to start before its silence may be escalated (default `300000`) |
+| `env`                    | Extra environment for this role's agent, merged over the team-level `env`                                 |
 
 The team must define a `supervisor` role. The daemon's default team file is
 resolved as: explicit `--team` flag → `$AGVSR_TEAM` → `./team.yaml`, falling
@@ -314,21 +352,27 @@ ones and `--poll N` to change the poll interval (milliseconds, minimum 500).
 
 ## Environment variables
 
-| Variable                     | Purpose                                                                                        |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| `AGVSR_TEAM`                 | Default team file path                                                                         |
-| `AGVSR_STORE`                | SQLite store path (default `~/.config/agvsr/inbox.sqlite`)                                     |
-| `AGVSR_SOCK`                 | IPC endpoint (unix socket / named pipe) override                                               |
-| `AGVSR_DESIGN_GATE`          | Design-approval gate before implementation; on by default, disable with `0`/`off`/`false`/`no` |
-| `AGVSR_STALL_TIMEOUT_MS`     | Idle-watchdog threshold for marking a job stalled                                              |
-| `AGVSR_NO_PROGRESS_TURNS`    | No-progress turn limit before intervention                                                     |
-| `AGVSR_LOOP_REPEAT_TURNS`    | Repeated-turn detection threshold                                                              |
-| `AGVSR_MAX_LOOP_ESCALATIONS` | Max loop escalations before giving up                                                          |
-| `AGVSR_MAX_WORKER_FAILURES`  | Max worker failures tolerated                                                                  |
-| `AGVSR_AUTO_RECLAIM`         | Remove a finished job's clean, fully-merged worktrees; on by default, disable with `0`/`off`    |
-| `AGVSR_SEED_PATHS`           | Ignored dependency dirs seeded into each new worktree (default `node_modules`); `off` disables |
-| `AGVSR_SEED_LINK`            | Hard-link seeded dependencies instead of copying; on by default, disable with `0`/`off`        |
-| `AGVSR_DEBUG`                | Enable verbose daemon debug logging                                                            |
+| Variable                       | Purpose                                                                                                        |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `AGVSR_TEAM`                   | Default team file path                                                                                         |
+| `AGVSR_STORE`                  | SQLite store path (default `~/.config/agvsr/inbox.sqlite`)                                                     |
+| `AGVSR_SOCK`                   | IPC endpoint (unix socket / named pipe) override                                                               |
+| `AGVSR_DESIGN_GATE`            | Design-approval gate before implementation; on by default, disable with `0`/`off`/`false`/`no`                 |
+| `AGVSR_STALL_TIMEOUT_MS`       | Idle-watchdog threshold for marking a job stalled                                                              |
+| `AGVSR_NO_PROGRESS_TURNS`      | No-progress turn limit before intervention                                                                     |
+| `AGVSR_LOOP_REPEAT_TURNS`      | Repeated-turn detection threshold                                                                              |
+| `AGVSR_MAX_LOOP_ESCALATIONS`   | Max loop escalations before giving up                                                                          |
+| `AGVSR_MAX_WORKER_FAILURES`    | Max worker failures tolerated                                                                                  |
+| `AGVSR_AUTO_RECLAIM`           | Remove a finished job's clean, fully-merged worktrees; on by default, disable with `0`/`off`                   |
+| `AGVSR_SEED_PATHS`             | Ignored dependency dirs seeded into each new worktree (default `node_modules`); `off` disables                 |
+| `AGVSR_SEED_LINK`              | Hard-link seeded dependencies instead of copying; on by default, disable with `0`/`off`                        |
+| `AGVSR_ENV_PARITY`             | Refuse `job.create` while a git-ignored env file is undeclared; on by default, disable with `0`/`off`          |
+| `AGVSR_REFS_GATE`              | Refuse a worker handoff citing uncommitted artifacts; on by default, disable with `0`/`off`                    |
+| `AGVSR_DELEGATION_GUARD`       | Refuse nudging or escalating about a delegate that has not run yet; on by default, disable with `0`/`off`      |
+| `AGVSR_CHECKPOINTS`            | Park each turn's uncommitted worktree state under a ref; on by default, disable with `0`/`off`                 |
+| `AGVSR_DECISION_LEDGER`        | Freeze approved `D-n` design decisions outside an explicit rework scope; on by default, disable with `0`/`off` |
+| `AGVSR_MIN_DELEGATION_WAIT_MS` | How long a delegate gets to start before its silence may be escalated (default `300000`)                       |
+| `AGVSR_DEBUG`                  | Enable verbose daemon debug logging                                                                            |
 
 ## Files and locations
 
